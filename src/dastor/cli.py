@@ -12,7 +12,7 @@ def main(argv: list[str] | None = None) -> int:
     """Run the dastor command line."""
     parser = argparse.ArgumentParser(prog="dastor", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    serve = commands.add_parser("serve", help="serve the spools in a config file")
+    serve = commands.add_parser("serve", help="serve the spool in a config file")
     serve.add_argument("config", help="path to the YAML config")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
@@ -31,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
         from dastor.app import create_app  # noqa: PLC0415
         from dastor.config import Settings  # noqa: PLC0415
 
-        # One process: each would otherwise index and refresh the spools itself.
+        # One process: each would otherwise index and refresh the spool itself.
         app = create_app(Settings.from_yaml(args.config))
         uvicorn.run(app, host=args.host, port=args.port)
     return 0

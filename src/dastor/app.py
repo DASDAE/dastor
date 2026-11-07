@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from dastor import __version__
 from dastor.auth import Authenticator, InvalidKeyError, Principal
-from dastor.catalog import Catalog, ChangedFileError, UnknownSpoolError, View
+from dastor.catalog import Catalog, ChangedFileError, View
 from dastor.config import Settings
 from dastor.query import QueryError, selection
 from dastor.wire import FRAMED_MEDIA_TYPE, PATCH_MEDIA_TYPE, encode_patch, frame
@@ -88,20 +88,74 @@ def _arrow_frame(df: pd.DataFrame) -> Response:
     return Response(sink.getvalue().to_pybytes(), media_type=PATCH_MEDIA_TYPE)
 
 
+def _shown(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Drop the columns empty (null or "") in a caller's rows.
+
+    The index has a column for every attribute of every file, so columns
+    only hidden files fill would otherwise reveal their attribute names.
+    """
+    filled = df.notna() & df.astype("string").ne("").fillna(True)
+    return df.loc[:, filled.any().to_numpy()]
+
+
 def _frame_response(df: pd.DataFrame, format: str) -> Response:
-    """Return a frame in the requested table format."""
+    """Return a frame's shown columns in the requested table format."""
+    df = _shown(df)
     return _arrow_frame(df) if format == "arrow" else _json_frame(df)
 
 
-async def _refresh_forever(catalog: Catalog, name: str, seconds: float) -> None:
-    """Re-index a spool every `seconds`, keeping the old one if that fails."""
+def _json_value(value):
+    """Return a contents value as JSON: times in ISO 8601, durations in seconds."""
+    if isinstance(value, np.datetime64 | pd.Timestamp):
+        return pd.Timestamp(value).isoformat()
+    if isinstance(value, np.timedelta64 | pd.Timedelta):
+        return pd.Timedelta(value).total_seconds()
+    return value.item() if isinstance(value, np.generic) else value
+
+
+def summarize(df: pd.DataFrame) -> dict:
+    """
+    Summarize spool contents: counts, columns, dims and each dim's extent.
+
+    Each dim has one extent per unit its patches use, since bounds in
+    different units can't be compared. Extents span the patches' bounds, so
+    they say nothing about gaps.
+    """
+    df = _shown(df)
+    dims = sorted({str(x) for x in df.get("dims", ())})
+    extents = {}
+    for dim in sorted({y for x in dims for y in x.split(",") if y}):
+        names = [f"{dim}_min", f"{dim}_max", f"{dim}_units"]
+        if not set(names[:2]) <= set(df.columns):
+            continue
+        rows = df.reindex(columns=names)
+        units = rows[names[2]].astype("string")
+        extents[dim] = [
+            {
+                "units": None if pd.isna(unit) else str(unit),
+                "min": _json_value(group[names[0]].min()),
+                "max": _json_value(group[names[1]].max()),
+            }
+            for unit, group in rows.groupby(units, dropna=False, sort=True)
+        ]
+    return {
+        "patches": len(df),
+        "files": int(df["source_path"].nunique()) if len(df) else 0,
+        "columns": list(df.columns),
+        "dims": [x.split(",") for x in dims],
+        "extents": extents,
+    }
+
+
+async def _refresh_forever(catalog: Catalog, seconds: float) -> None:
+    """Re-index the spool every `seconds`, keeping the old index if that fails."""
     while True:
         await asyncio.sleep(seconds)
         try:
-            await anyio.to_thread.run_sync(catalog.refresh, name)
+            await anyio.to_thread.run_sync(catalog.refresh)
         except Exception:
-            msg = "refreshing spool %s failed; still serving the last index"
-            log.exception(msg, name)
+            log.exception("refreshing failed; still serving the last index")
 
 
 def create_app(settings: Settings) -> FastAPI:
@@ -112,13 +166,11 @@ def create_app(settings: Settings) -> FastAPI:
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
-        await anyio.to_thread.run_sync(catalog.open)
-        tasks = [
-            asyncio.create_task(_refresh_forever(catalog, name, seconds))
-            for name, seconds in catalog.refresh_intervals().items()
-        ]
+        await anyio.to_thread.run_sync(catalog.refresh)
+        seconds = settings.spool.refresh_seconds
+        task = seconds and asyncio.create_task(_refresh_forever(catalog, seconds))
         yield
-        for task in tasks:
+        if task:
             task.cancel()
 
     app = FastAPI(title="dastor", version=__version__, lifespan=lifespan)
@@ -136,23 +188,19 @@ def create_app(settings: Settings) -> FastAPI:
     Who = Annotated[Principal, Depends(principal)]
     TableFormat = Annotated[Literal["json", "arrow"], Query()]
 
-    def selected_with_view(name, request, who) -> tuple[View, dc.BaseSpool]:
-        """Return a principal's view of a spool and its patches matching the query."""
+    def selected_with_view(request, who) -> tuple[View, dc.BaseSpool]:
+        """Return a principal's view and its patches matching the query."""
         kwargs = selection(request.query_params.multi_items(), _RESERVED)
-        view = catalog.view(name, who)
+        view = catalog.view(who)
         try:
             return view, view.select(**kwargs)
         except (TypeError, ValueError) as exc:
             # e.g. a malformed time, or text bounding a numeric coordinate
             raise QueryError(str(exc)) from exc
 
-    def selected(name: str, request: Request, who: Principal) -> dc.BaseSpool:
-        """Return the visible patches of a spool matching the query."""
-        return selected_with_view(name, request, who)[1]
-
-    @app.exception_handler(UnknownSpoolError)
-    async def _unknown_spool(request: Request, exc: UnknownSpoolError):
-        return JSONResponse({"detail": f"no spool {exc.args[0]!r}"}, status_code=404)
+    def selected(request: Request, who: Principal) -> dc.BaseSpool:
+        """Return the visible patches matching the query."""
+        return selected_with_view(request, who)[1]
 
     @app.exception_handler(QueryError)
     async def _bad_query(request: Request, exc: QueryError):
@@ -166,49 +214,51 @@ def create_app(settings: Settings) -> FastAPI:
         """Report that the server is up."""
         return {"status": "ok", "version": __version__}
 
-    @app.get("/v1/spools")
-    def spools(who: Who) -> list[str]:
-        """List the spools the caller may read."""
-        return catalog.names(who)
+    @app.get("/v1/summary")
+    def summary(request: Request, who: Who) -> dict:
+        """
+        Summarize the patches matching the query.
 
-    @app.get("/v1/spools/{name}/contents")
-    def contents(name: str, request: Request, who: Who, format: TableFormat = "json"):
+        With no query, that is all the caller may read. Gives counts, the
+        contents columns, the dims and each dim's extent.
+        """
+        return summarize(selected(request, who).get_contents())
+
+    @app.get("/v1/contents")
+    def contents(request: Request, who: Who, format: TableFormat = "json"):
         """
         Return the metadata of the patches matching the query.
 
         Query parameters `<coord>_min`/`<coord>_max` bound coordinates and
         others select attributes, e.g. `?time_min=2020-01-03&tag=public*`.
         """
-        df = selected(name, request, who).get_contents()
+        df = selected(request, who).get_contents()
         return _frame_response(df, format)
 
-    @app.get("/v1/spools/{name}/coverage")
+    @app.get("/v1/coverage")
     def coverage(
-        name: str,
         request: Request,
         who: Who,
         dim: str = "time",
         format: TableFormat = "json",
     ):
         """Return the spans of `dim` the matching patches cover."""
-        df = selected(name, request, who).get_coverage(dim=dim)
+        df = selected(request, who).get_coverage(dim=dim)
         return _frame_response(df, format)
 
-    @app.get("/v1/spools/{name}/gaps")
+    @app.get("/v1/gaps")
     def gaps(
-        name: str,
         request: Request,
         who: Who,
         dim: str = "time",
         format: TableFormat = "json",
     ):
         """Return the gaps in `dim` between the matching patches."""
-        df = selected(name, request, who).get_gaps(dim=dim)
+        df = selected(request, who).get_gaps(dim=dim)
         return _frame_response(df, format)
 
-    @app.get("/v1/spools/{name}/data")
+    @app.get("/v1/data")
     def data(
-        name: str,
         request: Request,
         who: Who,
         format: Annotated[Literal["arrow", "dasdae"], Query()] = "arrow",
@@ -220,7 +270,7 @@ def create_app(settings: Settings) -> FastAPI:
         patch (see `dastor.wire`); `format=dasdae` returns one DASDAE HDF5
         file. No matching data is 204 and too much is 413.
         """
-        view, spool = selected_with_view(name, request, who)
+        view, spool = selected_with_view(request, who)
         if not len(spool):
             return Response(status_code=204)
         limit = settings.limits.max_request_bytes

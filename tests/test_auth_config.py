@@ -37,14 +37,14 @@ def test_config_rejects_bad_values(tmp_path):
 
     def rule(pattern, allow):
         rules = [{"column": "x", "pattern": pattern, "allow": allow}]
-        return {"spools": {"a": {**base, "rules": rules}}}
+        return {"spool": {**base, "rules": rules}}
 
     bad = [
-        {"spools": {"a/b": base}},
         rule("(", ["*"]),
         rule("", ["alice"]),
-        {"spools": {"a": {**base, "typo": 1}}},
-        {"spools": {}, "users": [{"name": "a", "key_sha256": "0" * 64}] * 2},
+        {"spool": {**base, "typo": 1}},
+        {"spool": base, "users": [{"name": "a", "key_sha256": "0" * 64}] * 2},
+        {"spools": {"a": base}},
     ]
     for value in bad:
         with pytest.raises(ValidationError):
@@ -53,8 +53,8 @@ def test_config_rejects_bad_values(tmp_path):
 
 def test_from_yaml(tmp_path):
     path = tmp_path / "config.yaml"
-    path.write_text(f"spools:\n  das:\n    path: {tmp_path}\n")
-    assert Settings.from_yaml(path).spools["das"].path == tmp_path
+    path.write_text(f"spool:\n  path: {tmp_path}\n")
+    assert Settings.from_yaml(path).spool.path == tmp_path
 
 
 def test_new_key_prints_matching_digest(capsys):

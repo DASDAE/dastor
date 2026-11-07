@@ -9,9 +9,6 @@ from typing import Annotated
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
-# Spool names appear in URLs, so keep them to URL-safe characters.
-SpoolName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]+$")]
-
 _ALLOW_PATTERN = re.compile(r"^(\*|user:.+|group:.+)$")
 
 
@@ -64,12 +61,15 @@ class Rule(_Model):
 
 class SpoolConfig(_Model):
     """
-    One served spool: a directory of DAS files and who may read them.
+    The served spool: a directory of DAS files and who may read them.
+
+    Datasets share the directory and are told apart by their attributes or
+    paths (`source_path` is a column rules can match too).
 
     Parameters
     ----------
     path
-        The data directory.
+        The data directory, indexed recursively.
     index
         Where the directory's DASCore index lives, when not in the
         directory itself (e.g. a read-only data mount).
@@ -111,7 +111,7 @@ class Limits(_Model):
 class Settings(_Model):
     """The whole server configuration."""
 
-    spools: dict[SpoolName, SpoolConfig]
+    spool: SpoolConfig
     users: list[User] = []
     limits: Limits = Limits()
 

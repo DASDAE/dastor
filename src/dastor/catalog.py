@@ -1,43 +1,29 @@
-"""The served spools and each principal's view of them."""
+"""The served spool and each principal's view of it."""
 
 from __future__ import annotations
 
 import logging
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import dascore as dc
 
 from dastor.acl import matching_rows, missing_columns, patch_matches, visible_files
 from dastor.auth import Principal
-from dastor.config import Rule, Settings, SpoolConfig
+from dastor.config import Rule, Settings
 
 log = logging.getLogger(__name__)
-
-
-class UnknownSpoolError(KeyError):
-    """Raised for a spool that doesn't exist or the principal can't see."""
 
 
 class ChangedFileError(RuntimeError):
     """Raised when a file no longer matches the rules that granted it."""
 
 
-@dataclass
-class _Entry:
-    """One served spool and the files each principal may see in it."""
-
-    config: SpoolConfig
-    spool: dc.BaseSpool | None = None
-    files: dict[Principal, frozenset[str]] = field(default_factory=dict)
-    lock: threading.Lock = field(default_factory=threading.Lock)
-
-
 @dataclass(frozen=True)
 class View:
     """
-    A principal's access to one spool.
+    A principal's access to the spool.
 
     The visible files are fixed when the view is made, from the contents of
     the last refresh; rows are checked again on every selection and loaded
@@ -68,64 +54,43 @@ class View:
 
 
 class Catalog:
-    """Open the configured spools and hand out access-controlled views."""
+    """Open the configured spool and hand out access-controlled views."""
 
     def __init__(self, settings: Settings):
-        self._entries = {name: _Entry(cfg) for name, cfg in settings.spools.items()}
+        self.config = settings.spool
+        self._rules = tuple(self.config.rules)
+        self._spool: dc.BaseSpool | None = None
+        self._files: dict[Principal, frozenset[str]] = {}
+        self._lock = threading.Lock()
 
-    def open(self) -> None:
-        """Index and open every spool; refuse rules naming missing columns."""
-        for name in self._entries:
-            self.refresh(name)
+    def refresh(self) -> None:
+        """
+        Index the spool's directory and forget what it last made visible.
 
-    def refresh(self, name: str) -> None:
-        """Re-index a spool's directory and forget what it last made visible."""
-        entry = self._entries[name]
-        cfg = entry.config
+        Refuses rules naming columns the contents lack.
+        """
+        cfg = self.config
         spool = dc.spool(cfg.path, index=cfg.index).update()
         contents = spool.get_contents()
-        if len(contents) and (missing := missing_columns(contents, cfg.rules)):
-            msg = f"spool {name!r} rules name columns its contents lack: {missing}"
-            raise ValueError(msg)
-        with entry.lock:
-            entry.spool = spool
-            entry.files = {}
-        log.info("spool %s: %d patches", name, len(contents))
+        if len(contents) and (missing := missing_columns(contents, self._rules)):
+            raise ValueError(f"rules name columns the contents lack: {missing}")
+        with self._lock:
+            self._spool = spool
+            self._files = {}
+        log.info("indexed %d patches", len(contents))
 
-    def names(self, principal: Principal) -> list[str]:
-        """Return the spools any rule grants the principal, sorted."""
-        return sorted(
-            name
-            for name, entry in self._entries.items()
-            if any(principal.granted(x.allow) for x in entry.config.rules)
-        )
-
-    def refresh_intervals(self) -> dict[str, float]:
-        """Return the spools which refresh periodically, with their periods."""
-        return {
-            name: x.config.refresh_seconds
-            for name, x in self._entries.items()
-            if x.config.refresh_seconds is not None
-        }
-
-    def view(self, name: str, principal: Principal) -> View:
+    def view(self, principal: Principal) -> View:
         """
-        Return a principal's view of a spool.
+        Return a principal's view of the spool.
 
         Every request reads through here, so access control has one choke
-        point. A spool no rule grants the principal is reported as unknown,
-        so its existence isn't revealed.
+        point.
         """
-        if name not in self.names(principal):
-            raise UnknownSpoolError(name)
-        entry = self._entries[name]
-        rules = tuple(entry.config.rules)
-        with entry.lock:
-            spool = entry.spool
-            assert spool is not None, "open() runs before requests are served"
-            if (files := entry.files.get(principal)) is None:
+        with self._lock:
+            spool = self._spool
+            assert spool is not None, "refresh() runs before requests are served"
+            if (files := self._files.get(principal)) is None:
                 contents = spool.get_contents()
-                files = entry.files[principal] = visible_files(
-                    contents, rules, principal
-                )
-        return View(spool, files, rules, principal)
+                files = visible_files(contents, self._rules, principal)
+                self._files[principal] = files
+        return View(spool, files, self._rules, principal)
