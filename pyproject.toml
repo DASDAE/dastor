@@ -18,9 +18,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-    # The first DASCore build with `dc.spool(index=...)`; no release has it
+    # The first DASCore build with the ARROW format; no release has it
     # yet, so this installs only from DASCore's dev branch (see README).
-    "dascore>=0.1.24.dev579",
+    "dascore>=0.1.24.dev589",
     "fastapi>=0.115",
     "pyarrow>=19",
     "pydantic>=2.7",

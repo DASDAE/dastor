@@ -236,15 +236,13 @@ wheels = [
 
 [[package]]
 name = "dascore"
-version = "0.1.24.dev579+g97902aac1"
-source = { git = "https://github.com/DASDAE/dascore?branch=dev#97902aac1a84bcd3c48d82f1005efb2d75d99177" }
+version = "0.1.24.dev589+ge40e3706f"
+source = { git = "https://github.com/DASDAE/dascore?branch=dev#e40e3706f194c90f34c6d37c91406c5add99dca6" }
 dependencies = [
     { name = "array-api-compat" },
-    { name = "filelock" },
     { name = "h5py" },
     { name = "matplotlib" },
     { name = "numpy" },
-    { name = "packaging" },
     { name = "pandas" },
     { name = "pint" },
     { name = "pooch" },
@@ -307,15 +305,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/eb/fb/3e954cd19540d69f9547e2577afe73b2eadad2ee47b691376a5b9345c50a/fastapi-0.162.1.tar.gz", hash = "sha256:b18411785f55d05baa296fcfa2901f26728483190e7d8eb8f8e6aa47ed94b030", size = 529173, upload-time = "2026-11-07T11:56:03.769Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5c/06/83c13e92ae48a2cb0e8adfa939a93f5c7165e64f5bff916a3fbf5c59f7fb/fastapi-0.162.1-py3-none-any.whl", hash = "sha256:8107bbfbde522cbd3edcfb32e4923f1786fc52d901ff60a9f724f142df24a648", size = 150728, upload-time = "2026-11-07T11:56:02.09Z" },
-]
-
-[[package]]
-name = "filelock"
-version = "4.2.9"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/a3/1d/d730c664fcb4f1d264a722722a3134cf0881854f73c1fd58abf87572f232/filelock-4.2.9.tar.gz", hash = "sha256:96530b7c538d4ea08493ab067247aab7948c54d8cd622cce711c97cccc5d9896", size = 663116, upload-time = "2026-11-04T18:37:10.014Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/00/05/76184fe08339723d643ab47887a8e4de8f2921ca4e008617ab7490af7857/filelock-4.2.9-py3-none-any.whl", hash = "sha256:a379c50a729e5b68c8519a4d26489f755d9769960a236ecd838190e2a78db2e9", size = 164734, upload-time = "2026-11-04T18:37:08.273Z" },
 ]
 
 [[package]]
