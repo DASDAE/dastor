@@ -9,7 +9,7 @@ description = "Experimental server for distributed acoustic sensing (DAS) data b
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 authors = [{ name = "Derrick Chambers" }]
 classifiers = [
     "Development Status :: 1 - Planning",
@@ -27,7 +27,7 @@ path = "src/dastor/__init__.py"
 
 [tool.ruff]
 line-length = 88
-target-version = "py312"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "D"]
