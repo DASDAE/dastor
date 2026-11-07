@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dastor"
-version = "0.0.1"
+dynamic = ["version"]
 description = "Experimental server for distributed acoustic sensing (DAS) data built on DASCore."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 authors = [{ name = "Derrick Chambers" }]
 classifiers = [
     "Development Status :: 1 - Planning",
@@ -18,3 +18,25 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.15"]
+
+[tool.hatch.version]
+path = "src/dastor/__init__.py"
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
