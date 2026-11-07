@@ -1,10 +1,96 @@
 # dastor
 
-**Experimental.** dastor is an early-stage, experimental package. It does nothing useful yet, and its API will change without notice. Don't depend on it.
+**Experimental.** dastor is an early-stage, experimental package. Its API and wire format will change without notice. Don't depend on it yet.
 
-dastor will be a server for distributed acoustic sensing (DAS) data, similar in spirit to FDSN web services, built on [DASCore](https://github.com/DASDAE/dascore). Planned features:
+dastor is a server for distributed acoustic sensing (DAS) data, similar in spirit to FDSN web services, built on [DASCore](https://github.com/DASDAE/dascore). It serves directories of DAS files: metadata queries backed by DASCore's spool index, and patch data trimmed to the request, with per-file access control.
 
-- Metadata queries backed by DASCore spools and their indexes.
-- High-throughput data transfer over REST and streaming connections.
-- Server-side, file-level access control.
-- Direct file access over HTTP range requests, so a plain DASCore client can open a remote spool from an index.
+## Running a server
+
+dastor needs DASCore's `dev` branch until a DASCore release includes what it uses, so install both from GitHub:
+
+```console
+$ pip install "dascore @ git+https://github.com/DASDAE/dascore@dev" "dastor @ git+https://github.com/DASDAE/dastor"
+```
+
+Then make an API key and write a config:
+
+```console
+$ dastor new-key
+key:        <give this to the user>
+key_sha256: <put this in the config>
+```
+
+```yaml
+spools:
+  das:                          # served at /v1/spools/das
+    path: /data/das             # a directory of DAS files
+    refresh_seconds: 300        # re-index every 5 minutes (omit to index only at start)
+    rules:
+      - column: tag             # a column of the spool contents
+        pattern: "^public"      # a regular expression searched in it
+        allow: ["*"]            # everyone, including anonymous requests
+      - column: station
+        pattern: ".*"
+        allow: ["group:lab"]    # or "user:<name>"
+users:
+  - name: alice
+    key_sha256: <digest from dastor new-key>
+    groups: [lab]
+limits:
+  max_request_bytes: 2147483648 # largest data response, estimated before loading
+  max_concurrent_loads: 4       # patches loading at once
+```
+
+```console
+$ dastor serve config.yaml --host 0.0.0.0 --port 8000
+```
+
+The server runs as one process: it indexes each directory at start (and on its refresh interval), and loads patches in a thread pool.
+
+## Access control
+
+Access is per file. A file is visible to a user only when every patch in it matches a rule granting that user; a file is never partly served. With no rules, a spool is hidden from everyone, and a spool no rule grants a user answers 404 to them, as an unknown spool does. Requests authenticate with `Authorization: Bearer <key>`; requests without the header are anonymous.
+
+## API
+
+| Endpoint | Returns |
+|---|---|
+| `GET /v1/spools` | The spools the caller may read. |
+| `GET /v1/spools/{name}/contents` | Patch metadata (JSON, or `format=arrow`). |
+| `GET /v1/spools/{name}/coverage?dim=time` | The spans of a dimension the patches cover. |
+| `GET /v1/spools/{name}/gaps?dim=time` | The gaps between them. |
+| `GET /v1/spools/{name}/data` | The patches, trimmed to the query (`format=arrow` or `format=dasdae`). |
+| `GET /health` | Server status. |
+
+Query parameters select patches: `<coord>_min` and `<coord>_max` bound a coordinate, and any other parameter selects an attribute, with DASCore's `*` and `?` wildcards:
+
+```console
+$ curl -H "Authorization: Bearer $KEY" \
+    "http://localhost:8000/v1/spools/das/data?time_min=2020-01-03T00:00:04&time_max=2020-01-03T00:00:10&distance_max=50&tag=public*" \
+    -o patches.arrow
+```
+
+In JSON, times are ISO 8601 strings and durations are seconds. Data requests answer 204 when nothing matches and 413 when the response would exceed `max_request_bytes`. Each patch is checked against the access rules again as it loads, so a file changed since it was indexed isn't served by its old permissions: a DASDAE request answers 409, and an Arrow stream ends early (as it also does if patches turn out larger than estimated).
+
+### Wire format
+
+`format=arrow` data responses hold one Arrow IPC stream per patch, each preceded by its length as an unsigned 64-bit little-endian integer. Each stream holds the data and coordinate arrays as raw bytes, with the dims, dtypes, units and attributes in the schema metadata (see `dastor/wire.py`). With dastor installed:
+
+```python
+from dastor.wire import read_framed
+
+with open("patches.arrow", "rb") as fi:
+    patches = list(read_framed(fi))  # DASCore patches
+```
+
+`format=dasdae` returns one DASDAE HDF5 file, which `dascore.spool` reads.
+
+## Development
+
+```console
+$ uv sync
+$ uv run pytest
+$ uv run ruff check . && uv run ruff format --check .
+```
+
+dastor tracks DASCore's `dev` branch (see `[tool.uv.sources]` in `pyproject.toml`).
