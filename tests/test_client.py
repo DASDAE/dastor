@@ -150,3 +150,23 @@ def test_ranges_after_a_trim_are_refused_clearly(url, data_dir):
     spool = Client(url).spool().select(time=window)
     with pytest.raises(NotImplementedError, match="in one call"):
         spool.select(time=[window])[0]
+
+
+def test_empty_spool(settings):
+    rule = {"column": "tag", "pattern": "^nope$", "allow": ["*"]}
+    config = {"spool": {"path": settings.spool.path, "rules": [rule]}}
+    with serve(Settings.model_validate(config)) as url:
+        assert len(Client(url).spool()) == 0
+
+
+def test_get_patch_applies_bounds_it_cannot_send(url, data_dir):
+    local = dc.spool(data_dir / "file_0.h5")[0]
+    window = ("2020-01-03T00:00:01", "2020-01-03T00:00:02")
+    got = Client(url).get_patch(local.attrs.data_id, time=window)
+    assert got == local.select(time=window)
+
+
+def test_change_checks_are_refused_clearly(url):
+    resolver = Client(url).spool()._catalog.resolver
+    with pytest.raises(NotImplementedError, match="changes"):
+        _ = resolver.member_rows

@@ -226,3 +226,9 @@ def test_index_of_nothing_is_empty(settings, tmp_path):
     backend = get_backend(index, read_only=True)
     assert backend.export_records() == []
     backend.close()
+
+
+def test_patch_only_params_are_not_ignored_elsewhere(client):
+    # Only /v1/patch takes source_path; elsewhere it isn't silently dropped.
+    response = client.get("/v1/contents", params={"source_path": "file_0.h5"})
+    assert response.status_code == 400

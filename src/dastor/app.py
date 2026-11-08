@@ -28,7 +28,7 @@ from dastor.wire import FRAMED_MEDIA_TYPE, PATCH_MEDIA_TYPE, encode_patch, frame
 log = logging.getLogger(__name__)
 
 # Query parameters the endpoints use themselves rather than select on.
-_RESERVED = frozenset({"format", "dim", "source_path", "source_patch_key"})
+_RESERVED = frozenset({"format", "dim"})
 
 # DASCore errors that mean the request asked for something invalid.
 _CLIENT_ERRORS = (
@@ -188,9 +188,11 @@ def create_app(settings: Settings) -> FastAPI:
     Who = Annotated[Principal, Depends(principal)]
     TableFormat = Annotated[Literal["json", "arrow"], Query()]
 
-    def selected_with_view(request, who, **extra) -> tuple[View, dc.BaseSpool]:
+    def selected_with_view(
+        request, who, reserved=_RESERVED, **extra
+    ) -> tuple[View, dc.BaseSpool]:
         """Return a principal's view and its patches matching the query."""
-        kwargs = selection(request.query_params.multi_items(), _RESERVED)
+        kwargs = selection(request.query_params.multi_items(), reserved)
         view = catalog.view(who)
         try:
             return view, view.select(**kwargs, **extra)
@@ -313,7 +315,8 @@ def create_app(settings: Settings) -> FastAPI:
         Patches the caller may not read are 404, as missing ones are (and
         ones the trim leaves empty).
         """
-        view, spool = selected_with_view(request, who, data_id=data_id)
+        reserved = _RESERVED | {"source_path", "source_patch_key"}
+        view, spool = selected_with_view(request, who, reserved, data_id=data_id)
         picks = {"source_path": source_path, "source_patch_key": source_patch_key}
         if picks := {k: v for k, v in picks.items() if v is not None}:
             df = spool.get_contents()

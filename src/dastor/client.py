@@ -56,10 +56,14 @@ class Client:
         Return one patch by its `data_id`, trimmed on the server.
 
         `source_path` and `source_patch_key` pick one copy of a patch stored
-        more than once. `bounds` map coordinates to `(min, max)` ranges,
-        either end None, e.g. ``time=(t1, None)``; the server trims the
-        patch before sending.
+        more than once. `bounds` select as `Patch.select` does, e.g.
+        ``time=(t1, None)``; the server trims by those it can be sent.
         """
+        patch = self._fetch(data_id, source_path, source_patch_key, bounds)
+        return patch.select(**bounds) if bounds else patch
+
+    def _fetch(self, data_id, source_path, source_patch_key, bounds) -> dc.Patch:
+        """Return a patch trimmed on the server by the bounds it can be sent."""
         path = f"/v1/patch/{urllib.parse.quote(data_id)}"
         picks = {"source_path": source_path, "source_patch_key": source_patch_key}
         params = [(k, v) for k, v in picks.items() if v is not None]
@@ -93,8 +97,9 @@ class Client:
         catalog = PatchCatalog(resolver=resolver, default_order=_DIRECTORY_ORDER)
         catalog.backend.write_sources(records)
         df = catalog.to_df()
-        keys = zip(df["source_path"], df["source_patch_key"], strict=True)
-        resolver.ids = dict(zip(keys, df["data_id"], strict=True))
+        if len(df):
+            keys = zip(df["source_path"], df["source_patch_key"], strict=True)
+            resolver.ids = dict(zip(keys, df["data_id"], strict=True))
         out = Spool()
         out._catalog = catalog
         return out
@@ -154,4 +159,13 @@ class _RemoteResolver(PatchResolver):
         path, key = str(row["source_path"]), str(row["source_patch_key"])
         source = path.removeprefix(self.prefix)
         data_id = self.ids[(path, key)]
-        return self.client.get_patch(data_id, source, key, **trim)
+        return self.client._fetch(data_id, source, key, trim)
+
+    @property
+    def member_rows(self):
+        """Refuse what DASCore asks of a plan route, which this isn't."""
+        msg = (
+            "dastor spools can't check their sources for changes, which this "
+            "operation (such as io.to_xarray) needs"
+        )
+        raise NotImplementedError(msg)
