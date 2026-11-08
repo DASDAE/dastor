@@ -284,6 +284,18 @@ def create_app(settings: Settings) -> FastAPI:
         with _load_errors():
             return _dasdae_response(list(patches), loads)
 
+    @app.get("/v1/index")
+    def index(who: Who):
+        """
+        Return a DASCore spool index of the patches the caller may read.
+
+        It is a SQLite file holding their metadata but no data;
+        `dastor.Client.spool` opens it and fetches patches from
+        `/v1/patch/{data_id}`.
+        """
+        view = catalog.view(who)
+        return _file_response(view.export_index, ".sqlite", "application/vnd.sqlite3")
+
     @app.get("/v1/patch/{data_id}")
     def patch(data_id: Annotated[str, Path(pattern="^[0-9a-f]+$")], who: Who):
         """
@@ -350,13 +362,12 @@ def _framed(patches: Iterator[dc.Patch], loads) -> Iterator:
         yield from frame(stream)
 
 
-def _dasdae_response(patches: list[dc.Patch], loads) -> StreamingResponse:
-    """Return the patches as one DASDAE file, deleted once it is open."""
-    handle, path = tempfile.mkstemp(suffix=".h5", prefix="dastor-")
+def _file_response(write, suffix: str, media_type: str) -> StreamingResponse:
+    """Return the file `write(path)` makes, deleted from disk once it is open."""
+    handle, path = tempfile.mkstemp(suffix=suffix, prefix="dastor-")
     os.close(handle)
     try:
-        with loads:
-            dc.write(dc.spool(patches), path, "DASDAE")
+        write(path)
         file = open(path, "rb")  # noqa: SIM115 (closed by _chunks)
     finally:
         # The open handle keeps the bytes (on POSIX), so nothing is left on
@@ -364,11 +375,19 @@ def _dasdae_response(patches: list[dc.Patch], loads) -> StreamingResponse:
         os.unlink(path)
     headers = {
         "Content-Length": str(os.fstat(file.fileno()).st_size),
-        "Content-Disposition": 'attachment; filename="dastor.h5"',
+        "Content-Disposition": f'attachment; filename="dastor{suffix}"',
     }
-    return StreamingResponse(
-        _chunks(file), media_type="application/x-hdf5", headers=headers
-    )
+    return StreamingResponse(_chunks(file), media_type=media_type, headers=headers)
+
+
+def _dasdae_response(patches: list[dc.Patch], loads) -> StreamingResponse:
+    """Return the patches as one DASDAE file."""
+
+    def write(path):
+        with loads:
+            dc.write(dc.spool(patches), path, "DASDAE")
+
+    return _file_response(write, ".h5", "application/x-hdf5")
 
 
 def _chunks(file) -> Iterator[bytes]:
