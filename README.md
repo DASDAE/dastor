@@ -59,6 +59,7 @@ Access is per file. A file is visible to a user only when every patch in it matc
 | `GET /v1/coverage?dim=time` | The spans of a dimension the patches cover. |
 | `GET /v1/gaps?dim=time` | The gaps between them. |
 | `GET /v1/data` | The patches, trimmed to the query (`format=arrow` or `format=dasdae`). |
+| `GET /v1/patch/{data_id}` | One whole patch, by the `data_id` its contents row gives, as one Arrow IPC stream (404 if missing or not visible). |
 | `GET /health` | Server status. |
 
 Every endpoint but `/health` sees only what the caller may read, and takes query parameters that select patches: `<coord>_min` and `<coord>_max` bound a coordinate, and any other parameter selects an attribute, with DASCore's `*` and `?` wildcards:
