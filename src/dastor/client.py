@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
@@ -44,15 +45,25 @@ class Client:
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             return response.read()
 
-    def get_patch(self, data_id: str, **bounds) -> dc.Patch:
+    def get_patch(
+        self,
+        data_id: str,
+        source_path: str | None = None,
+        source_patch_key: str | None = None,
+        **bounds,
+    ) -> dc.Patch:
         """
         Return one patch by its `data_id`, trimmed on the server.
 
-        `bounds` map coordinates to `(min, max)` ranges, either end None,
-        e.g. ``time=(t1, None)``; the server trims the patch before sending.
+        `source_path` and `source_patch_key` pick one copy of a patch stored
+        more than once. `bounds` map coordinates to `(min, max)` ranges,
+        either end None, e.g. ``time=(t1, None)``; the server trims the
+        patch before sending.
         """
         path = f"/v1/patch/{urllib.parse.quote(data_id)}"
-        if query := urllib.parse.urlencode(_bound_params(bounds)):
+        picks = {"source_path": source_path, "source_patch_key": source_patch_key}
+        params = [(k, v) for k, v in picks.items() if v is not None]
+        if query := urllib.parse.urlencode(params + _bound_params(bounds)):
             path += f"?{query}"
         return decode_patch(self._get(path))
 
@@ -64,7 +75,9 @@ class Client:
         patch is fetched when it loads, trimmed on the server to the part
         the selection needs.
         """
-        prefix = f"dastor://{urllib.parse.urlsplit(self.url).netloc}/"
+        # Unique per spool, so spools combined in one catalog keep their
+        # own routes (DASCore merges routes by prefix).
+        prefix = f"dastor://{uuid.uuid4().hex}/"
         with tempfile.TemporaryDirectory(prefix="dastor-") as folder:
             path = Path(folder) / "index.sqlite"
             path.write_bytes(self._get("/v1/index"))
@@ -123,11 +136,22 @@ class _RemoteResolver(PatchResolver):
         self.prefix = prefix
         self.ids: dict[tuple[str, str], str] = {}
 
+    def resolve_path(self, path):
+        """Refuse DASCore's reads of source files, which stay on the server."""
+        msg = (
+            "dastor spools can't rebuild source coordinates locally, which "
+            "selecting a list of ranges after a trimming selection needs; "
+            "select the ranges in one call instead"
+        )
+        raise NotImplementedError(msg)
+
     def plan_entries(self) -> dict[str, PatchResolver]:
         """Route this server's paths here when DASCore plans a chunk."""
         return {self.prefix: self}
 
     def resolve(self, row, **trim) -> dc.Patch:
         """Return the patch a row comes from, trimmed to the hints."""
-        key = (str(row["source_path"]), str(row["source_patch_key"]))
-        return self.client.get_patch(self.ids[key], **trim)
+        path, key = str(row["source_path"]), str(row["source_patch_key"])
+        source = path.removeprefix(self.prefix)
+        data_id = self.ids[(path, key)]
+        return self.client.get_patch(data_id, source, key, **trim)

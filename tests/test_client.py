@@ -1,3 +1,4 @@
+import contextlib
 import pickle
 import socket
 import threading
@@ -13,11 +14,12 @@ from conftest import ALICE_KEY
 from dastor import Client
 from dastor.app import create_app
 from dastor.client import _bound_params
+from dastor.config import Settings
 
 
-@pytest.fixture(scope="module")
-def url(settings):
-    """The test spool served over real HTTP on a free local port."""
+@contextlib.contextmanager
+def serve(settings):
+    """Serve an app over real HTTP on a free local port; yield its URL."""
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -27,9 +29,18 @@ def url(settings):
     thread.start()
     while not server.started:
         time.sleep(0.01)
-    yield f"http://127.0.0.1:{port}"
-    server.should_exit = True
-    thread.join()
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join()
+
+
+@pytest.fixture(scope="module")
+def url(settings):
+    """The test spool served over real HTTP."""
+    with serve(settings) as out:
+        yield out
 
 
 def test_spool_matches_server_contents(url):
@@ -110,3 +121,32 @@ def test_selection_downloads_only_its_window(url, data_dir, monkeypatch):
 )
 def test_bound_params(bounds, params):
     assert _bound_params(bounds) == params
+
+
+def test_copies_of_one_patch_load_their_own_file(tmp_path):
+    # Copies share a data_id; their paths give them different stations.
+    patch = dc.get_example_patch()
+    for station in ("A", "B"):
+        (tmp_path / f"station={station}").mkdir()
+        dc.write(patch, tmp_path / f"station={station}" / "data.h5", "DASDAE")
+    rule = {"column": "station", "pattern": ".*", "allow": ["*"]}
+    config = {"spool": {"path": str(tmp_path), "rules": [rule]}}
+    with serve(Settings.model_validate(config)) as url:
+        spool = Client(url).spool()
+        assert spool.select(station="B")[0].attrs.station == "B"
+        assert spool.select(station="A")[0].attrs.station == "A"
+
+
+def test_combined_spools_keep_their_routes(url):
+    alice = Client(url, key=ALICE_KEY).spool()
+    combined = alice + Client(url).spool()
+    secret = combined.select(tag="secret")
+    assert secret[0].attrs.tag == "secret"
+
+
+def test_ranges_after_a_trim_are_refused_clearly(url, data_dir):
+    t1 = dc.spool(data_dir / "file_0.h5")[0].get_coord("time").min()
+    window = (t1 + dc.to_timedelta64(1), t1 + dc.to_timedelta64(3))
+    spool = Client(url).spool().select(time=window)
+    with pytest.raises(NotImplementedError, match="in one call"):
+        spool.select(time=[window])[0]

@@ -28,7 +28,7 @@ from dastor.wire import FRAMED_MEDIA_TYPE, PATCH_MEDIA_TYPE, encode_patch, frame
 log = logging.getLogger(__name__)
 
 # Query parameters the endpoints use themselves rather than select on.
-_RESERVED = frozenset({"format", "dim"})
+_RESERVED = frozenset({"format", "dim", "source_path", "source_patch_key"})
 
 # DASCore errors that mean the request asked for something invalid.
 _CLIENT_ERRORS = (
@@ -301,15 +301,26 @@ def create_app(settings: Settings) -> FastAPI:
         data_id: Annotated[str, Path(pattern="^[0-9a-f]+$")],
         request: Request,
         who: Who,
+        source_path: str | None = None,
+        source_patch_key: str | None = None,
     ):
         """
         Return one patch, by its `data_id`, as an Arrow IPC stream.
 
         Query parameters trim it as they do `/v1/data`, e.g.
-        `?time_min=2020-01-03T00:00:04`. Patches the caller may not read
-        are 404, as missing ones are (and ones the trim leaves empty).
+        `?time_min=2020-01-03T00:00:04`. `source_path` and
+        `source_patch_key` pick one copy of a patch stored more than once.
+        Patches the caller may not read are 404, as missing ones are (and
+        ones the trim leaves empty).
         """
         view, spool = selected_with_view(request, who, data_id=data_id)
+        picks = {"source_path": source_path, "source_patch_key": source_patch_key}
+        if picks := {k: v for k, v in picks.items() if v is not None}:
+            df = spool.get_contents()
+            keep = np.ones(len(df), dtype=bool)
+            for name, value in picks.items():
+                keep &= (df[name].astype(str) == value).to_numpy()
+            spool = spool[keep]
         if not len(spool):
             raise HTTPException(404, f"no patch {data_id!r}")
         limit = settings.limits.max_request_bytes
