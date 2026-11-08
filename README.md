@@ -73,7 +73,7 @@ In JSON, times are ISO 8601 strings and durations are seconds. Data requests ans
 
 ### Wire format
 
-`format=arrow` data responses hold one Arrow IPC stream per patch, each preceded by its length as an unsigned 64-bit little-endian integer. Each stream holds the data and coordinate arrays as raw bytes, with the dims, dtypes, units and attributes in the schema metadata (see `dastor/wire.py`). With dastor installed:
+`format=arrow` data responses hold one Arrow IPC stream per patch, each preceded by its length as an unsigned 64-bit little-endian integer. Each stream is a patch in DASCore's `ARROW` format: the values as one Arrow column, with the dims, coordinates and attributes in the schema metadata (see [`docs/arrow-patch-format.md`](docs/arrow-patch-format.md)). DASCore reads a single stream with `dc.spool(path)` once it is saved as `.arrows`. With dastor installed:
 
 ```python
 from dastor.wire import read_framed
