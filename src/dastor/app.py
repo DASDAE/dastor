@@ -188,12 +188,12 @@ def create_app(settings: Settings) -> FastAPI:
     Who = Annotated[Principal, Depends(principal)]
     TableFormat = Annotated[Literal["json", "arrow"], Query()]
 
-    def selected_with_view(request, who) -> tuple[View, dc.BaseSpool]:
+    def selected_with_view(request, who, **extra) -> tuple[View, dc.BaseSpool]:
         """Return a principal's view and its patches matching the query."""
         kwargs = selection(request.query_params.multi_items(), _RESERVED)
         view = catalog.view(who)
         try:
-            return view, view.select(**kwargs)
+            return view, view.select(**kwargs, **extra)
         except (TypeError, ValueError) as exc:
             # e.g. a malformed time, or text bounding a numeric coordinate
             raise QueryError(str(exc)) from exc
@@ -297,14 +297,19 @@ def create_app(settings: Settings) -> FastAPI:
         return _file_response(view.export_index, ".sqlite", "application/vnd.sqlite3")
 
     @app.get("/v1/patch/{data_id}")
-    def patch(data_id: Annotated[str, Path(pattern="^[0-9a-f]+$")], who: Who):
+    def patch(
+        data_id: Annotated[str, Path(pattern="^[0-9a-f]+$")],
+        request: Request,
+        who: Who,
+    ):
         """
-        Return one whole patch, by its `data_id`, as an Arrow IPC stream.
+        Return one patch, by its `data_id`, as an Arrow IPC stream.
 
-        Patches the caller may not read are 404, as missing ones are.
+        Query parameters trim it as they do `/v1/data`, e.g.
+        `?time_min=2020-01-03T00:00:04`. Patches the caller may not read
+        are 404, as missing ones are (and ones the trim leaves empty).
         """
-        view = catalog.view(who)
-        spool = view.select(data_id=data_id)
+        view, spool = selected_with_view(request, who, data_id=data_id)
         if not len(spool):
             raise HTTPException(404, f"no patch {data_id!r}")
         limit = settings.limits.max_request_bytes

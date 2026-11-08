@@ -59,11 +59,11 @@ Access is per file. A file is visible to a user only when every patch in it matc
 | `GET /v1/coverage?dim=time` | The spans of a dimension the patches cover. |
 | `GET /v1/gaps?dim=time` | The gaps between them. |
 | `GET /v1/data` | The patches, trimmed to the query (`format=arrow` or `format=dasdae`). |
-| `GET /v1/patch/{data_id}` | One whole patch, by the `data_id` its contents row gives, as one Arrow IPC stream (404 if missing or not visible). |
+| `GET /v1/patch/{data_id}` | One patch, by the `data_id` its contents row gives, as one Arrow IPC stream; `<coord>_min`/`<coord>_max` trim it (404 if missing or not visible). |
 | `GET /v1/index` | A DASCore spool index (SQLite) of the patches the caller may read: metadata only, for the client. |
 | `GET /health` | Server status. |
 
-Every endpoint but `/health` sees only what the caller may read, and the summary, contents, coverage, gaps and data endpoints take query parameters that select patches: `<coord>_min` and `<coord>_max` bound a coordinate, and any other parameter selects an attribute, with DASCore's `*` and `?` wildcards:
+Every endpoint but `/health` sees only what the caller may read, and the summary, contents, coverage, gaps, data and patch endpoints take query parameters that select patches: `<coord>_min` and `<coord>_max` bound a coordinate, and any other parameter selects an attribute, with DASCore's `*` and `?` wildcards:
 
 ```console
 $ curl -H "Authorization: Bearer $KEY" \
@@ -100,7 +100,7 @@ for patch in sub.chunk(time=2):
     ...
 ```
 
-The spool comes from the server's index (`/v1/index`), so selecting, chunking, coverage and contents run locally without further requests. Each patch is downloaded whole (`/v1/patch/{data_id}`) when it loads, then trimmed to the selection.
+The spool comes from the server's index (`/v1/index`), so selecting, chunking, coverage and contents run locally without further requests. Each patch is downloaded when it loads (`/v1/patch/{data_id}`), trimmed on the server to the part the selection needs.
 
 ## Development
 

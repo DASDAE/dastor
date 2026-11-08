@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import dascore as dc
+import numpy as np
 from dascore.core.spool import Spool
 from dascore.io.index.backend import get_backend
 from dascore.io.index.catalog import _DIRECTORY_ORDER, PatchCatalog, PatchResolver
@@ -43,16 +44,25 @@ class Client:
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             return response.read()
 
-    def get_patch(self, data_id: str) -> dc.Patch:
-        """Return one whole patch by its `data_id`."""
-        return decode_patch(self._get(f"/v1/patch/{urllib.parse.quote(data_id)}"))
+    def get_patch(self, data_id: str, **bounds) -> dc.Patch:
+        """
+        Return one patch by its `data_id`, trimmed on the server.
+
+        `bounds` map coordinates to `(min, max)` ranges, either end None,
+        e.g. ``time=(t1, None)``; the server trims the patch before sending.
+        """
+        path = f"/v1/patch/{urllib.parse.quote(data_id)}"
+        if query := urllib.parse.urlencode(_bound_params(bounds)):
+            path += f"?{query}"
+        return decode_patch(self._get(path))
 
     def spool(self) -> dc.BaseSpool:
         """
         Return the patches this client may read as a DASCore spool.
 
         Selecting, chunking and coverage work on a downloaded index; each
-        patch is fetched whole when it loads, then trimmed locally.
+        patch is fetched when it loads, trimmed on the server to the part
+        the selection needs.
         """
         prefix = f"dastor://{urllib.parse.urlsplit(self.url).netloc}/"
         with tempfile.TemporaryDirectory(prefix="dastor-") as folder:
@@ -77,9 +87,32 @@ class Client:
         return out
 
 
+def _bound_params(bounds: dict) -> list[tuple[str, str]]:
+    """
+    Return query parameters for coordinate ranges.
+
+    Ends that aren't times or real numbers are left out, which only means
+    the server sends more of the patch.
+    """
+    out = []
+    for name, ends in bounds.items():
+        if not isinstance(ends, tuple | list) or len(ends) != 2:
+            continue
+        for suffix, value in zip(("_min", "_max"), ends, strict=True):
+            if isinstance(value, np.datetime64) and not np.isnat(value):
+                out.append((name + suffix, str(value)))
+            elif isinstance(value, int | np.integer) and not isinstance(value, bool):
+                out.append((name + suffix, str(int(value))))
+            elif isinstance(value, float | np.floating) and np.isfinite(value):
+                out.append((name + suffix, repr(float(value))))
+    return out
+
+
 class _RemoteResolver(PatchResolver):
     """
-    Load a row's whole patch from the server; trim hints are ignored.
+    Load a row's patch from the server, trimmed to DASCore's read hints.
+
+    The hints may be wider than the selection; DASCore trims exactly after.
 
     Rows are matched by source path and patch key, which trimmed rows and
     chunk plan members keep (unlike `data_id`).
@@ -95,6 +128,6 @@ class _RemoteResolver(PatchResolver):
         return {self.prefix: self}
 
     def resolve(self, row, **trim) -> dc.Patch:
-        """Return the whole patch a row comes from."""
+        """Return the patch a row comes from, trimmed to the hints."""
         key = (str(row["source_path"]), str(row["source_patch_key"]))
-        return self.client.get_patch(self.ids[key])
+        return self.client.get_patch(self.ids[key], **trim)
