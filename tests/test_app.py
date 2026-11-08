@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from dastor.app import create_app
 from dastor.config import Settings
-from dastor.wire import read_framed
+from dastor.wire import decode_patch, read_framed
 
 WINDOW = {"time_min": "2020-01-03T00:00:02", "time_max": "2020-01-03T00:00:05"}
 
@@ -124,6 +124,36 @@ class TestData:
             response = client.get("/v1/data")
         assert response.status_code == 413
         assert "limit is 1000" in response.json()["detail"]
+
+
+def contents_ids(client, headers=None, **params):
+    rows = client.get("/v1/contents", headers=headers, params=params).json()
+    return [x["data_id"] for x in rows]
+
+
+class TestPatch:
+    def test_whole_patch_by_id(self, client, data_dir):
+        local = dc.spool(data_dir / "file_0.h5")[0]
+        response = client.get(f"/v1/patch/{local.attrs.data_id}")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/vnd.apache.arrow.stream"
+        assert decode_patch(response.content) == local
+
+    def test_hidden_patch_is_404(self, client):
+        (secret, *_) = contents_ids(client, auth(ALICE_KEY), tag="secret")
+        assert client.get(f"/v1/patch/{secret}").status_code == 404
+        assert client.get(f"/v1/patch/{secret}", headers=auth(ALICE_KEY)).is_success
+
+    @pytest.mark.parametrize(("data_id", "status"), [("0" * 32, 404), ("*", 422)])
+    def test_bad_ids(self, client, data_id, status):
+        assert client.get(f"/v1/patch/{data_id}").status_code == status
+
+    def test_size_limit(self, settings):
+        limits = settings.limits.model_copy(update={"max_request_bytes": 1000})
+        small = settings.model_copy(update={"limits": limits})
+        with TestClient(create_app(small)) as client:
+            (data_id, *_) = contents_ids(client)
+            assert client.get(f"/v1/patch/{data_id}").status_code == 413
 
 
 class TestSummary:

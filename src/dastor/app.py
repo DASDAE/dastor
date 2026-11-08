@@ -15,7 +15,7 @@ import dascore.exceptions as dce
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from dastor import __version__
@@ -281,14 +281,37 @@ def create_app(settings: Settings) -> FastAPI:
         if format == "arrow":
             stream = _framed(patches, loads)
             return StreamingResponse(stream, media_type=FRAMED_MEDIA_TYPE)
-        try:
+        with _load_errors():
             return _dasdae_response(list(patches), loads)
-        except ChangedFileError as exc:
-            raise HTTPException(409, f"{exc}; retry after the next refresh") from None
-        except _TooLargeError as exc:
-            raise HTTPException(413, str(exc)) from None
+
+    @app.get("/v1/patch/{data_id}")
+    def patch(data_id: Annotated[str, Path(pattern="^[0-9a-f]+$")], who: Who):
+        """
+        Return one whole patch, by its `data_id`, as an Arrow IPC stream.
+
+        Patches the caller may not read are 404, as missing ones are.
+        """
+        view = catalog.view(who)
+        spool = view.select(data_id=data_id)
+        if not len(spool):
+            raise HTTPException(404, f"no patch {data_id!r}")
+        limit = settings.limits.max_request_bytes
+        with _load_errors(), loads:
+            body = encode_patch(next(_checked_patches(view, spool[:1], limit)))
+        return Response(bytes(body), media_type=PATCH_MEDIA_TYPE)
 
     return app
+
+
+@contextlib.contextmanager
+def _load_errors():
+    """Answer a changed file with 409 and patches over the limit with 413."""
+    try:
+        yield
+    except ChangedFileError as exc:
+        raise HTTPException(409, f"{exc}; retry after the next refresh") from None
+    except _TooLargeError as exc:
+        raise HTTPException(413, str(exc)) from None
 
 
 class _TooLargeError(Exception):

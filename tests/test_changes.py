@@ -50,10 +50,11 @@ def overwrite_as_secret(path, new_patch=False):
 @pytest.mark.parametrize("new_patch", [False, True])
 def test_overwritten_file_is_not_served(public_file, new_patch):
     with TestClient(create_app(settings_for(public_file.parent))) as client:
-        assert len(client.get("/v1/contents").json()) == 1
+        (row,) = client.get("/v1/contents").json()
         overwrite_as_secret(public_file, new_patch)
         response = client.get("/v1/data", params={"format": "dasdae"})
         assert response.status_code == 409
+        assert client.get(f"/v1/patch/{row['data_id']}").status_code == 409
         with pytest.raises(ChangedFileError):
             client.get("/v1/data")
 
