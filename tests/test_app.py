@@ -4,6 +4,7 @@ import dascore as dc
 import pyarrow as pa
 import pytest
 from conftest import ALICE_KEY, BOB_KEY, auth
+from dascore.io.index.backend import get_backend
 from fastapi.testclient import TestClient
 
 from dastor.app import create_app
@@ -200,9 +201,34 @@ def test_hidden_files_columns_are_not_shown(tmp_path):
         assert "private_project" not in row
         arrow = client.get("/v1/contents", params={"format": "arrow"}).content
         assert "private_project" not in pa.ipc.open_stream(arrow).schema.names
+        index = tmp_path / "index.sqlite"
+        index.write_bytes(client.get("/v1/index").content)
+        backend = get_backend(index, read_only=True)
+        assert "private_project" not in backend.attr_names()
+        assert backend.export_records()[0].source_path == "a.h5"
+        backend.close()
         nothing = client.get("/v1/summary", params={"tag": "nope"}).json()
         assert nothing["columns"] == []
 
 
 def test_health(client):
     assert client.get("/health").json()["status"] == "ok"
+
+
+def test_index_of_nothing_is_empty(settings, tmp_path):
+    rule = {"column": "tag", "pattern": "^nope$", "allow": ["*"]}
+    config = {"spool": {"path": settings.spool.path, "rules": [rule]}}
+    with TestClient(create_app(Settings.model_validate(config))) as client:
+        response = client.get("/v1/index")
+    assert response.status_code == 200
+    index = tmp_path / "index.sqlite"
+    index.write_bytes(response.content)
+    backend = get_backend(index, read_only=True)
+    assert backend.export_records() == []
+    backend.close()
+
+
+def test_patch_only_params_are_not_ignored_elsewhere(client):
+    # Only /v1/patch takes source_path; elsewhere it isn't silently dropped.
+    response = client.get("/v1/contents", params={"source_path": "file_0.h5"})
+    assert response.status_code == 400

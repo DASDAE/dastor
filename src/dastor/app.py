@@ -188,12 +188,14 @@ def create_app(settings: Settings) -> FastAPI:
     Who = Annotated[Principal, Depends(principal)]
     TableFormat = Annotated[Literal["json", "arrow"], Query()]
 
-    def selected_with_view(request, who) -> tuple[View, dc.BaseSpool]:
+    def selected_with_view(
+        request, who, reserved=_RESERVED, **extra
+    ) -> tuple[View, dc.BaseSpool]:
         """Return a principal's view and its patches matching the query."""
-        kwargs = selection(request.query_params.multi_items(), _RESERVED)
+        kwargs = selection(request.query_params.multi_items(), reserved)
         view = catalog.view(who)
         try:
-            return view, view.select(**kwargs)
+            return view, view.select(**kwargs, **extra)
         except (TypeError, ValueError) as exc:
             # e.g. a malformed time, or text bounding a numeric coordinate
             raise QueryError(str(exc)) from exc
@@ -284,15 +286,44 @@ def create_app(settings: Settings) -> FastAPI:
         with _load_errors():
             return _dasdae_response(list(patches), loads)
 
-    @app.get("/v1/patch/{data_id}")
-    def patch(data_id: Annotated[str, Path(pattern="^[0-9a-f]+$")], who: Who):
+    @app.get("/v1/index")
+    def index(who: Who):
         """
-        Return one whole patch, by its `data_id`, as an Arrow IPC stream.
+        Return a DASCore spool index of the patches the caller may read.
 
-        Patches the caller may not read are 404, as missing ones are.
+        It is a SQLite file holding their metadata but no data;
+        `dastor.Client.spool` opens it and fetches patches from
+        `/v1/patch/{data_id}`.
         """
         view = catalog.view(who)
-        spool = view.select(data_id=data_id)
+        return _file_response(view.export_index, ".sqlite", "application/vnd.sqlite3")
+
+    @app.get("/v1/patch/{data_id}")
+    def patch(
+        data_id: Annotated[str, Path(pattern="^[0-9a-f]+$")],
+        request: Request,
+        who: Who,
+        source_path: str | None = None,
+        source_patch_key: str | None = None,
+    ):
+        """
+        Return one patch, by its `data_id`, as an Arrow IPC stream.
+
+        Query parameters trim it as they do `/v1/data`, e.g.
+        `?time_min=2020-01-03T00:00:04`. `source_path` and
+        `source_patch_key` pick one copy of a patch stored more than once.
+        Patches the caller may not read are 404, as missing ones are (and
+        ones the trim leaves empty).
+        """
+        reserved = _RESERVED | {"source_path", "source_patch_key"}
+        view, spool = selected_with_view(request, who, reserved, data_id=data_id)
+        picks = {"source_path": source_path, "source_patch_key": source_patch_key}
+        if picks := {k: v for k, v in picks.items() if v is not None}:
+            df = spool.get_contents()
+            keep = np.ones(len(df), dtype=bool)
+            for name, value in picks.items():
+                keep &= (df[name].astype(str) == value).to_numpy()
+            spool = spool[keep]
         if not len(spool):
             raise HTTPException(404, f"no patch {data_id!r}")
         limit = settings.limits.max_request_bytes
@@ -350,13 +381,12 @@ def _framed(patches: Iterator[dc.Patch], loads) -> Iterator:
         yield from frame(stream)
 
 
-def _dasdae_response(patches: list[dc.Patch], loads) -> StreamingResponse:
-    """Return the patches as one DASDAE file, deleted once it is open."""
-    handle, path = tempfile.mkstemp(suffix=".h5", prefix="dastor-")
+def _file_response(write, suffix: str, media_type: str) -> StreamingResponse:
+    """Return the file `write(path)` makes, deleted from disk once it is open."""
+    handle, path = tempfile.mkstemp(suffix=suffix, prefix="dastor-")
     os.close(handle)
     try:
-        with loads:
-            dc.write(dc.spool(patches), path, "DASDAE")
+        write(path)
         file = open(path, "rb")  # noqa: SIM115 (closed by _chunks)
     finally:
         # The open handle keeps the bytes (on POSIX), so nothing is left on
@@ -364,11 +394,19 @@ def _dasdae_response(patches: list[dc.Patch], loads) -> StreamingResponse:
         os.unlink(path)
     headers = {
         "Content-Length": str(os.fstat(file.fileno()).st_size),
-        "Content-Disposition": 'attachment; filename="dastor.h5"',
+        "Content-Disposition": f'attachment; filename="dastor{suffix}"',
     }
-    return StreamingResponse(
-        _chunks(file), media_type="application/x-hdf5", headers=headers
-    )
+    return StreamingResponse(_chunks(file), media_type=media_type, headers=headers)
+
+
+def _dasdae_response(patches: list[dc.Patch], loads) -> StreamingResponse:
+    """Return the patches as one DASDAE file."""
+
+    def write(path):
+        with loads:
+            dc.write(dc.spool(patches), path, "DASDAE")
+
+    return _file_response(write, ".h5", "application/x-hdf5")
 
 
 def _chunks(file) -> Iterator[bytes]:

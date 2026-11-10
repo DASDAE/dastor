@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import dascore as dc
+from dascore.io.index.backend import get_backend
 
 from dastor.acl import matching_rows, missing_columns, patch_matches, visible_files
 from dastor.auth import Principal
@@ -44,6 +45,21 @@ class View:
             return spool
         in_files = contents["source_path"].astype(str).isin(self.files).to_numpy()
         return spool[in_files & matching_rows(contents, self.rules, self.principal)]
+
+    def export_index(self, path: str) -> None:
+        """
+        Write a DASCore index at `path` holding only the visible patches.
+
+        It holds their metadata, attributes and coordinates, but no data:
+        clients open it to select and plan, then fetch patches by id.
+        """
+        catalog = self.select()._catalog
+        rows = catalog.to_df()["_patch_row"].tolist()
+        backend = get_backend(path)
+        try:
+            backend.write_sources(catalog.backend.export_records(patch_rows=rows))
+        finally:
+            backend.close()
 
     def check(self, patch: dc.Patch, row: Mapping) -> dc.Patch:
         """Return a loaded patch, or raise if its file changed to hide it."""
