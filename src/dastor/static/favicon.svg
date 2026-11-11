@@ -34,7 +34,7 @@
   <g
      fill="url(#steel)"
      stroke="#232426"
-     stroke-width="10"
+     stroke-width="20"
      stroke-linejoin="round"
      id="g7">
     <path
@@ -55,15 +55,16 @@
      d="M498 266 543 232H576L534 266Z"
      fill="#ffc934"
      stroke="#232426"
-     stroke-width="5"
+     stroke-width="10"
      id="path8" />
   <g
      fill="none"
-     stroke-width="10"
+     stroke-linecap="round"
+     stroke-width="26"
      id="g13">
     <use
        xlink:href="#blue-rays"
-       stroke-width="13"
+       stroke-width="40"
        stroke="#3978d6"
        id="use9" />
     <use
@@ -72,29 +73,30 @@
        id="use10" />
     <use
        xlink:href="#red-rays"
+       stroke-width="36"
        stroke="#d0002a"
        id="use11" />
     <use
        xlink:href="#blue-rays"
-       stroke-width="2.7"
+       stroke-width="8"
        stroke="#eff6ff"
        id="use12" />
     <use
        xlink:href="#red-rays"
-       stroke-width="2.7"
+       stroke-width="8"
        stroke="#fff1f0"
        id="use13" />
   </g>
   <path
-     d="m768 462 19 20-19 20-19-20Z"
+     d="m768 437 45 45-45 45-45-45Z"
      fill="#fff"
      stroke="#232426"
-     stroke-width="4"
+     stroke-width="10"
      id="path13" />
   <path
      d="m 1017.9332,259.5 -45.00001,-34 h -33 l 42,34 z"
      fill="#ffc934"
      stroke="#232426"
-     stroke-width="5"
+     stroke-width="10"
      id="path8-6" />
 </svg>
