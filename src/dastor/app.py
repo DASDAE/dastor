@@ -409,12 +409,15 @@ def create_app(settings: Settings) -> FastAPI:
 
         A product is the patches of one kind with the same dims and steps:
         one layer at one resolution. Each has an `id` for `/v1/viewer/tile`.
-        `limits` are the bytes one tile and one screen of tiles may read.
+        `limits` are the bytes one tile and one screen of tiles may read,
+        and `sync` says whether areas can be synced into a local data
+        directory (not on a server; see `dastor browse`).
         """
         contents = _shown(catalog.view(who).select().get_contents())
         limits = settings.limits
         return {
             "products": list_products(contents),
+            "sync": False,
             "limits": {
                 "max_tile_bytes": limits.max_tile_bytes,
                 "max_view_bytes": limits.max_view_bytes,

@@ -78,7 +78,9 @@ class TestProducts:
 
     def test_limits_are_listed(self, viewer, viewer_settings):
         """The listing states the limits the viewer keeps to."""
-        limits = viewer.get("/v1/viewer/products").json()["limits"]
+        listing = viewer.get("/v1/viewer/products").json()
+        assert listing["sync"] is False  # a server has no local directory to sync into
+        limits = listing["limits"]
         assert limits["max_tile_bytes"] == viewer_settings.limits.max_tile_bytes
         assert limits["max_view_bytes"] == viewer_settings.limits.max_view_bytes
 

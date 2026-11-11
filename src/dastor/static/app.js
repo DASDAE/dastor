@@ -26,6 +26,7 @@ const CMAPS = {
 const S = {
   products: [], groups: new Map(), group: null,
   limits: { max_tile_bytes: Infinity, max_view_bytes: Infinity },
+  sync: false,                    // whether selected areas can be synced into a local data directory
   levels: [], pin: null,          // the ladder, coarsest first: [{p, sx, sy}]
   x: "", y: "", xTime: false, xUnits: "", yUnits: "", ext: null,
   view: { x0: 0, spp: 1, y0: 0, ypp: 1 },
@@ -979,6 +980,7 @@ function moveVertex(f, i, x, y) {
 function renderSelected() {
   const cur = selected(), el = $("selected");
   $("selBox").hidden = !cur;  // shown only while there is something to show
+  if ($("btnAreaOf")) $("btnAreaOf").disabled = !cur;  // the Download section's "selected"
   if (!cur) { el.textContent = ""; return; }
   const { set, f } = cur, mine = setKey(set) === S.active;
   const names = ["label", "note", ...Object.keys(f.cols).filter((k) => k !== "label" && k !== "note")];
@@ -991,7 +993,7 @@ function renderSelected() {
   el.innerHTML = `<div class="hint">${esc(f.kind)} in ${esc(setKey(set))}</div><table class="cols">${rows}</table><div class="row">` +
     (mine ? '<button class="small" id="btnAddCol">add column</button><button class="small" id="btnDelete">delete</button>' : "") +
     (!mine && S.me ? `<button class="small" id="btnCopy">copy to ${esc(S.active || "my set")}</button>` : "") +
-    '<button class="small" id="btnAreaOf" title="download the data around this annotation">download</button></div>';
+    "</div>";
 }
 function areaQuery(level) {
   const a = S.area, q = { product: level.p.id };
@@ -1001,19 +1003,30 @@ function areaQuery(level) {
   if (a.y1 !== null) q[`${S.y}_max`] = a.y1;
   return q;
 }
+// The Download section. An area comes from the selected annotation, from the window on
+// screen, or from a box drawn with the area tool; it is then downloaded through the browser
+// or, when the viewer was started with a local data directory, synced into it.
+function windowBounds() {
+  const P = plotRect(), e = viewEnd();
+  return { x0: Math.max(px2x(P.x), S.ext.x0), x1: Math.min(px2x(P.x + P.w), S.ext.x1), y0: Math.max(S.view.y0, S.ext.y0), y1: Math.min(e.y1, S.ext.y1) };
+}
 async function renderArea() {
-  const el = $("area"), a = S.area;
-  $("areaBox").hidden = !a;
-  if (!a) { el.textContent = ""; return; }
+  const el = $("area"), a = S.area, cur = selected();
   const stamp = (renderArea.stamp = (renderArea.stamp || 0) + 1);
+  const pick = '<div class="row">' +
+    `<button class="small" id="btnAreaOf" ${cur ? "" : "disabled"} title="the box around the selected annotation">selected</button>` +
+    '<button class="small" id="btnAreaWindow" title="what is on screen now">window</button>' +
+    `<button class="small ${S.mode === "area" ? "on" : ""}" id="btnAreaDraw" title="drag a box over the data (d)">draw</button>` +
+    (a ? '<button class="small" id="btnAreaClear">clear</button>' : "") + "</div>";
+  if (!a || !S.levels.length) { el.innerHTML = pick; return; }
   const was = $("selAreaLevel"), id = was ? was.value : S.levels[S.levels.length - 1].p.id;
   const level = S.levels.find((l) => l.p.id === id) || S.levels[S.levels.length - 1];
   const span = (lo, hi, f) => `${lo === null ? "start" : f(lo)} – ${hi === null ? "end" : f(hi)}`;
-  el.className = "";
-  el.innerHTML = `<div class="hint">${esc(S.x)}: ${span(a.x0, a.x1, fmtX)}<br>${esc(S.y)}: ${span(a.y0, a.y1, (v) => fmtNum(+v.toPrecision(5)))} ${esc(S.yUnits)}</div>` +
+  const syncTip = S.sync ? "copy this area into the local data directory" : "start the viewer with a local data directory to sync into it";
+  el.innerHTML = pick +
+    `<div class="hint">${esc(S.x)}: ${span(a.x0, a.x1, fmtX)}<br>${esc(S.y)}: ${span(a.y0, a.y1, (v) => fmtNum(+v.toPrecision(5)))} ${esc(S.yUnits)}</div>` +
     `<div class="row"><label>product <select id="selAreaLevel">${S.levels.map((l) => `<option value="${l.p.id}" ${l === level ? "selected" : ""}>${esc(levelName(l.p))} (${fmtStep(l.sx, S.xTime)})</option>`).join("")}</select></label></div>` +
-    '<div class="row" id="areaSize">estimating...</div>' +
-    `<div class="row"><button class="small" id="btnAreaClear">clear</button></div>`;
+    `<div class="row"><span id="areaSize">estimating...</span><button id="btnSync" ${S.sync ? "" : "disabled"} title="${syncTip}">Sync</button></div>`;
   redraw();
   const q = areaQuery(level);
   try {
@@ -1033,6 +1046,7 @@ function setMode(mode) {
   S.mode = mode; S.draft = null;
   cv.style.cursor = mode === "select" ? "default" : "crosshair";
   for (const b of $("tools").children) b.classList.toggle("on", b.dataset.mode === mode);
+  renderArea();
   redraw();
 }
 // The mouse. The middle button (or Space with the left) drags the view, in every tool. The
@@ -1230,7 +1244,6 @@ function initControls() {
     const cur = selected(); if (!cur) return;
     if (ev.target.id === "btnDelete") deleteSelected();
     else if (ev.target.id === "btnCopy") copySelected();
-    else if (ev.target.id === "btnAreaOf") { S.area = worldBounds(cur.f); renderArea(); redraw(); }
     else if (ev.target.id === "btnAddCol") {
       const name = (prompt("Column name:") || "").trim();
       if (!name || ["id", "geometry", ...STAMPS].includes(name)) return;
@@ -1239,6 +1252,10 @@ function initControls() {
   });
   $("area").addEventListener("change", (ev) => { if (ev.target.id === "selAreaLevel") renderArea(); });
   $("area").addEventListener("click", (ev) => {
+    const cur = selected();
+    if (ev.target.id === "btnAreaOf" && cur) { S.area = worldBounds(cur.f); renderArea(); redraw(); }
+    else if (ev.target.id === "btnAreaWindow") { S.area = windowBounds(); renderArea(); redraw(); }
+    else if (ev.target.id === "btnAreaDraw") setMode(S.mode === "area" ? "select" : "area");
     if (ev.target.id === "btnAreaClear") { S.area = null; renderArea(); redraw(); }
   });
   window.addEventListener("resize", resize);
@@ -1262,7 +1279,7 @@ async function init() {
   initControls(); buildLut(); resize();
   try {
     const listing = await api("/viewer/products");
-    S.products = listing.products; S.limits = listing.limits;
+    S.products = listing.products; S.limits = listing.limits; S.sync = !!listing.sync;
   } catch (e) { toast(`could not list products: ${e.message}`, 8000); }
   S.ready = true;
   buildGroups();

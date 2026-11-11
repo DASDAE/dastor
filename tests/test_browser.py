@@ -539,3 +539,16 @@ class TestCrowding:
         # a point has no extent, so the area is padded round it
         assert area["x0"] < when < area["x1"] and area["y0"] < 30 < area["y1"]
         assert "product=" in page.js("document.getElementById('lnkArea').href")
+
+    def test_download_the_window(self, page):
+        """ "window" takes what is on screen; Sync waits for a local directory."""
+        page.js("document.getElementById('btnAreaWindow').click()")
+        page.wait("document.getElementById('lnkArea') !== null")
+        area, view = page.js("[S.area, windowBounds()]")
+        assert area == view
+        assert area["x1"] > area["x0"] and area["y1"] > area["y0"]
+        assert page.js("document.getElementById('btnSync').disabled") is True
+        assert page.js("document.getElementById('btnAreaOf').disabled") is True
+        page.js("document.getElementById('btnAreaClear').click()")
+        assert page.js("S.area") is None
+        assert page.js("document.getElementById('lnkArea')") is None

@@ -19,7 +19,6 @@
     <button data-mode="path" title="click to add points; Enter, double-click or right-click ends the path (2)">path</button>
     <button data-mode="polygon" title="click to add corners; Enter, double-click or right-click closes the polygon (3)">polygon</button>
     <button data-mode="box" title="drag a box (4)">box</button>
-    <button data-mode="area" title="drag an area to download (d)">select area</button>
   </span>
   <span class="spacer"></span>
   <span id="saveStatus" class="save"></span>
@@ -62,7 +61,7 @@
     <details id="selBox" hidden open><summary>Selected</summary>
       <div id="selected"></div>
     </details>
-    <details id="areaBox" hidden open><summary>Download</summary>
+    <details id="areaBox" open><summary>Download</summary>
       <div id="area"></div>
     </details>
     <details><summary>Keys</summary>
