@@ -452,6 +452,20 @@ class TestViewing:
         page.click(left, top)
         assert page.js("S.manual") is False
         assert page.js("S.disp.vmax") < 50
+        # a diverging map puts zero in the middle, where it is white
+        page.js(
+            "(() => { const e = document.getElementById('selCmap');"
+            " e.value = 'seismic'; e.dispatchEvent(new Event('change')); })()"
+        )
+        low, high = page.js("[S.disp.vmin, S.disp.vmax]")
+        assert low == -high and high > 0
+        # and the page has a light theme, which the canvas follows
+        page.js("setTheme('dark')")
+        page.js("document.getElementById('btnTheme').click()")
+        assert page.js("document.documentElement.dataset.theme") == "light"
+        assert page.js("C === CHROME.light") is True
+        page.js("document.getElementById('btnTheme').click()")
+        assert page.js("C === CHROME.dark") is True
         # dragged, the bar moves its limits: the top end the high one, the middle both
         low, high = page.js("[S.disp.vmin, S.disp.vmax]")
         height = page.js("barRect(plotRect()).h")

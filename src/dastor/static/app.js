@@ -16,14 +16,35 @@ const TILE_BYTE_CAP = 320 * 2 ** 20;
 // sits near the bright end of the colour maps, where the events are.
 const PALETTE = ["#ff5d73", "#ffffff", "#ff9d42", "#6ef0c2", "#9fd4ff", "#d9a6ff"];
 const THEME = { blue: "#3978d6", gold: "#ffc934", red: "#d0002a", steel: "#c6c7cb" };
+// What the canvas draws round the data, for each theme. The data keeps its colour map.
+const CHROME = {
+  dark: { bg: "#101214", plot: "#000", gap: "#1b1d22", hatch: "rgba(255,200,80,0.25)", gapText: "rgba(255,210,120,0.95)",
+    text: "#cfd3d8", dim: "#9aa0a6", tick: "#777", strip: "#3a3d42", stripGap: "#15161a", bad: "#ff8b96" },
+  light: { bg: "#f3f4f6", plot: "#dfe2e6", gap: "#eceef1", hatch: "rgba(150,100,0,0.3)", gapText: "#7a5200",
+    text: "#2b2e33", dim: "#5d6167", tick: "#8a8e95", strip: "#c9cdd3", stripGap: "#f3f4f6", bad: "#b00020" },
+};
+let C = CHROME.dark;
+// The theme: the one chosen here before, else the system's.
+function setTheme(name, keep) {
+  if (name !== "light" && name !== "dark") name = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  document.documentElement.dataset.theme = name; C = CHROME[name];
+  if (keep) { try { localStorage.setItem("dastor.theme", name); } catch (e) { /* private mode */ } }
+  const b = $("btnTheme"); if (b) b.title = name === "light" ? "Dark mode" : "Light mode";
+  if (S.levels.length) redraw();
+}
 const STAMPS = ["created_time", "modified_time", "modified_by", "derived_from", "derived_revision"];
 const CMAPS = {
   viridis: ["#440154", "#482878", "#3e4989", "#31688e", "#26828e", "#1f9e89", "#35b779", "#6ece58", "#b5de2b", "#fde725"],
   magma: ["#000004", "#180f3d", "#440f76", "#721f81", "#9e2f7f", "#cd4071", "#f1605d", "#fd9668", "#feca8d", "#fcfdbf"],
   gray: ["#000000", "#ffffff"],
   "gray (inverted)": ["#ffffff", "#000000"],
-  "blue-white-red": ["#053061", "#2166ac", "#4393c3", "#d1e5f0", "#f7f7f7", "#fddbc7", "#d6604d", "#b2182b", "#67001f"],
+  // diverging, white in the middle: the limits are kept either side of zero, so zero is white
+  "blue-white-red": ["#053061", "#2166ac", "#4393c3", "#d1e5f0", "#ffffff", "#fddbc7", "#d6604d", "#b2182b", "#67001f"],
+  seismic: ["#00004c", "#0000ff", "#ffffff", "#ff0000", "#7f0000"],
+  "purple-white-orange": ["#2d004b", "#542788", "#8073ac", "#d8daeb", "#ffffff", "#fee0b6", "#e08214", "#b35806", "#7f3b08"],
+  "teal-white-brown": ["#003c30", "#01665e", "#35978f", "#c7eae5", "#ffffff", "#f6e8c3", "#bf812d", "#8c510a", "#543005"],
 };
+const DIVERGING = new Set(["blue-white-red", "seismic", "purple-white-orange", "teal-white-brown"]);
 
 // ------------------------------------------------------------------ state
 const S = {
@@ -470,13 +491,13 @@ function drawGaps(P) {
     const xa = x2px(sg[k].b), xb = x2px(sg[k + 1].a);
     if (xb < P.x || xa > P.x + P.w) continue;
     ctx.save(); ctx.beginPath(); ctx.rect(xa, P.y, xb - xa, P.h); ctx.clip();
-    ctx.fillStyle = "#1b1d22"; ctx.fillRect(xa, P.y, xb - xa, P.h);
-    ctx.strokeStyle = "rgba(255,200,80,0.25)"; ctx.lineWidth = 1;
+    ctx.fillStyle = C.gap; ctx.fillRect(xa, P.y, xb - xa, P.h);
+    ctx.strokeStyle = C.hatch; ctx.lineWidth = 1;
     for (let x = xa - P.h; x < xb; x += 10) { ctx.beginPath(); ctx.moveTo(x, P.y + P.h); ctx.lineTo(x + P.h, P.y); ctx.stroke(); }
     ctx.restore();
     if (xb - xa > 14) {
       ctx.save(); ctx.translate((xa + xb) / 2, P.y + P.h / 2); ctx.rotate(-Math.PI / 2);
-      ctx.fillStyle = "rgba(255,210,120,0.95)"; ctx.font = "14px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillStyle = C.gapText; ctx.font = "14px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillText(`no data ${fmtStep(sg[k + 1].a - sg[k].b, true)}`, 0, 0); ctx.restore();
     }
   }
@@ -501,7 +522,8 @@ function autoContrast(quiet) {
   if (vals.length < 10) { if (!quiet) toast("no data on screen yet"); return false; }
   vals.sort((a, b) => a - b);
   let lo = vals[Math.floor(vals.length * 0.01)], hi = vals[Math.floor(vals.length * 0.995)];
-  if (S.disp.scale === "linear" && lo < 0) { hi = Math.max(-lo, hi); lo = -hi; }  // signed data: centred on zero
+  // signed data, or a diverging map: centred on zero
+  if (S.disp.scale === "linear" && (lo < 0 || DIVERGING.has(S.disp.cmap))) { hi = Math.max(-lo, hi); lo = -hi; }
   if (hi <= lo) hi = lo + 1e-9;
   S.disp.vmin = +lo.toPrecision(3); S.disp.vmax = +hi.toPrecision(3);
   $("inpVmin").value = S.disp.vmin; $("inpVmax").value = S.disp.vmax;
@@ -540,11 +562,11 @@ function fmtTick(t, step) {
 function draw() {
   rafPending = false;
   const W = cv.clientWidth, H = cv.clientHeight, P = plotRect();
-  ctx.fillStyle = "#101214"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
   if (!S.levels.length || !S.lut) {
     const text = S.listError ? `Could not reach the server: ${S.listError}. Click to try again.`
       : S.ready ? "No data to show: nothing here of two dims that you may read." : "loading...";
-    ctx.fillStyle = S.listError ? "#ff8b96" : "#9aa0a6"; ctx.font = "15px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = S.listError ? C.bad : C.dim; ctx.font = "15px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
     ctx.fillText(text, 80, 40);
     return;
   }
@@ -553,7 +575,7 @@ function draw() {
   frameNo++;
   ctx.save();
   ctx.beginPath(); ctx.rect(P.x, P.y, P.w, P.h); ctx.clip();
-  ctx.fillStyle = "#000"; ctx.fillRect(P.x, P.y, P.w, P.h);
+  ctx.fillStyle = C.plot; ctx.fillRect(P.x, P.y, P.w, P.h);
   ctx.imageSmoothingEnabled = S.disp.smooth;
   const shown = activeLevel().p.id;
   if (shown !== S.autoFor && !S.manual) S.autoPending = true;  // each product has its own range
@@ -601,16 +623,16 @@ function drawColorBar(P) {
   const b = barRect(P), stops = CMAPS[S.disp.cmap] || CMAPS.viridis, g = ctx.createLinearGradient(0, b.y + b.h, 0, b.y);
   stops.forEach((c, i) => g.addColorStop(i / (stops.length - 1), c));
   ctx.fillStyle = g; ctx.fillRect(b.x, b.y, b.w, b.h);
-  ctx.strokeStyle = "#777"; ctx.lineWidth = 1; ctx.strokeRect(b.x + 0.5, b.y + 0.5, b.w, b.h);
+  ctx.strokeStyle = C.tick; ctx.lineWidth = 1; ctx.strokeRect(b.x + 0.5, b.y + 0.5, b.w, b.h);
   const { vmin, vmax } = S.disp, n = 4;
-  ctx.fillStyle = "#cfd3d8"; ctx.font = "12px system-ui"; ctx.textAlign = "left";
+  ctx.fillStyle = C.text; ctx.font = "12px system-ui"; ctx.textAlign = "left";
   for (let i = 0; i <= n; i++) {
     const y = b.y + b.h - (i / n) * b.h, v = vmin + (i / n) * (vmax - vmin);
     ctx.beginPath(); ctx.moveTo(b.x + b.w, y); ctx.lineTo(b.x + b.w + 3, y); ctx.stroke();
     ctx.textBaseline = i === 0 ? "bottom" : i === n ? "top" : "middle";
     ctx.fillText(fmtNum(+v.toPrecision(3)), b.x + b.w + 5, y);
   }
-  ctx.textBaseline = "top"; ctx.fillStyle = "#9aa0a6";
+  ctx.textBaseline = "top"; ctx.fillStyle = C.dim;
   ctx.fillText(`${S.disp.scale === "log" ? "log10 " : ""}${S.disp.stat}`, b.x - 2, b.y + b.h + 6);
   if (S.manual) ctx.fillText("held", b.x - 2, b.y + b.h + 22);
 }
@@ -626,8 +648,8 @@ function featureX(f) {
 }
 function drawOverview(P) {
   const r = stripRect(P);
-  ctx.fillStyle = "#3a3d42"; ctx.fillRect(r.x, r.y, r.w, r.h);
-  ctx.fillStyle = "#15161a";
+  ctx.fillStyle = C.strip; ctx.fillRect(r.x, r.y, r.w, r.h);
+  ctx.fillStyle = C.stripGap;
   for (let k = 0; k + 1 < S.segs.length; k++) {  // the squeezed gaps
     const xa = stripX(P, tau(S.segs[k].b)), xb = stripX(P, tau(S.segs[k + 1].a));
     ctx.fillRect(xa, r.y, Math.max(xb - xa, 1), r.h);
@@ -647,7 +669,7 @@ function drawOverview(P) {
 }
 function drawAxes(P) {
   const e = viewEnd();
-  ctx.fillStyle = "#cfd3d8"; ctx.strokeStyle = "#777"; ctx.lineWidth = 1; ctx.font = "13px system-ui, sans-serif";
+  ctx.fillStyle = C.text; ctx.strokeStyle = C.tick; ctx.lineWidth = 1; ctx.font = "13px system-ui, sans-serif";
   ctx.strokeRect(P.x + 0.5, P.y + 0.5, P.w, P.h);
   const xs = S.xTime ? niceStep(S.view.spp * 110, T_STEPS) : niceNumber(S.view.spp * 90);
   ctx.textAlign = "center"; ctx.textBaseline = "top";
@@ -1630,11 +1652,16 @@ function initControls() {
   $("selCmap").value = S.disp.cmap; $("selStat").value = S.disp.stat; $("selScale").value = S.disp.scale; $("chkSmooth").checked = S.disp.smooth;
   $("selGroup").onchange = (ev) => setGroup(ev.target.value);
   $("btnWhole").onclick = () => { pushView(); wholeView(); };
+  $("btnTheme").onclick = () => setTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light", true);
   $("tools").onclick = (ev) => { const b = ev.target.closest("button"); if (b && b.dataset.mode) setMode(b.dataset.mode); };
   $("setChip").onclick = () => showSide(true);
   $("selStat").onchange = (ev) => { S.disp.stat = ev.target.value; S.autoPending = true; saveDisp(); redraw(); };
   $("selScale").onchange = (ev) => { S.disp.scale = ev.target.value; S.autoPending = true; saveDisp(); redraw(); };
-  $("selCmap").onchange = (ev) => { S.disp.cmap = ev.target.value; buildLut(); saveDisp(); redraw(); };
+  $("selCmap").onchange = (ev) => {
+    S.disp.cmap = ev.target.value; buildLut(); saveDisp();
+    if (!S.manual) autoContrast(true);  // a diverging map wants its limits either side of zero
+    redraw();
+  };
   $("chkSmooth").onchange = (ev) => { S.disp.smooth = ev.target.checked; saveDisp(); redraw(); };
   for (const [id, key] of [["inpVmin", "vmin"], ["inpVmax", "vmax"]]) {
     $(id).onchange = (ev) => { const v = parseFloat(ev.target.value); if (Number.isFinite(v)) { S.disp[key] = v; S.autoPending = false; S.manual = true; S.lutVer++; redraw(); } };
@@ -1750,6 +1777,8 @@ function readHash() {
 
 // ------------------------------------------------------------------ start
 async function init() {
+  let theme = null; try { theme = localStorage.getItem("dastor.theme"); } catch (e) { /* the system's */ }
+  setTheme(theme);
   initControls(); buildLut(); resize();
   try {
     const listing = await api("/viewer/products");
