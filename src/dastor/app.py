@@ -2,11 +2,13 @@
 
 import asyncio
 import contextlib
+import gzip
 import logging
 import os
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from pathlib import Path as FilePath
 from typing import Annotated, Literal
 
 import anyio
@@ -15,20 +17,48 @@ import dascore.exceptions as dce
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
+from fastapi import (
+    Body,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+)
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from dastor import __version__
+from dastor.annotations import (
+    AnnotationError,
+    AnnotationStore,
+    RevisionConflictError,
+)
 from dastor.auth import Authenticator, InvalidKeyError, Principal
 from dastor.catalog import Catalog, ChangedFileError, View
 from dastor.config import Settings
 from dastor.query import QueryError, selection
+from dastor.tiles import (
+    Stat,
+    decode_product,
+    encode_tile,
+    list_products,
+    product_axes,
+    product_rows,
+    render_tile,
+    tile_range,
+)
 from dastor.wire import FRAMED_MEDIA_TYPE, PATCH_MEDIA_TYPE, encode_patch, frame
 
 log = logging.getLogger(__name__)
 
 # Query parameters the endpoints use themselves rather than select on.
 _RESERVED = frozenset({"format", "dim"})
+
+# The viewer's page, scripts and styles.
+_STATIC = FilePath(__file__).parent / "static"
 
 # DASCore errors that mean the request asked for something invalid.
 _CLIENT_ERRORS = (
@@ -142,6 +172,7 @@ def summarize(df: pd.DataFrame) -> dict:
     return {
         "patches": len(df),
         "files": int(df["source_path"].nunique()) if len(df) else 0,
+        "bytes": estimated_bytes(df),
         "columns": list(df.columns),
         "dims": [x.split(",") for x in dims],
         "extents": extents,
@@ -221,8 +252,9 @@ def create_app(settings: Settings) -> FastAPI:
         """
         Summarize the patches matching the query.
 
-        With no query, that is all the caller may read. Gives counts, the
-        contents columns, the dims and each dim's extent.
+        With no query, that is all the caller may read. Gives counts, an
+        estimate of the array bytes, the contents columns, the dims and
+        each dim's extent.
         """
         return summarize(selected(request, who).get_contents())
 
@@ -331,6 +363,182 @@ def create_app(settings: Settings) -> FastAPI:
             body = encode_patch(next(_checked_patches(view, spool[:1], limit)))
         return Response(bytes(body), media_type=PATCH_MEDIA_TYPE)
 
+    @app.get("/v1/viewer/products")
+    def products(who: Who) -> dict:
+        """
+        Return the products the caller may read, for the viewer.
+
+        A product is the patches of one kind with the same dims and steps:
+        one layer at one resolution. Each has an `id` for `/v1/viewer/tile`.
+        `limits` are the bytes one tile and one screen of tiles may read.
+        """
+        contents = _shown(catalog.view(who).select().get_contents())
+        limits = settings.limits
+        return {
+            "products": list_products(contents),
+            "limits": {
+                "max_tile_bytes": limits.max_tile_bytes,
+                "max_view_bytes": limits.max_view_bytes,
+            },
+        }
+
+    @app.get("/v1/viewer/tile")
+    def tile(
+        request: Request,
+        who: Who,
+        product: str,
+        width: Annotated[int, Query(ge=1, le=1024)] = 256,
+        height: Annotated[int, Query(ge=1, le=1024)] = 256,
+        stat: Annotated[Stat, Query()] = "max",
+    ):
+        """
+        Return one image tile of a product, reduced to `height` x `width`.
+
+        `<x>_min`/`<x>_max` and `<y>_min`/`<y>_max` bound the tile along the
+        product's two dims. The body is little-endian float32 rows, the
+        lowest y first, with NaN where there is no data. A tile with no
+        data is 204, and one needing too many samples is 413 (zoom in, or
+        use a coarser product).
+        """
+        wanted = decode_product(product)
+        x, y = product_axes(wanted["dims"])
+        reserved = _RESERVED | {"product", "width", "height", "stat"}
+        kwargs = selection(request.query_params.multi_items(), reserved)
+        if len(wanted["dims"]) != 2 or not {x, y} <= set(kwargs):
+            raise QueryError("a tile needs a product of two dims and bounds on both")
+        view, spool = selected_with_view(request, who, reserved)
+        contents = spool.get_contents()
+        if len(contents):
+            spool = spool[product_rows(contents, wanted)]
+            contents = spool.get_contents()
+        if not len(contents):
+            return Response(status_code=204)
+        ranges = [
+            tile_range(kwargs[dim], contents[f"{dim}_min"].dtype.kind in "Mm")
+            for dim in (x, y)
+        ]
+        limit = settings.limits.max_tile_bytes
+        if (size := estimated_bytes(contents)) > limit:
+            msg = f"tile would read about {size} bytes; the limit is {limit}"
+            raise HTTPException(413, msg)
+        with _load_errors(), loads:
+            patches = _checked_patches(view, spool, limit)
+            values = render_tile(patches, x, y, *ranges, (height, width), stat)
+        if values is None:
+            return Response(status_code=204)
+        body, headers = encode_tile(values), {"Vary": "Accept-Encoding"}
+        if "gzip" in request.headers.get("accept-encoding", ""):
+            body = gzip.compress(body, compresslevel=1)
+            headers["Content-Encoding"] = "gzip"
+        return Response(body, media_type="application/octet-stream", headers=headers)
+
+    store = settings.annotations and AnnotationStore(settings.annotations.path)
+
+    def annotation_store() -> AnnotationStore:
+        if not store:
+            raise HTTPException(404, "this server keeps no annotations")
+        return store
+
+    Store = Annotated[AnnotationStore, Depends(annotation_store)]
+
+    def owner_name(who: Principal) -> str | None:
+        """Return the name a principal owns annotation sets under, if any."""
+        if who.authenticated:
+            return who.name
+        return settings.annotations and settings.annotations.anonymous_owner
+
+    def readable(who: Principal) -> Callable[[str, str], bool]:
+        """
+        Return a test of whether the caller may read a set.
+
+        A caller reads their own sets, sets naming no acquisition, and sets
+        on an acquisition among the data they may read.
+        """
+        name, keys = owner_name(who), None
+
+        def check(owner: str, acquisition_key: str) -> bool:
+            nonlocal keys
+            if not acquisition_key or owner == name:
+                return True
+            if keys is None:
+                contents = catalog.view(who).select().get_contents()
+                column = contents.get("acquisition_key", pd.Series(dtype=str))
+                keys = set(column.astype(str))
+            return acquisition_key in keys
+
+        return check
+
+    def own(who: Principal, owner: str) -> str:
+        """Return the caller's owner name, refusing writes to others' sets."""
+        name = owner_name(who)
+        if name is None or name != owner:
+            raise HTTPException(403, "only a set's owner may change it")
+        return name
+
+    for error, status in ((AnnotationError, 400), (FileNotFoundError, 404)):
+
+        def _annotation_error(request: Request, exc: Exception, status=status):
+            return JSONResponse({"detail": str(exc)}, status_code=status)
+
+        app.add_exception_handler(error, _annotation_error)
+
+    @app.get("/v1/annotations")
+    def annotation_sets(who: Who, store: Store) -> dict:
+        """
+        List the annotation sets on data the caller may read.
+
+        `owner` is the name the caller's own sets are saved under (null if
+        the caller can't save), and each set says whether it is `editable`.
+        """
+        name, check = owner_name(who), readable(who)
+        sets = [x for x in store.list() if check(x["owner"], x["acquisition_key"])]
+        for entry in sets:
+            entry["editable"] = entry["owner"] == name
+        return {"owner": name, "sets": sets}
+
+    @app.get("/v1/annotations/{owner}/{name}")
+    def annotation_set(owner: str, name: str, who: Who, store: Store) -> dict:
+        """
+        Return one annotation set as its annotations and features tables.
+
+        Both are JSON records of a DASCore annotation set, with times in
+        ISO 8601; `revision` is what a save must be based on.
+        """
+        document = store.document(owner, name)
+        if not readable(who)(owner, document["acquisition_key"]):
+            raise FileNotFoundError(f"no annotation set {owner}/{name}")
+        return document
+
+    @app.put("/v1/annotations/{owner}/{name}")
+    def save_annotation_set(
+        owner: str,
+        name: str,
+        who: Who,
+        store: Store,
+        document: Annotated[dict, Body()],
+    ):
+        """
+        Save an annotation set as its next revision; only its owner may.
+
+        The body is as `GET` returns, with `base_revision` the revision it
+        was read at (0 for a new set); a save based on an older revision is
+        409. The server sets each feature's `created_time`, `modified_time`
+        and `modified_by`.
+        """
+        user = own(who, owner)
+        try:
+            return store.save(owner, name, document, user)
+        except RevisionConflictError as exc:
+            detail = {"detail": str(exc), "revision": exc.current}
+            return JSONResponse(detail, status_code=409)
+
+    @app.delete("/v1/annotations/{owner}/{name}", status_code=204)
+    def delete_annotation_set(owner: str, name: str, who: Who, store: Store):
+        """Delete an annotation set; only its owner may."""
+        own(who, owner)
+        store.delete(owner, name)
+
+    app.mount("/viewer", StaticFiles(directory=_STATIC, html=True), name="viewer")
     return app
 
 

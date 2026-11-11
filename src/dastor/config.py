@@ -106,6 +106,29 @@ class Limits(_Model):
     max_request_bytes: int = Field(default=2 * 1024**3, gt=0)
     # Patches loading at once across all requests.
     max_concurrent_loads: int = Field(default=4, gt=0)
+    # An estimate of the array bytes one viewer tile may read.
+    max_tile_bytes: int = Field(default=64 * 1024**2, gt=0)
+    # The array bytes the viewer reads for one screen; beyond it the viewer
+    # draws an outline of the data instead of asking for tiles.
+    max_view_bytes: int = Field(default=512 * 1024**2, gt=0)
+
+
+class AnnotationConfig(_Model):
+    """
+    Where annotation sets are kept, which turns the annotation API on.
+
+    Parameters
+    ----------
+    path
+        A directory outside the data directory; sets are stored in it as
+        `<owner>/<name>/`.
+    anonymous_owner
+        The owner anonymous requests write as (`dastor browse` uses the
+        system user). None refuses anonymous writes.
+    """
+
+    path: Path
+    anonymous_owner: str | None = None
 
 
 class Settings(_Model):
@@ -114,6 +137,7 @@ class Settings(_Model):
     spool: SpoolConfig
     users: list[User] = []
     limits: Limits = Limits()
+    annotations: AnnotationConfig | None = None
 
     @field_validator("users")
     @classmethod

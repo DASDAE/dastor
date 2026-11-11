@@ -38,6 +38,10 @@ users:
 limits:
   max_request_bytes: 2147483648 # largest data response, estimated before loading
   max_concurrent_loads: 4       # patches loading at once
+  max_tile_bytes: 67108864      # most one viewer tile may read
+  max_view_bytes: 536870912     # most the viewer reads for one screen
+annotations:                    # optional: turns on the annotation API
+  path: /data/das_annotations   # a directory outside the data directory
 ```
 
 ```console
@@ -45,6 +49,24 @@ $ dastor serve config.yaml --host 0.0.0.0 --port 8000
 ```
 
 The server runs as one process: it indexes the directory at start (and on its refresh interval), and loads patches in a thread pool.
+
+## Viewer
+
+dastor includes a viewer for looking at data in the browser, annotating it and choosing areas to download. To use it on a directory of your own, with no config file:
+
+```console
+$ dastor browse /data/das
+```
+
+This serves the directory on `127.0.0.1`, opens the viewer, and keeps annotations beside the data in `/data/das_annotations` (`--annotations` puts them elsewhere). A server started with `dastor serve` has the same viewer at `/viewer/`. The viewer has no sign-in yet, so on a server with users it shows only what anonymous requests may read; use it on a trusted network.
+
+**Products and levels.** The viewer draws products: the patches of one kind (the same `acquisition_key`, `tag` and DASCore's other kind attributes) with the same dims and steps. Products sharing an `acquisition_key` are one recording, and the Levels panel lists them from coarse to fine. Tick the ones to zoom through; the viewer draws the coarsest ticked product with at least one sample for each pixel, and a click on a name pins the view to it. dastor does not make coarse products: write them into the directory with DASCore (for example the maximum over each second), tagged so they can be told apart.
+
+**Limits.** A view which would read more than `max_view_bytes` of a product is not loaded. The nearest coarser ticked product stands in, and with none the viewer draws an outline of where the product has data. Tick a coarser product, or zoom in.
+
+**Annotations.** Points, paths, polygons and boxes are saved as DASCore annotation sets, one directory per set under `<owner>/<name>/` with Parquet tables, which `dascore.annotations(path)` reads. Every set can be read by anyone who may read its data; only its owner changes it. To correct someone else's annotations (or a detector's), select a feature and copy it into your own set: the copy records its source in `derived_from` (`owner/set/feature id`) and `derived_revision`. The server sets each feature's `created_time`, `modified_time` and `modified_by`. Features too close together to tell apart are drawn as one marker with their number; hovering says what it holds and a click zooms in.
+
+**Downloading an area.** "select area" and a drag give the size of that part of a product and a link which downloads it as a DASDAE file from `/v1/data`.
 
 ## Access control
 
@@ -54,16 +76,20 @@ Access is per file. A file is visible to a user only when every patch in it matc
 
 | Endpoint | Returns |
 |---|---|
-| `GET /v1/summary` | Patch and file counts, the contents columns, the dims and each dim's extent. |
+| `GET /v1/summary` | Patch and file counts, an estimate of the array bytes, the contents columns, the dims and each dim's extent. |
 | `GET /v1/contents` | Patch metadata (JSON, or `format=arrow`). |
 | `GET /v1/coverage?dim=time` | The spans of a dimension the patches cover. |
 | `GET /v1/gaps?dim=time` | The gaps between them. |
 | `GET /v1/data` | The patches, trimmed to the query (`format=arrow` or `format=dasdae`). |
 | `GET /v1/patch/{data_id}` | One patch, by the `data_id` its contents row gives, as one Arrow IPC stream; `<coord>_min`/`<coord>_max` trim it (404 if missing or not visible). |
 | `GET /v1/index` | A DASCore spool index (SQLite) of the patches the caller may read: metadata only, for the client. |
+| `GET /v1/viewer/products` | The products the caller may read (see [Viewer](#viewer)), each with an `id`, its steps, extents and recorded spans, and the viewer's limits. |
+| `GET /v1/viewer/tile?product=<id>` | One image of a product: `<x>_min`/`<x>_max` and `<y>_min`/`<y>_max` bound it, `width` and `height` size it, and `stat` is `max`, `mean` or `absmax`. Little-endian float32 rows, the lowest y first, NaN where there is no data (204 if none, 413 over `max_tile_bytes`). |
+| `GET /v1/annotations` | The annotation sets on data the caller may read, and the name the caller saves under. |
+| `GET`, `PUT`, `DELETE /v1/annotations/{owner}/{name}` | One annotation set, as the JSON records of its annotations and features tables. A save states the `base_revision` it was read at (409 if the set has moved on); only the owner saves or deletes. |
 | `GET /health` | Server status. |
 
-Every endpoint but `/health` sees only what the caller may read, and the summary, contents, coverage, gaps, data and patch endpoints take query parameters that select patches: `<coord>_min` and `<coord>_max` bound a coordinate, and any other parameter selects an attribute, with DASCore's `*` and `?` wildcards:
+Every endpoint but `/health` sees only what the caller may read, and the summary, contents, coverage, gaps, data, patch and tile endpoints take query parameters that select patches: `<coord>_min` and `<coord>_max` bound a coordinate, and any other parameter selects an attribute, with DASCore's `*` and `?` wildcards:
 
 ```console
 $ curl -H "Authorization: Bearer $KEY" \
@@ -108,6 +134,7 @@ The spool comes from the server's index (`/v1/index`), so selecting, chunking, c
 $ uv sync
 $ uv run pytest
 $ uv run ruff check . && uv run ruff format --check .
+$ uv run pytest -m browser    # the viewer in a headless Chromium; not run in CI
 ```
 
 dastor tracks DASCore's `dev` branch (see `[tool.uv.sources]` in `pyproject.toml`).

@@ -3,6 +3,7 @@
 import warnings
 
 import dascore as dc
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -65,6 +66,61 @@ def settings(data_dir):
 def client(settings):
     """A test client with the spool opened."""
     with TestClient(create_app(settings)) as out:
+        yield out
+
+
+VIEW_KEY = "DEMO.CABLE..A1"  # the acquisition the viewer's products share
+
+
+def _viewer_patches():
+    """
+    Yield a recording as viewer products: raw data in two blocks with a
+    gap between them, and its maximum over each 0.1 s and four channels.
+    """
+    rng = np.random.default_rng(0)
+    start = np.datetime64("2024-05-01T00:00:00")
+    distance = np.arange(64) * 2.0
+    for offset in (0, 180):  # seconds; the second block starts after a gap
+        time = start + np.timedelta64(offset, "s")
+        time = time + np.arange(6000) * np.timedelta64(10, "ms")
+        data = rng.normal(0, 1, (64, 6000)).astype("float32")
+        data[np.arange(6000) * 64 // 6000, np.arange(6000)] += 8  # a moving source
+        coarse = np.abs(data).reshape(16, 4, 600, 10).max((1, 3))
+        for tag, values, dist, times in (
+            ("raw", data, distance, time),
+            ("max_100ms", coarse, distance[::4], time[::10]),
+        ):
+            yield dc.Patch(
+                data=values,
+                coords={"distance": dist, "time": times},
+                dims=("distance", "time"),
+                attrs={"tag": tag, "acquisition_key": VIEW_KEY},
+            ).update_coords(distance=dc.get_coord(data=dist, units="m"))
+
+
+@pytest.fixture(scope="session")
+def viewer_dir(tmp_path_factory):
+    """A directory holding one recording at two resolutions."""
+    path = tmp_path_factory.mktemp("viewer_data")
+    for number, patch in enumerate(_viewer_patches()):
+        dc.write(patch, path / f"{patch.attrs.tag}_{number}.h5", "DASDAE")
+    return path
+
+
+@pytest.fixture
+def viewer_settings(viewer_dir, tmp_path):
+    """Settings as `dastor browse` makes them, with an empty annotation store."""
+    from dastor.cli import browse_settings  # noqa: PLC0415
+
+    config = browse_settings(str(viewer_dir), str(tmp_path / "annotations"))
+    config["annotations"]["anonymous_owner"] = "me"
+    return Settings.model_validate(config)
+
+
+@pytest.fixture
+def viewer(viewer_settings):
+    """A test client on the viewer's directory."""
+    with TestClient(create_app(viewer_settings)) as out:
         yield out
 
 
