@@ -19,9 +19,13 @@ const THEME = { blue: "#3978d6", gold: "#ffc934", red: "#d0002a", steel: "#c6c7c
 // What the canvas draws round the data, for each theme. The data keeps its colour map.
 const CHROME = {
   dark: { bg: "#101214", plot: "#000", gap: "#1b1d22", hatch: "rgba(255,200,80,0.25)", gapText: "rgba(255,210,120,0.95)",
-    text: "#cfd3d8", dim: "#9aa0a6", tick: "#777", strip: "#3a3d42", stripGap: "#15161a", bad: "#ff8b96" },
-  light: { bg: "#f3f4f6", plot: "#dfe2e6", gap: "#eceef1", hatch: "rgba(150,100,0,0.3)", gapText: "#7a5200",
-    text: "#2b2e33", dim: "#5d6167", tick: "#8a8e95", strip: "#c9cdd3", stripGap: "#f3f4f6", bad: "#b00020" },
+    text: "#cfd3d8", dim: "#9aa0a6", tick: "#777", strip: "#3a3d42", stripGap: "#15161a", bad: "#ff8b96",
+    win: "#ffc934", winFill: "rgba(255,201,52,0.28)", outline: "#c6c7cb", outlineFill: "rgba(198,199,203,0.06)",
+    noteBg: "rgba(20,22,26,0.92)", noteText: "#ffc934", noteSub: "#cfd3d8", accent: "#ffc934" },
+  light: { bg: "#f3f4f6", plot: "#e9ebee", gap: "#e4e6ea", hatch: "rgba(122,82,0,0.38)", gapText: "#7a5200",
+    text: "#2b2e33", dim: "#5d6167", tick: "#8a8e95", strip: "#6b7078", stripGap: "#dfe2e6", bad: "#b00020",
+    win: "#8a5d00", winFill: "rgba(138,93,0,0.16)", outline: "#5d6167", outlineFill: "rgba(29,31,35,0.05)",
+    noteBg: "rgba(255,255,255,0.94)", noteText: "#7a5200", noteSub: "#2b2e33", accent: "#8a5d00" },
 };
 let C = CHROME.dark;
 // The theme: the one chosen here before, else the system's.
@@ -477,7 +481,7 @@ function drawTiles(P) {
 function drawOutline(l, P) {
   const cx = l.p.coords[S.x], cy = l.p.coords[S.y];
   const ya = y2px(cy.max + l.sy), yb = y2px(cy.min);
-  ctx.setLineDash([2, 4]); ctx.lineWidth = 1.5; ctx.strokeStyle = THEME.steel; ctx.fillStyle = "rgba(198,199,203,0.06)";
+  ctx.setLineDash([2, 4]); ctx.lineWidth = 1.5; ctx.strokeStyle = C.outline; ctx.fillStyle = C.outlineFill;
   for (const [a, b] of cx.spans) {
     const xa = x2px(xRead(a)), xb = x2px(xRead(b) + l.sx);
     if (xb < P.x || xa > P.x + P.w) continue;
@@ -594,10 +598,10 @@ function draw() {
   ctx.font = "13px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
   notes.forEach(([txt, bad], i) => {
     const w = ctx.measureText(txt).width + 12;
-    ctx.fillStyle = "rgba(20,22,26,0.9)"; ctx.fillRect(P.x + P.w - w - 6, P.y + 6 + i * 26, w, 22);
-    ctx.fillStyle = bad ? "#ff8b96" : THEME.gold; ctx.fillText(txt, P.x + P.w - w, P.y + 17 + i * 26);
+    ctx.fillStyle = C.noteBg; ctx.fillRect(P.x + P.w - w - 6, P.y + 6 + i * 26, w, 22);
+    ctx.fillStyle = bad ? C.bad : C.noteText; ctx.fillText(txt, P.x + P.w - w, P.y + 17 + i * 26);
   });
-  if (pending) { ctx.fillStyle = THEME.gold; ctx.fillRect(P.x, P.y, P.w * 0.25, 2); }  // a quiet sign that tiles are coming
+  if (pending) { ctx.fillStyle = C.accent; ctx.fillRect(P.x, P.y, P.w * 0.25, 2); }  // a quiet sign that tiles are coming
   ctx.restore();
   drawAxes(P);
   drawColorBar(P);
@@ -611,10 +615,10 @@ function drawBlocked(P) {
     S.pin ? "Zoom in, or set the level (bottom right) to auto." : "Zoom in, or tick a coarser product under Levels."];
   ctx.font = "15px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
   const w = Math.max(...lines.map((t) => ctx.measureText(t).width)) + 28, x = P.x + P.w / 2, y = P.y + P.h / 2;
-  ctx.fillStyle = "rgba(20,22,26,0.92)"; ctx.fillRect(x - w / 2, y - 30, w, 60);
-  ctx.strokeStyle = THEME.gold; ctx.lineWidth = 1; ctx.strokeRect(x - w / 2 + 0.5, y - 29.5, w - 1, 59);
-  ctx.fillStyle = THEME.gold; ctx.fillText(lines[0], x, y - 11);
-  ctx.fillStyle = "#cfd3d8"; ctx.fillText(lines[1], x, y + 11);
+  ctx.fillStyle = C.noteBg; ctx.fillRect(x - w / 2, y - 30, w, 60);
+  ctx.strokeStyle = C.accent; ctx.lineWidth = 1; ctx.strokeRect(x - w / 2 + 0.5, y - 29.5, w - 1, 59);
+  ctx.fillStyle = C.noteText; ctx.fillText(lines[0], x, y - 11);
+  ctx.fillStyle = C.noteSub; ctx.fillText(lines[1], x, y + 11);
 }
 // What the colours mean: the map from the high limit (top) to the low (bottom). A click on it
 // sets the limits from what is on screen.
@@ -664,8 +668,8 @@ function drawOverview(P) {
     }
   }
   const xa = clamp(stripX(P, S.view.x0), r.x, r.x + r.w), xb = clamp(stripX(P, viewEnd().x1), r.x, r.x + r.w);
-  ctx.fillStyle = "rgba(255,201,52,0.28)"; ctx.fillRect(xa, r.y - 2, Math.max(xb - xa, 3), r.h + 4);
-  ctx.strokeStyle = THEME.gold; ctx.lineWidth = 1.5; ctx.strokeRect(xa, r.y - 2, Math.max(xb - xa, 3), r.h + 4);
+  ctx.fillStyle = C.winFill; ctx.fillRect(xa, r.y - 2, Math.max(xb - xa, 3), r.h + 4);
+  ctx.strokeStyle = C.win; ctx.lineWidth = C === CHROME.light ? 2 : 1.5; ctx.strokeRect(xa, r.y - 2, Math.max(xb - xa, 3), r.h + 4);
 }
 function drawAxes(P) {
   const e = viewEnd();
@@ -1141,9 +1145,11 @@ function drawAnnotations(P) {
     ctx.fillText(c.feats.length > 999 ? "999+" : String(c.feats.length), c.x, c.y + 0.5);
   }
   if (S.draft) {
-    ctx.strokeStyle = "#fff"; ctx.fillStyle = "#fff"; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
     const snap = snapTarget(S.mouse);
     const pts = S.mouse ? [...S.draft.pts, snap ? snap.pt : [px2x(S.mouse.x), px2y(S.mouse.y)]] : S.draft.pts;
+    // dark under white, so it shows on pale ground (a gap, a white-centred map) as on dark
+    ctx.strokeStyle = "rgba(0,0,0,0.75)"; ctx.lineWidth = 3.5; strokePts(pts, S.draft.kind === "polygon"); ctx.stroke();
+    ctx.strokeStyle = "#fff"; ctx.fillStyle = "#fff"; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
     strokePts(pts, S.draft.kind === "polygon"); ctx.stroke(); ctx.setLineDash([]);
     ctx.strokeStyle = "#000"; for (const p of S.draft.pts) dot(p, 3.5);
     if (snap) {  // a ring round the vertex the next click lands on

@@ -4,13 +4,23 @@
   --text: #e8e9ec; --muted: #adb0b6;
   --blue: #2f6cc7; --blue-soft: #9bbdf0; --navy: #002868;
   --gold: #ffc934; --red: #ff6b7c; --red-deep: #d0002a;
+  /* text and thin marks in gold; a field's fill and a control's edge; a quiet rule; a raised thing's shadow */
+  --gold-ink: #ffc934; --field: #33363a; --edge: #5d6167; --hair: #5d6167; --lift: none;
+  --btn-hover: #9bbdf0; --btn-hover-text: #002868; --backdrop: rgba(0, 0, 0, 0.55);
 }
 :root[data-theme="light"] {
   --bg: #f3f4f6; --panel: #ffffff; --raised: #e7e9ec; --line: #b4b8bf;
   --text: #1d1f23; --muted: #5d6167;
   --blue: #2f6cc7; --blue-soft: #1d4f9c; --navy: #002868;
-  --gold: #b97f00; --red: #c2001f; --red-deep: #d0002a;
+  --gold: #ffc934; --red: #c2001f; --red-deep: #d0002a;
+  --gold-ink: #8a5d00; --field: #ffffff; --edge: #8d929a; --hair: #e1e4e8; --lift: 0 2px 8px rgba(0, 0, 0, 0.18);
+  --btn-hover: #1d4f9c; --btn-hover-text: #ffffff; --backdrop: rgba(29, 31, 35, 0.35);
+  color-scheme: light;
 }
+:root[data-theme="light"] button:disabled { opacity: 1; color: #8a8e95; background: #f3f4f6; border-color: #d5d8dd; }
+:root[data-theme="light"] :is(#levelBar button.pinned, a.btn.big, #labelBox) { border-color: #b97f00; }
+:root[data-theme="light"] dialog#help { box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25); }
+:root[data-theme="light"] .brand img { filter: drop-shadow(0 0 0.6px #232426) contrast(1.15) brightness(0.92); }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 15px system-ui, sans-serif; }
 [hidden] { display: none !important; }
 #top { position: fixed; top: 0; left: 0; right: 0; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
@@ -27,7 +37,7 @@ button.tool svg { pointer-events: none; }
 .swatch { width: 11px; height: 11px; border-radius: 2px; flex: none; border: 1px solid #000; }
 .dot { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--muted); box-sizing: border-box; }
 .dot.ok { background: var(--muted); }
-.dot.busy { background: none; border-color: var(--gold); }
+.dot.busy { background: none; border-color: var(--gold-ink); }
 .dot.bad { background: var(--red); border-color: var(--red); }
 #main { position: fixed; top: 58px; bottom: 30px; left: 0; right: 0; display: flex; }
 #view { position: relative; flex: 1; min-width: 0; }
@@ -42,15 +52,17 @@ button.tool svg { pointer-events: none; }
 #levelBar button { font-size: 13px; padding: 1px 9px; border-radius: 0; margin-left: -1px; }
 #levelBar button:first-child { border-radius: 3px 0 0 3px; margin-left: 0; }
 #levelBar button:last-child { border-radius: 0 3px 3px 0; }
-#levelBar button.shown { box-shadow: inset 0 -3px 0 var(--gold); color: var(--text); }
+#levelBar button.shown { box-shadow: inset 0 -3px 0 var(--gold-ink); color: var(--text); }
 #levelBar button.pinned { background: var(--gold); border-color: var(--gold); color: #1c1c1c; font-weight: 600; }
-details { border-bottom: 1px solid var(--line); padding: 4px 0 8px; }
+details { border-bottom: 1px solid var(--hair); padding: 4px 0 8px; }
 summary { cursor: pointer; font-weight: 600; padding: 3px 0; }
-summary::marker { color: var(--gold); }
+summary::marker { color: var(--gold-ink); }
 .row { margin: 5px 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .hint { color: var(--muted); font-size: 14px; line-height: 1.4; }
-button, select, input { background: var(--raised); color: var(--text); border: 1px solid var(--line); border-radius: 3px;
+button, select, input { background: var(--raised); color: var(--text); border: 1px solid var(--edge); border-radius: 3px;
   font: inherit; padding: 2px 6px; }
+select, input { background: var(--field); }
+:root[data-theme="light"] ::placeholder { color: var(--muted); opacity: 1; }
 button { cursor: pointer; }
 button:hover:not(:disabled) { border-color: var(--blue-soft); }
 button:disabled { opacity: 0.45; cursor: default; }
@@ -75,29 +87,29 @@ table.cols td { padding: 2px 2px; vertical-align: middle; }
 table.cols td:first-child { color: var(--muted); white-space: nowrap; }
 table.cols input { width: 100%; box-sizing: border-box; }
 table.keys { border-collapse: collapse; width: 100%; font-size: 15px; margin-top: 4px; }
-table.keys td { padding: 3px 6px; vertical-align: top; border-top: 1px solid var(--line); }
+table.keys td { padding: 3px 6px; vertical-align: top; border-top: 1px solid var(--hair); }
 table.keys td:first-child { white-space: nowrap; }
 table.keys td:last-child { color: var(--muted); }
-table.keys tr.group th { text-align: left; padding: 12px 6px 3px; color: var(--gold); font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; }
-#toast, #tip { position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; display: none; z-index: 4; }
-#toast { left: 50%; top: 12px; transform: translateX(-50%); padding: 6px 12px; border-left: 3px solid var(--gold); max-width: 70%; }
+table.keys tr.group th { text-align: left; padding: 12px 6px 3px; color: var(--gold-ink); font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; }
+#toast, #tip { position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; display: none; z-index: 4; box-shadow: var(--lift); }
+#toast { left: 50%; top: 12px; transform: translateX(-50%); padding: 6px 12px; border-left: 3px solid var(--gold-ink); max-width: 70%; }
 #tip { pointer-events: none; padding: 3px 8px; font-size: 14px; white-space: nowrap; }
 /* The label of a new annotation, typed where it was drawn. */
-#labelBox { position: absolute; width: 170px; z-index: 4; border: 2px solid var(--gold); background: var(--panel); padding: 3px 6px; }
+#labelBox { position: absolute; width: 170px; z-index: 4; border: 2px solid var(--gold); background: var(--panel); padding: 3px 6px; box-shadow: var(--lift); }
 /* The tab on the side panel's edge, halfway down, which folds it away. */
 #sideHandle { position: absolute; right: 0; top: 50%; transform: translateY(-50%); width: 16px; height: 56px; padding: 0;
   border-radius: 6px 0 0 6px; border-right: 0; background: var(--panel); color: var(--muted); font-size: 18px; line-height: 1; z-index: 3; }
-#sideHandle:hover { color: var(--gold); border-color: var(--gold); }
+#sideHandle:hover { color: var(--gold-ink); border-color: var(--gold-ink); }
 dialog#help { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-top: 3px solid var(--gold);
   border-radius: 6px; padding: 14px 18px; width: min(640px, 92vw); max-height: 88vh; overflow-y: auto; }
 #btnHelpClose { position: absolute; top: 6px; right: 8px; border: 0; background: none; color: var(--muted);
   font-size: 24px; line-height: 1; padding: 2px 6px; }
-#btnHelpClose:hover { color: var(--gold); }
-dialog#help::backdrop { background: rgba(0, 0, 0, 0.55); }
+#btnHelpClose:hover { color: var(--gold-ink); }
+dialog#help::backdrop { background: var(--backdrop); }
 a { color: var(--blue-soft); }
 a.btn { display: inline-block; background: var(--blue); color: #fff; border: 1px solid var(--blue-soft); border-radius: 3px;
   padding: 3px 12px; font-weight: 600; text-decoration: none; }
-a.btn:hover { background: var(--blue-soft); color: var(--navy); }
+a.btn:hover { background: var(--btn-hover); color: var(--btn-hover-text); }
 a.btn.big { background: var(--gold); border-color: var(--gold); color: #1c1c1c; }
 
 #areaProducts { display: flex; flex-direction: column; gap: 2px; margin: 4px 0; }
