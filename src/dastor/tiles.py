@@ -25,8 +25,10 @@ def _number(value) -> float | int | None:
         return None
     if isinstance(value, pd.Timestamp | pd.Timedelta):
         return int(value.value)
-    if isinstance(value, np.datetime64 | np.timedelta64):
+    if isinstance(value, np.datetime64):
         return int(value.astype("datetime64[ns]").astype("int64"))
+    if isinstance(value, np.timedelta64):
+        return int(value.astype("timedelta64[ns]").astype("int64"))
     try:
         out = float(value)
     except TypeError, ValueError:
@@ -132,8 +134,9 @@ def list_products(contents: pd.DataFrame) -> list[dict]:
     A product is the patches of one kind (the values of DASCore's kind
     attributes, such as `acquisition_key` and `tag`) which share dims and
     steps, so each is one layer at one resolution. A product of two dims is
-    viewable: `x` is `time` when it has it, and `y` the other dim. Steps and
-    spans of times are in seconds and ISO 8601.
+    viewable: `x` is `time` when it has it, and `y` the other dim. Under
+    `coords`, a time's step is in seconds and its bounds are ISO 8601; the
+    `steps` which identify the product keep times as whole nanoseconds.
     """
     if contents.empty:
         return []
@@ -183,12 +186,10 @@ def list_products(contents: pd.DataFrame) -> list[dict]:
             {
                 "id": encode_product(product),
                 **product,
-                "label": " ".join(product["attrs"].values()) or "(untagged)",
                 "coords": info,
                 "x": x,
                 "y": y,
                 "viewable": viewable,
-                "patches": len(rows),
                 "dtype": str(part["dtype"].iloc[0]) if "dtype" in part else "",
             }
         )
@@ -226,9 +227,14 @@ def _reduce_axis(data: np.ndarray, bins, ufunc, empty) -> np.ndarray:
 
 
 def _rebin(data: np.ndarray, y_bins, x_bins, ufunc, empty) -> np.ndarray:
-    """Reduce an array of dims (y, x) into the bins of both axes."""
-    out = _reduce_axis(data, y_bins, ufunc, empty)
-    return _reduce_axis(out.T, x_bins, ufunc, empty).T
+    """
+    Reduce an array of dims (y, x) into the bins of both axes.
+
+    x goes first: it runs along the rows as they lie in memory, which is
+    several times faster on a wide patch than reducing down the columns.
+    """
+    out = _reduce_axis(data.T, x_bins, ufunc, empty).T
+    return _reduce_axis(out, y_bins, ufunc, empty)
 
 
 def _step(coord: np.ndarray, patch: dc.Patch, dim: str) -> float:
@@ -251,40 +257,52 @@ def render_tile(
     """
     Reduce patches to one image of `shape` (y, x) bins over the ranges.
 
-    A bin shows the statistic of the samples in it, or its nearest sample
-    where the data is coarser than the bins; bins the patches don't cover
-    are NaN. Returns None when no bin has data. Ranges are numbers, with
-    times in nanoseconds.
+    A bin shows the statistic of the samples in it. Where the data is
+    coarser than the bins, a bin holding no sample shows the sample whose
+    cell it starts in. Bins the patches don't cover are NaN. Returns None
+    when no bin has data. Ranges are numbers, with times in nanoseconds.
+
+    Samples always outrank a repeated one, so a bin reads the same however
+    the data is split into patches: a patch ending just before a bin does
+    not put its last sample into what the next patch holds.
     """
-    total = np.full(shape, np.nan, dtype="float32")
+    held = np.full(shape, np.nan, dtype="float32")  # from the samples in a bin
     weight = np.zeros(shape, dtype="float32")
+    shown = np.full(shape, np.nan, dtype="float32")  # repeated, for bins of none
     for patch in patches:
         if set(patch.dims) != {x, y}:
             continue
         data = np.asarray(patch.transpose(y, x).data)
         if not data.size:
             continue
-        if data.dtype.kind == "c" or stat == "absmax":
+        if data.dtype.kind == "c":
             data = np.abs(data)
-        data = data.astype("float32", copy=False)
+        data = np.ascontiguousarray(data, dtype="float32")
+        if stat == "absmax":  # as floats: the lowest integer has no positive
+            data = np.abs(data)
         coords = {d: _numbers(np.asarray(patch.coords.get_array(d))) for d in (x, y)}
         if any(len(c) > 1 and c[0] > c[-1] for c in coords.values()):
             continue  # descending coordinates are not drawn
         x_bins = _bins(coords[x], *x_range, shape[1], _step(coords[x], patch, x))
         y_bins = _bins(coords[y], *y_range, shape[0], _step(coords[y], patch, y))
+        real = np.outer(y_bins[1] > y_bins[0], x_bins[1] > x_bins[0])
         if stat == "mean":
             finite = np.isfinite(data)
             part = _rebin(np.where(finite, data, 0), y_bins, x_bins, np.add, 0)
             count = _rebin(finite.astype("float32"), y_bins, x_bins, np.add, 0)
-            total = np.where(count > 0, np.nan_to_num(total) + part, total)
-            weight += count
+            held = np.where(real & (count > 0), np.nan_to_num(held) + part, held)
+            weight += np.where(real, count, 0)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                value = np.where(count > 0, part / count, np.nan)
         else:
-            part = _rebin(data, y_bins, x_bins, np.fmax, np.nan)
-            total = np.fmax(total, part)
+            value = _rebin(data, y_bins, x_bins, np.fmax, np.nan)
+            held = np.fmax(held, np.where(real, value, np.nan))
+        shown = np.where(np.isnan(shown) & ~real, value, shown)
     if stat == "mean":
         with np.errstate(invalid="ignore", divide="ignore"):
-            total = np.where(weight > 0, total / weight, np.nan).astype("float32")
-    return total if np.isfinite(total).any() else None
+            held = np.where(weight > 0, held / weight, np.nan)
+    out = np.where(np.isnan(held), shown, held).astype("float32")
+    return out if np.isfinite(out).any() else None
 
 
 def tile_range(value: tuple, timelike: bool) -> tuple:

@@ -159,6 +159,30 @@ class TestRenderTile:
             assert np.allclose(render_tile(parts, *args), render_tile([patch], *args))
         assert np.isfinite(whole).all()
 
+    @pytest.mark.parametrize("stat", ["max", "mean"])
+    def test_a_bin_reads_the_same_however_the_data_is_split(self, stat):
+        """A patch ending before a bin doesn't put its last sample into it."""
+        values = np.array([[0.0, 100.0, 2.0, 3.0]])
+        coords = {"distance": [0.0], "time": np.arange(4.0)}
+        whole = dc.Patch(data=values, coords=coords, dims=("distance", "time"))
+        parts = [
+            whole.select(time=(0, 2), samples=True),
+            whole.select(time=(2, 4), samples=True),
+        ]
+        # the second bin, [1.5, 3.5), holds the samples at 2 and 3 only
+        args = ("time", "distance", (-0.5, 3.5), (-0.5, 0.5), (1, 2), stat)
+        expected = {"max": [100.0, 3.0], "mean": [50.0, 2.5]}[stat]
+        assert render_tile([whole], *args)[0].tolist() == expected
+        assert render_tile(parts, *args)[0].tolist() == expected
+
+    def test_absmax_of_the_lowest_integer(self):
+        """The largest magnitude is taken as floats, where -32768 has one."""
+        values = np.array([[-32768, 0]], dtype="int16")
+        coords = {"distance": [0.0], "time": [0.0, 1.0]}
+        patch = dc.Patch(data=values, coords=coords, dims=("distance", "time"))
+        args = ("time", "distance", (0.0, 2.0), (-0.5, 0.5), (1, 1), "absmax")
+        assert render_tile([patch], *args).tolist() == [[32768.0]]
+
     def test_other_dims_are_skipped(self, patch, ranges):
         """A patch lacking the tile's dims adds nothing."""
         other = patch.rename_coords(distance="depth")
@@ -226,7 +250,9 @@ class TestTileEndpoint:
         settings = viewer_settings.model_copy(update={"limits": limits})
         with TestClient(create_app(settings)) as client:
             params = {**FIRST_BLOCK, "product": _products(client)["raw"]["id"]}
-            assert client.get("/v1/viewer/tile", params=params).status_code == 413
+            reply = client.get("/v1/viewer/tile", params=params)
+            assert reply.status_code == 413
+            assert "would read about" in reply.json()["detail"]  # the estimate
 
     def test_hidden_product_has_no_tiles(self, client):
         """A product the caller may not read gives an empty tile."""
@@ -258,6 +284,41 @@ class TestViewerPage:
         assert whole["bytes"] == 2 * 64 * 6000 * 4
         part = viewer.get("/v1/summary", params={"tag": "raw", **FIRST_BLOCK}).json()
         assert 0 < part["bytes"] < whole["bytes"]
+
+    def test_product_selects_on_every_endpoint(self, viewer):
+        """`product=<id>` keeps one product, whatever else shares its bounds."""
+        products = _products(viewer)
+        both = viewer.get("/v1/summary", params=FIRST_BLOCK).json()
+        assert both["patches"] == 2
+        for tag, product in products.items():
+            params = {**FIRST_BLOCK, "product": product["id"]}
+            assert viewer.get("/v1/summary", params=params).json()["patches"] == 1
+            (row,) = viewer.get("/v1/contents", params=params).json()
+            assert row["tag"] == tag
+        reply = viewer.get("/v1/summary", params={"product": "nonsense"})
+        assert reply.status_code == 400
+
+    def test_missing_data_file_is_not_a_missing_set(self, viewer_settings, tmp_path):
+        """A file removed since indexing doesn't answer 404 with its path."""
+        import shutil  # noqa: PLC0415
+
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from dastor.app import create_app  # noqa: PLC0415
+
+        data = tmp_path / "data"
+        shutil.copytree(viewer_settings.spool.path, data)
+        spool = viewer_settings.spool.model_copy(update={"path": data})
+        settings = viewer_settings.model_copy(update={"spool": spool})
+        with TestClient(create_app(settings), raise_server_exceptions=False) as client:
+            product = _products(client)["raw"]["id"]
+            for path in data.glob("raw_*.h5"):
+                path.unlink()
+            reply = client.get(
+                "/v1/viewer/tile", params={**FIRST_BLOCK, "product": product}
+            )
+            assert reply.status_code != 404
+            assert str(data) not in reply.text
 
     def test_browse_settings(self, tmp_path):
         """`dastor browse` reads everything and keeps annotations beside the data."""

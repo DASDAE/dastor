@@ -61,3 +61,22 @@ def test_new_key_prints_matching_digest(capsys):
     main(["new-key"])
     lines = dict(x.split(": ", 1) for x in capsys.readouterr().out.splitlines())
     assert hash_key(lines["key"].strip()) == lines["key_sha256"].strip()
+
+
+def test_annotation_owners_are_plain_names(tmp_path):
+    """With annotations on, owners must be names a folder can have."""
+    base = {"spool": {"path": str(tmp_path)}}
+    digest = hash_key("key")
+    store = {"path": str(tmp_path / "annotations")}
+    odd = {"users": [{"name": "alice@example.org", "key_sha256": digest}]}
+    Settings.model_validate({**base, **odd})  # fine while nothing is stored
+    with pytest.raises(ValidationError, match="plain words"):
+        Settings.model_validate({**base, **odd, "annotations": store})
+    plain = {"users": [{"name": "alice", "key_sha256": digest}]}
+    with pytest.raises(ValidationError, match="name of a user"):
+        store_as = {**store, "anonymous_owner": "alice"}
+        Settings.model_validate({**base, **plain, "annotations": store_as})
+    with pytest.raises(ValidationError, match="not a plain name"):
+        store_as = {**store, "anonymous_owner": "../etc"}
+        Settings.model_validate({**base, "annotations": store_as})
+    Settings.model_validate({**base, **plain, "annotations": store})

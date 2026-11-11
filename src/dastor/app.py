@@ -34,6 +34,7 @@ from dastor import __version__
 from dastor.annotations import (
     AnnotationError,
     AnnotationStore,
+    MissingSetError,
     RevisionConflictError,
 )
 from dastor.auth import Authenticator, InvalidKeyError, Principal
@@ -55,7 +56,7 @@ from dastor.wire import FRAMED_MEDIA_TYPE, PATCH_MEDIA_TYPE, encode_patch, frame
 log = logging.getLogger(__name__)
 
 # Query parameters the endpoints use themselves rather than select on.
-_RESERVED = frozenset({"format", "dim"})
+_RESERVED = frozenset({"format", "dim", "product"})
 
 # The viewer's page, scripts and styles.
 _STATIC = FilePath(__file__).parent / "static"
@@ -72,6 +73,22 @@ _CLIENT_ERRORS = (
 )
 
 
+def _numbers(column: pd.Series) -> np.ndarray:
+    """Return a contents column as floats (times in ns), NaN where it has none."""
+    if column.dtype.kind in "Mm":
+        return np.where(column.isna(), np.nan, column.astype("int64").astype(float))
+    if column.dtype.kind in "iufb":
+        return column.to_numpy(dtype=float, na_value=np.nan)
+    # Mixed columns (dims which are times in some files, numbers in others)
+    out = np.full(len(column), np.nan)
+    for number, value in enumerate(column):
+        if isinstance(value, pd.Timestamp | pd.Timedelta):
+            out[number] = value.value
+        elif isinstance(value, int | float | np.number) and not pd.isna(value):
+            out[number] = float(value)
+    return out
+
+
 def estimated_bytes(contents: pd.DataFrame) -> int:
     """
     Estimate the array bytes the rows of a selected spool hold.
@@ -81,22 +98,31 @@ def estimated_bytes(contents: pd.DataFrame) -> int:
     trimmed row may lack. The estimate rejects requests before any loading;
     the limit is enforced again on the patches as they load.
     """
-    total = 0
-    for row in contents.to_dict("records"):
-        count = 1
-        for dim in str(row.get("dims", "")).split(","):
-            low, high = row.get(f"{dim}_min"), row.get(f"{dim}_max")
-            step = row.get(f"{dim}_step")
-            try:
-                samples = round((high - low) / step) + 1
-            except TypeError, ValueError, ZeroDivisionError, OverflowError:
-                samples = None
-            if samples is None or samples < 1:
-                count = row.get("data_size") or 0
+    if contents.empty:
+        return 0
+    count = np.ones(len(contents))
+    counted = np.ones(len(contents), dtype=bool)
+    dims = contents["dims"].astype("string").fillna("").astype(str)
+    for names, rows in dims.groupby(dims.to_numpy(), sort=False).indices.items():
+        for dim in names.split(","):
+            columns = [f"{dim}_min", f"{dim}_max", f"{dim}_step"]
+            if not set(columns) <= set(contents.columns):
+                counted[rows] = False
                 break
-            count *= samples
-        total += int(count) * np.dtype(row.get("dtype") or "float64").itemsize
-    return total
+            low, high, step = (_numbers(contents[x].iloc[rows]) for x in columns)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                samples = np.round((high - low) / step) + 1
+            usable = np.isfinite(samples) & (samples >= 1)
+            count[rows] *= np.where(usable, samples, 1)
+            counted[rows] &= usable
+    if not counted.all():
+        stored = contents.get("data_size", pd.Series(0, index=contents.index))
+        stored = pd.to_numeric(stored, errors="coerce").fillna(0).to_numpy(dtype=float)
+        count = np.where(counted, count, stored)
+    kinds = contents.get("dtype", pd.Series("float64", index=contents.index))
+    kinds = kinds.astype("string").fillna("").astype(str)
+    sizes = {x: np.dtype(x or "float64").itemsize for x in kinds.unique()}
+    return int((count * kinds.map(sizes).to_numpy(dtype=float)).sum())
 
 
 def _json_frame(df: pd.DataFrame) -> Response:
@@ -222,14 +248,27 @@ def create_app(settings: Settings) -> FastAPI:
     def selected_with_view(
         request, who, reserved=_RESERVED, **extra
     ) -> tuple[View, dc.BaseSpool]:
-        """Return a principal's view and its patches matching the query."""
+        """
+        Return a principal's view and its patches matching the query.
+
+        `product=<id>` (from `/v1/viewer/products`) keeps one product. Its
+        attributes go into the selection, so the index narrows to it before
+        any rows are read; its dims and steps are matched on what is left.
+        """
         kwargs = selection(request.query_params.multi_items(), reserved)
+        product = request.query_params.get("product")
+        wanted = decode_product(product) if product else None
+        attrs = wanted["attrs"] if wanted else {}
+        kwargs.update({k: v for k, v in attrs.items() if k not in kwargs})
         view = catalog.view(who)
         try:
-            return view, view.select(**kwargs, **extra)
+            spool = view.select(**kwargs, **extra)
         except (TypeError, ValueError) as exc:
             # e.g. a malformed time, or text bounding a numeric coordinate
             raise QueryError(str(exc)) from exc
+        if wanted and len(contents := spool.get_contents()):
+            spool = spool[product_rows(contents, wanted)]
+        return view, spool
 
     def selected(request: Request, who: Principal) -> dc.BaseSpool:
         """Return the visible patches matching the query."""
@@ -402,15 +441,12 @@ def create_app(settings: Settings) -> FastAPI:
         """
         wanted = decode_product(product)
         x, y = product_axes(wanted["dims"])
-        reserved = _RESERVED | {"product", "width", "height", "stat"}
+        reserved = _RESERVED | {"width", "height", "stat"}
         kwargs = selection(request.query_params.multi_items(), reserved)
         if len(wanted["dims"]) != 2 or not {x, y} <= set(kwargs):
             raise QueryError("a tile needs a product of two dims and bounds on both")
         view, spool = selected_with_view(request, who, reserved)
         contents = spool.get_contents()
-        if len(contents):
-            spool = spool[product_rows(contents, wanted)]
-            contents = spool.get_contents()
         if not len(contents):
             return Response(status_code=204)
         ranges = [
@@ -451,20 +487,15 @@ def create_app(settings: Settings) -> FastAPI:
         """
         Return a test of whether the caller may read a set.
 
-        A caller reads their own sets, sets naming no acquisition, and sets
-        on an acquisition among the data they may read.
+        A caller reads their own sets, and sets on an acquisition every
+        file of which they may read: annotations describe data, so seeing
+        one file of a recording is no licence to read notes on the rest.
+        A set naming no acquisition counts as on the files which name none.
         """
-        name, keys = owner_name(who), None
+        name, whole = owner_name(who), catalog.view(who).acquisitions
 
         def check(owner: str, acquisition_key: str) -> bool:
-            nonlocal keys
-            if not acquisition_key or owner == name:
-                return True
-            if keys is None:
-                contents = catalog.view(who).select().get_contents()
-                column = contents.get("acquisition_key", pd.Series(dtype=str))
-                keys = set(column.astype(str))
-            return acquisition_key in keys
+            return owner == name or acquisition_key in whole
 
         return check
 
@@ -475,7 +506,7 @@ def create_app(settings: Settings) -> FastAPI:
             raise HTTPException(403, "only a set's owner may change it")
         return name
 
-    for error, status in ((AnnotationError, 400), (FileNotFoundError, 404)):
+    for error, status in ((AnnotationError, 400), (MissingSetError, 404)):
 
         def _annotation_error(request: Request, exc: Exception, status=status):
             return JSONResponse({"detail": str(exc)}, status_code=status)
@@ -485,7 +516,10 @@ def create_app(settings: Settings) -> FastAPI:
     @app.get("/v1/annotations")
     def annotation_sets(who: Who, store: Store) -> dict:
         """
-        List the annotation sets on data the caller may read.
+        List the annotation sets the caller may read.
+
+        Those are the caller's own, and the sets on acquisitions all of
+        whose files the caller may read.
 
         `owner` is the name the caller's own sets are saved under (null if
         the caller can't save), and each set says whether it is `editable`.
@@ -506,7 +540,7 @@ def create_app(settings: Settings) -> FastAPI:
         """
         document = store.document(owner, name)
         if not readable(who)(owner, document["acquisition_key"]):
-            raise FileNotFoundError(f"no annotation set {owner}/{name}")
+            raise MissingSetError(f"no annotation set {owner}/{name}")
         return document
 
     @app.put("/v1/annotations/{owner}/{name}")

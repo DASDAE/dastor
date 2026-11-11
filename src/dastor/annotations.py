@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import threading
 import uuid
 from pathlib import Path
 
 import dascore as dc
-import numpy as np
 import pandas as pd
+from dascore.exceptions import DASCoreError
 
-_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+from dastor.config import SET_NAME
 
 # Feature columns the store writes itself; a client's values are ignored.
 STAMPS = ("created_time", "modified_time", "modified_by")
@@ -39,6 +38,10 @@ _FEATURE_COLUMNS = {
 
 class AnnotationError(ValueError):
     """Raised for an annotation set or name the store can't accept."""
+
+
+class MissingSetError(LookupError):
+    """Raised when there is no annotation set of the owner and name asked for."""
 
 
 class RevisionConflictError(Exception):
@@ -71,21 +74,24 @@ def _frame(records, time_columns=()) -> pd.DataFrame:
 
 
 def _time_columns(records, dims) -> list[str]:
-    """Return the coordinate columns a client wrote as times (text)."""
+    """
+    Return the coordinate columns a client wrote as times (text).
+
+    Anything but a list of records has none; `_frame` refuses it.
+    """
+    if not isinstance(records, list):
+        return []
+    rows = [x for x in records if isinstance(x, dict)]
     names = [f"{dim}{end}" for dim in dims for end in ("", "_min", "_max")]
-    return [
-        name for name in names if any(isinstance(row.get(name), str) for row in records)
-    ]
+    return [x for x in names if any(isinstance(row.get(x), str) for row in rows)]
 
 
 def _by_feature(annotations: dc.AnnotationSet) -> dict[str, str]:
     """Return each feature's content, apart from its stamps, as text."""
     features = annotations.features.drop(columns=list(STAMPS), errors="ignore")
-    rows = annotations.annotations
-    members = {
-        key: _records(part.drop(columns="feature_id"))
-        for key, part in rows.groupby(rows["feature_id"].astype(str), sort=False)
-    }
+    members: dict[str, list] = {}
+    for row in _records(annotations.annotations):  # one pass, whatever the size
+        members.setdefault(str(row.pop("feature_id")), []).append(row)
     out = {}
     for record in _records(features):
         key = str(record["id"])
@@ -116,7 +122,7 @@ class AnnotationStore:
     def _path(self, owner: str, name: str) -> Path:
         """Return the directory of a set, refusing names which aren't plain."""
         for value in (owner, name):
-            if not _NAME.match(value):
+            if not SET_NAME.fullmatch(value):
                 raise AnnotationError(f"not a valid owner or set name: {value!r}")
         return self.root / owner / name
 
@@ -142,10 +148,10 @@ class AnnotationStore:
         return out
 
     def load(self, owner: str, name: str) -> dc.AnnotationSet:
-        """Return a stored set; FileNotFoundError if there is none."""
+        """Return a stored set; MissingSetError if there is none."""
         path = self._path(owner, name)
         if not (path / "attrs.json").is_file():
-            raise FileNotFoundError(f"no annotation set {owner}/{name}")
+            raise MissingSetError(f"no annotation set {owner}/{name}")
         return dc.annotations(path)
 
     def document(self, owner: str, name: str) -> dict:
@@ -174,10 +180,11 @@ class AnnotationStore:
         try:
             dims = tuple(document["dims"])
             rows = document.get("annotations", [])
-            times = _time_columns(rows, dims) if isinstance(rows, list) else []
-            annotations = _frame(rows, times)
+            annotations = _frame(rows, _time_columns(rows, dims))
             features = _frame(document.get("features", []))
             base = int(document.get("base_revision", 0))
+        except AnnotationError:
+            raise
         except (KeyError, TypeError, ValueError) as exc:
             raise AnnotationError(f"bad annotation document: {exc}") from exc
         if len(annotations):
@@ -208,16 +215,20 @@ class AnnotationStore:
                 )
                 stamped = self._stamped(new, old, now, user)
                 new = dc.AnnotationSet(new.annotations, stamped, **options)
-                self._write(new, path)
-            except AnnotationError:
-                raise
-            except Exception as exc:  # DASCore refuses what it can't model
+            except (DASCoreError, KeyError, TypeError, ValueError) as exc:
+                # DASCore refuses what it can't model
                 raise AnnotationError(f"bad annotation set: {exc}") from exc
+            self._write(new, path)
         return {"revision": current + 1, "updated": now.isoformat()}
 
     @staticmethod
     def _stamped(new, old, now, user: str) -> pd.DataFrame | None:
-        """Return the new set's features with their stamps filled in."""
+        """
+        Return the new set's features with their stamps filled in.
+
+        A stored feature without stamps (a set written by DASCore alone)
+        keeps none until it changes, and is then created when it changes.
+        """
         features = new.features
         if not len(features):
             return None
@@ -232,15 +243,16 @@ class AnnotationStore:
             if was is None:
                 rows.append((now, now, user))
             elif before.get(key) == content:
-                rows.append(tuple(was[x] for x in STAMPS))
+                by = was["modified_by"]
+                rows.append((*(was[x] for x in STAMPS[:2]), "" if pd.isna(by) else by))
             else:
-                rows.append((was["created_time"], now, user))
+                created = was["created_time"]
+                rows.append((now if pd.isna(created) else created, now, user))
         out = features.drop(columns=list(STAMPS), errors="ignore").copy()
-        for number, column in enumerate(STAMPS):
-            values = [x[number] for x in rows]
-            if column != "modified_by":
-                values = np.array(values, dtype="datetime64[ns]")
-            out[column] = values
+        created, modified, who = zip(*rows, strict=True)
+        out["created_time"] = pd.to_datetime(list(created)).astype("datetime64[ns]")
+        out["modified_time"] = pd.to_datetime(list(modified)).astype("datetime64[ns]")
+        out["modified_by"] = list(who)
         return out
 
     @staticmethod
@@ -259,9 +271,9 @@ class AnnotationStore:
             shutil.rmtree(retired, ignore_errors=True)
 
     def delete(self, owner: str, name: str) -> None:
-        """Remove a stored set; FileNotFoundError if there is none."""
+        """Remove a stored set; MissingSetError if there is none."""
         path = self._path(owner, name)
         with self._lock:
             if not (path / "attrs.json").is_file():
-                raise FileNotFoundError(f"no annotation set {owner}/{name}")
+                raise MissingSetError(f"no annotation set {owner}/{name}")
             shutil.rmtree(path)

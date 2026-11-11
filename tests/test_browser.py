@@ -20,6 +20,7 @@ from pathlib import Path
 import dascore as dc
 import pytest
 import uvicorn
+from conftest import VIEW_KEY
 
 from dastor.annotations import AnnotationStore
 from dastor.app import create_app
@@ -64,13 +65,18 @@ class Browser:
         )
         self.errors: list[str] = []
         self._count = 0
-        page = self._page(port)
-        self.socket = websocket.create_connection(
-            page["webSocketDebuggerUrl"], timeout=60, suppress_origin=True
-        )
-        for method in ("Page.enable", "Runtime.enable", "Log.enable"):
-            self.call(method)
-        self.call("Page.navigate", url=url)
+        self.socket = None
+        try:
+            page = self._page(port)
+            self.socket = websocket.create_connection(
+                page["webSocketDebuggerUrl"], timeout=60, suppress_origin=True
+            )
+            for method in ("Page.enable", "Runtime.enable", "Log.enable"):
+                self.call(method)
+            self.call("Page.navigate", url=url)
+        except BaseException:
+            self.close()  # a browser which did not come up is not left running
+            raise
 
     @staticmethod
     def _page(port: int) -> dict:
@@ -135,10 +141,9 @@ class Browser:
         frame = (
             "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
         )
-        saved = "S.sets.every(s => !s.dirty && !s.saving)"
         self.wait("window.dastorReady === true")
         self.js(frame)
-        self.wait(f"inflight === 0 && queue.length === 0 && {saved}")
+        self.wait("window.dastorIdle()")
         self.js(frame)
 
     def _mouse(self, kind: str, x: float, y: float, **more) -> None:
@@ -183,11 +188,17 @@ class Browser:
     def close(self) -> None:
         """Close the page and remove its profile."""
         try:
-            self.socket.close()
+            if self.socket is not None:
+                self.socket.close()
         finally:
             self.process.terminate()
             self.process.wait(timeout=10)
-            shutil.rmtree(self.profile, ignore_errors=True)
+            # Chromium's helpers can outlive it for a moment and rewrite files.
+            for _ in range(20):
+                shutil.rmtree(self.profile, ignore_errors=True)
+                if not os.path.exists(self.profile):
+                    break
+                time.sleep(0.25)
 
 
 @pytest.fixture
@@ -198,7 +209,9 @@ def served(viewer_settings):
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
+    end = time.time() + 60
     while not server.started:
+        assert thread.is_alive() and time.time() < end, "the server did not start"
         time.sleep(0.05)
     yield f"http://127.0.0.1:{port}"
     server.should_exit = True
@@ -213,6 +226,7 @@ def page(served, viewer_settings):
     row = {"feature_id": "auto_1", "time": "2024-05-01T00:00:05", "distance": 30.0}
     document = {
         "dims": ["distance", "time"],
+        "acquisition_key": VIEW_KEY,
         "base_revision": 0,
         "annotations": [row],
         "features": [{"id": "auto_1", "label": "detected"}],
@@ -234,10 +248,10 @@ def page(served, viewer_settings):
     try:
         browser.settle()
         yield browser
+        browser.js("1")  # reads any errors the page reported since the last call
     finally:
-        errors = browser.errors
         browser.close()
-    assert not errors
+    assert not browser.errors
 
 
 def _pixel(page, time: str, distance: float) -> tuple[float, float]:
@@ -307,7 +321,12 @@ class TestAnnotating:
         start = _pixel(page, "2024-05-01T00:03:02", 20)
         page.drag(start, _pixel(page, "2024-05-01T00:03:10", 80))
         page.settle()
-        assert len(_saved(viewer_settings).features) == 2
+        saved = _saved(viewer_settings)
+        assert len(saved.features) == 2
+        box = saved.annotations.dropna(subset=["time_min"]).iloc[0]
+        assert str(box["time_min"])[11:19] in ("00:03:01", "00:03:02")
+        assert str(box["time_max"])[11:19] in ("00:03:09", "00:03:10")
+        assert 18 <= box["distance_min"] <= 22 and 78 <= box["distance_max"] <= 82
 
         page.key("z", 90, modifiers=2)
         page.settle()
@@ -328,7 +347,8 @@ class TestAnnotating:
         saved = _saved(viewer_settings)
         assert saved.features["label"].tolist() == ["car"]
         assert saved.annotations["distance"].round().tolist() == [20, 60, 120]
-        assert page.js("activeSet().revision") == 5
+        # five edits; ones made within the save delay share a revision
+        assert 3 <= page.js("activeSet().revision") <= 5
 
     def test_copy_from_another_set(self, page, viewer_settings):
         """A feature of a read-only set is copied, recording where it came from."""
@@ -357,7 +377,7 @@ class TestDownloading:
         page.wait("document.getElementById('lnkArea') !== null")
         assert "about" in page.js("document.getElementById('areaSize').textContent")
         link = page.js("document.getElementById('lnkArea').href")
-        assert "tag=raw" in link and "format=dasdae" in link
+        assert "product=" in link and "format=dasdae" in link
         with urllib.request.urlopen(link) as reply:
             body = reply.read()
         assert body[:8] == b"\x89HDF\r\n\x1a\n"
@@ -367,6 +387,16 @@ class TestDownloading:
             patch = dc.spool(path)[0]
         low, high = patch.get_coord("distance").min(), patch.get_coord("distance").max()
         assert 18 <= low <= 22 and 78 <= high <= 82
+        assert patch.attrs.tag == "raw"
+        start, end = (
+            str(patch.get_coord("time").min()),
+            str(patch.get_coord("time").max()),
+        )
+        assert (
+            start.startswith("2024-05-01T00:00:0")
+            and "00:00:03" <= start[11:19] <= "00:00:04"
+        )
+        assert "00:00:11" <= end[11:19] <= "00:00:13"
 
 
 class TestLimits:
@@ -423,3 +453,6 @@ class TestCrowding:
         assert page.js("S.view.spp") < before / 10
         # spread over the view, the picks now stand alone or in small crowds
         assert page.js("Math.max(0, ...S.clusters.map(c => c.feats.length))") < 10
+        # and the view is on them, not somewhere empty
+        middle = "px2x(plotRect().x + plotRect().w / 2)"
+        assert page.js(f"Math.abs({middle} - parseTime('2024-05-01T00:03:30'))") < 2

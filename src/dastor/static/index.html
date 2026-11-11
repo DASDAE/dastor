@@ -4,12 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>dastor viewer</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 fill=%22%23222%22/%3E%3Cpath d=%22M1 15L15 1%22 stroke=%22%234fb3ff%22 stroke-width=%223%22/%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="alternate icon" href="favicon.ico">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div id="top">
-  <span class="brand">dastor</span>
+  <span class="brand"><img src="favicon.svg" alt="">DAS Tor</span>
   <label>Recording <select id="selGroup" title="products are grouped by acquisition_key"></select></label>
   <button id="btnWhole" title="show everything (w)">whole</button>
   <span class="tools" id="tools">
@@ -28,9 +29,8 @@
   <div id="view"><canvas id="cv" tabindex="0"></canvas><div id="toast"></div><div id="tip"></div></div>
   <div id="side">
     <details open><summary>Levels</summary>
-      <div class="hint">Tick the products to zoom through. Click a name to pin the view to it.</div>
-      <div id="levels"></div>
-      <div class="row"><button class="small" id="btnAutoLevel">auto level</button> <span id="levelNote" class="hint"></span></div>
+      <div id="levels" title="Tick the products to zoom through. Click a name to pin the view to it."></div>
+      <div class="row"><button class="small" id="btnAutoLevel" title="follow the zoom again">unpin</button></div>
     </details>
     <details open><summary>Display</summary>
       <div class="row">
@@ -56,11 +56,11 @@
       </div>
       <div class="hint" id="annNote"></div>
     </details>
-    <details open><summary>Selected</summary>
-      <div id="selected" class="hint">Nothing selected.</div>
+    <details id="selBox" hidden open><summary>Selected</summary>
+      <div id="selected"></div>
     </details>
-    <details open><summary>Download area</summary>
-      <div id="area" class="hint">Use "select area" and drag over the data.</div>
+    <details id="areaBox" hidden open><summary>Download</summary>
+      <div id="area"></div>
     </details>
     <details><summary>Keys</summary>
       <div class="hint">

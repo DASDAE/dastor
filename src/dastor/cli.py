@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import getpass
 import re
+import socket
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -24,7 +26,8 @@ def browse_settings(path: str, annotations: str | None = None) -> dict:
     data = Path(path).expanduser().resolve()
     if not data.is_dir():
         raise SystemExit(f"{data} is not a directory")
-    store = annotations or data.with_name(f"{data.name}_annotations")
+    # A drive's root has no name to put a folder beside.
+    store = annotations or data.parent / f"{data.name or 'das'}_annotations"
     owner = re.sub(r"[^A-Za-z0-9_.-]", "_", getpass.getuser()).lstrip("_.-") or "me"
     return {
         "spool": {
@@ -34,6 +37,23 @@ def browse_settings(path: str, annotations: str | None = None) -> dict:
         },
         "annotations": {"path": str(store), "anonymous_owner": owner},
     }
+
+
+def _open_when_up(host: str, port: int, url: str) -> None:
+    """
+    Open a browser at `url` once the server answers on its port.
+
+    The server listens only after it has indexed the directory, which can
+    take minutes the first time, so a fixed delay would open a dead page.
+    """
+    while True:
+        try:
+            socket.create_connection((host, port), timeout=1).close()
+        except OSError:
+            time.sleep(0.3)
+        else:
+            webbrowser.open(url)
+            return
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -73,7 +93,9 @@ def main(argv: list[str] | None = None) -> int:
             url = f"http://{args.host}:{args.port}/viewer/"
             print(f"viewer: {url}")
             if not args.no_open:
-                threading.Timer(1.5, webbrowser.open, [url]).start()
+                # A daemon: it ends with the command if the server never starts.
+                waiter = (args.host, args.port, url)
+                threading.Thread(target=_open_when_up, args=waiter, daemon=True).start()
         else:
             settings = Settings.from_yaml(args.config)
         # One process: each would otherwise index and refresh the spool itself.

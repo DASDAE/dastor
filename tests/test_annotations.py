@@ -1,5 +1,7 @@
 """Tests for stored annotation sets and their API."""
 
+from pathlib import Path
+
 import dascore as dc
 import pytest
 from conftest import ALICE_KEY, BOB_KEY, VIEW_KEY, auth
@@ -8,6 +10,7 @@ from fastapi.testclient import TestClient
 from dastor.annotations import (
     AnnotationError,
     AnnotationStore,
+    MissingSetError,
     RevisionConflictError,
 )
 from dastor.app import create_app
@@ -98,6 +101,39 @@ class TestStore:
         assert error.value.current == 1
         assert store.document("me", "picks")["revision"] == 1
 
+    def test_set_written_by_dascore_can_be_saved(self, store):
+        """A stored set without stamps, as DASCore writes one, takes a save."""
+        store.save("me", "picks", _document(), "me")
+        path = store.root / "me" / "picks"
+        stored = dc.annotations(path)
+        bare = dc.AnnotationSet(
+            stored.annotations,
+            stored.features[["id", "geometry", "label"]],
+            dims=stored.dims,
+            creation_info={"version": "1"},
+        )
+        bare.io.save(path, format="parquet")
+        changed = _document(base_revision=1)
+        changed["features"][0]["label"] = "lorry"
+        assert store.save("me", "picks", changed, "me")["revision"] == 2
+        after = {x["id"]: x for x in store.document("me", "picks")["features"]}
+        assert after["track"]["modified_by"] == "me"
+        assert after["track"]["created_time"] is not None
+        assert after["area"]["modified_time"] is None  # untouched, so unstamped
+
+    def test_failed_write_leaves_the_stored_set(self, store, monkeypatch):
+        """A save which fails on disk keeps the last revision and no leftovers."""
+        store.save("me", "picks", _document(), "me")
+
+        def fail(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "rename", fail)  # moving the new set into place
+        with pytest.raises(OSError, match="disk full"):
+            store.save("me", "picks", _document(base_revision=1), "me")
+        assert store.document("me", "picks")["revision"] == 1
+        assert [x.name for x in (store.root / "me").iterdir()] == ["picks"]
+
     def test_empty_set(self, store):
         """A set with nothing in it is saved and read."""
         document = {"dims": DIMS, "annotations": [], "features": []}
@@ -113,9 +149,9 @@ class TestStore:
         assert (listed["revision"], listed["acquisition_key"]) == (1, VIEW_KEY)
         store.delete("me", "picks")
         assert store.list() == []
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(MissingSetError):
             store.delete("me", "picks")
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(MissingSetError):
             store.load("me", "picks")
 
     @pytest.mark.parametrize(
@@ -140,7 +176,7 @@ class TestStore:
             store.save("me", "picks", {**_document(), **change}, "me")
         assert store.list() == []
 
-    @pytest.mark.parametrize("name", ["..", "a/b", "", ".hidden", "x" * 65])
+    @pytest.mark.parametrize("name", ["..", "a/b", "", ".hidden", "x" * 65, "a\n"])
     def test_bad_names(self, store, name):
         """Owners and set names are plain words, never paths."""
         with pytest.raises(AnnotationError, match="not a valid"):
@@ -171,16 +207,19 @@ class TestApi:
         assert reply.status_code == 409 and reply.json()["revision"] == 1
 
     def test_bad_document_is_400(self, viewer):
-        """A document which is no annotation set is a bad request."""
-        reply = viewer.put("/v1/annotations/me/picks", json={"dims": DIMS, "x": 1})
-        assert reply.status_code == 200  # an empty set
+        """A document or a name the store refuses is a bad request."""
+        bad_rows = {"dims": DIMS, "annotations": [1]}
+        reply = viewer.put("/v1/annotations/me/picks", json=bad_rows)
+        assert reply.status_code == 400
         reply = viewer.put("/v1/annotations/me/bad name", json=_document())
         assert reply.status_code == 400
+        assert viewer.get("/v1/annotations").json()["sets"] == []
 
     def test_only_the_owner_writes(self, viewer, viewer_settings):
         """Another owner's set can be read but not changed or deleted."""
         store = AnnotationStore(viewer_settings.annotations.path)
-        store.save("detector", "auto", _document(), "detector")
+        document = _document(acquisition_key=VIEW_KEY)
+        store.save("detector", "auto", document, "detector")
         (listed,) = viewer.get("/v1/annotations").json()["sets"]
         assert listed["editable"] is False
         assert viewer.get("/v1/annotations/detector/auto").status_code == 200
@@ -207,7 +246,7 @@ class TestApiWithUsers:
         assert reply.status_code == 403
 
     def test_users_save_under_their_own_name(self, client):
-        """A user owns the sets under their name, and others read them."""
+        """A user owns the sets under their name; no one else changes them."""
         saved = client.put(
             "/v1/annotations/alice/picks", json=_document(), headers=auth(ALICE_KEY)
         )
@@ -216,20 +255,47 @@ class TestApiWithUsers:
             "/v1/annotations/alice/picks", json=_document(1), headers=auth(BOB_KEY)
         )
         assert reply.status_code == 403
-        listing = client.get("/v1/annotations", headers=auth(BOB_KEY)).json()
-        assert listing["owner"] == "bob"
-        assert [x["editable"] for x in listing["sets"]] == [False]
+        mine = client.get("/v1/annotations", headers=auth(ALICE_KEY)).json()
+        assert mine["owner"] == "alice"
+        assert [x["editable"] for x in mine["sets"]] == [True]
 
-    def test_sets_on_unreadable_data_are_hidden(self, client):
-        """A set made on an acquisition the caller can't read isn't shown."""
-        document = _document(acquisition_key="NET.HIDDEN..A1")
-        client.put(
-            "/v1/annotations/alice/picks", json=document, headers=auth(ALICE_KEY)
-        )
-        assert client.get("/v1/annotations", headers=auth(BOB_KEY)).json()["sets"] == []
-        reply = client.get("/v1/annotations/alice/picks", headers=auth(BOB_KEY))
-        assert reply.status_code == 404
-        mine = client.get("/v1/annotations", headers=auth(ALICE_KEY)).json()["sets"]
+    def test_sets_need_every_file_of_their_data(self, client):
+        """
+        A set is shown only to those who may read all the data it is on.
+
+        The served files name no acquisition, so a set naming none is on
+        all of them: alice reads them all, bob only the public ones.
+        """
+        for key, owner in ((ALICE_KEY, "alice"), (BOB_KEY, "bob")):
+            saved = client.put(
+                f"/v1/annotations/{owner}/picks", json=_document(), headers=auth(key)
+            )
+            assert saved.status_code == 200
+        seen = {
+            who: sorted(
+                x["owner"]
+                for x in client.get("/v1/annotations", headers=headers).json()["sets"]
+            )
+            for who, headers in (
+                ("alice", auth(ALICE_KEY)),
+                ("bob", auth(BOB_KEY)),
+                ("anonymous", {}),
+            )
+        }
+        assert seen == {"alice": ["alice", "bob"], "bob": ["bob"], "anonymous": []}
+        theirs = client.get("/v1/annotations/bob/picks", headers=auth(ALICE_KEY))
+        assert theirs.status_code == 200
+        hidden = client.get("/v1/annotations/alice/picks", headers=auth(BOB_KEY))
+        assert hidden.status_code == 404
+        assert client.get("/v1/annotations/bob/picks").status_code == 404
+
+    def test_sets_on_missing_data_are_only_their_owners(self, client):
+        """A set naming an acquisition no file has is read by its owner alone."""
+        document = _document(acquisition_key="NET.GONE..A1")
+        client.put("/v1/annotations/bob/picks", json=document, headers=auth(BOB_KEY))
+        listing = client.get("/v1/annotations", headers=auth(ALICE_KEY)).json()
+        assert listing["sets"] == []
+        mine = client.get("/v1/annotations", headers=auth(BOB_KEY)).json()["sets"]
         assert [x["name"] for x in mine] == ["picks"]
 
     def test_no_store_is_404(self, settings):

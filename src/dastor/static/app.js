@@ -10,7 +10,9 @@ const TILE = 256;
 const M = { l: 70, r: 8, t: 8, b: 36 };  // plot margins (CSS px)
 const MAX_INFLIGHT = 6;
 const TILE_BYTE_CAP = 320 * 2 ** 20;
-const PALETTE = ["#ff4fd8", "#ffd23f", "#7cff6b", "#ff8c42", "#b28dff", "#4dfff3", "#ff5d73", "#c6ff3d"];
+// Annotation colours: ones the colour maps do not pass through, each drawn over a dark edge.
+const PALETTE = ["#ff5d73", "#ffffff", "#ff9d42", "#ff6ad5", "#9fd4ff", "#ffc934"];
+const THEME = { blue: "#3978d6", gold: "#ffc934", red: "#d0002a", steel: "#c6c7cb" };
 const STAMPS = ["created_time", "modified_time", "modified_by", "derived_from", "derived_revision"];
 const CMAPS = {
   viridis: ["#440154", "#482878", "#3e4989", "#31688e", "#26828e", "#1f9e89", "#35b779", "#6ece58", "#b5de2b", "#fde725"],
@@ -35,6 +37,7 @@ const S = {
   mode: "nav", draft: null, area: null,
   undo: [], redo: [],
   mouse: null, drag: null, blocked: null,
+  refused: null,                  // a product the server refused a tile of, at this view
   clusters: [],                   // aggregated features of the last frame
 };
 const tiles = new Map();          // key -> {st, data, cv, ver, key, ...}
@@ -87,7 +90,11 @@ function fmtBytes(n) {
 function newId() { return "f" + Math.random().toString(36).slice(2, 10); }
 
 // ------------------------------------------------------------------ geometry
-function plotRect() { return { x: M.l, y: M.t, w: Math.max(cv.clientWidth - M.l - M.r, 10), h: Math.max(cv.clientHeight - M.t - M.b, 10) }; }
+let PLOT = null;  // measured on resize, since reading the layout for every vertex is slow
+function plotRect() {
+  if (!PLOT) PLOT = { x: M.l, y: M.t, w: Math.max(cv.clientWidth - M.l - M.r, 10), h: Math.max(cv.clientHeight - M.t - M.b, 10) };
+  return PLOT;
+}
 // x axis: display x = real x minus a per-segment offset; the gaps between recorded segments are
 // squeezed to S.gapD display units, so display x is continuous and monotone. With no segments it is x.
 function segIndex(t) { let lo = 0, hi = S.segs.length - 1, k = -1; while (lo <= hi) { const m = (lo + hi) >> 1; if (S.segs[m].a <= t) { k = m; lo = m + 1; } else hi = m - 1; } return k; }
@@ -135,7 +142,9 @@ function wholeView() {
   S.view.ypp = (h * 1.02) / P.h; S.view.y0 = S.ext.y0 - h * 0.01;
   clampView(); redraw();
 }
+function moved() { lastMove = performance.now(); S.refused = null; }
 function zoomAt(px, py, fx, fy) {
+  moved();
   const u = S.view.x0 + (px - M.l) * S.view.spp, d = px2y(py), P = plotRect();
   S.view.spp *= fx; S.view.ypp *= fy; clampView();
   S.view.x0 = u - (px - M.l) * S.view.spp;
@@ -171,7 +180,8 @@ function chosenIds() {
   }
   return ids;
 }
-function setGroup(key) {
+async function setGroup(key) {
+  await save();  // edits of the recording being left
   S.group = key; $("selGroup").value = key;
   const all = groupProducts();
   S.x = all[0].x; S.y = all[0].y;
@@ -180,7 +190,7 @@ function setGroup(key) {
   S.pin = null; S.sel = null; S.area = null; S.draft = null;
   buildLadder();
   wholeView();
-  loadSets();
+  await loadSets();
 }
 function buildLadder() {
   const ids = chosenIds();
@@ -219,7 +229,7 @@ function tileSpan(l, zx, zy) { return [TILE * l.sx * 2 ** zx, TILE * l.sy * 2 **
 // The array bytes the server reads for one tile and for the tiles of this view at a level.
 function levelCost(l) {
   const [zx, zy] = zooms(l), item = (parseInt((l.p.dtype.match(/\d+$/) || ["64"])[0], 10) || 64) / 8;
-  const tile = TILE * 2 ** zx * TILE * 2 ** zy * item;
+  const tile = (TILE * 2 ** zx + 1) * (TILE * 2 ** zy + 1) * item;  // the server counts both ends
   return { tile, view: tile * visibleTiles(l, zx, zy).length };
 }
 function overLimits(l) { const c = levelCost(l); return c.tile > S.limits.max_tile_bytes || c.view > S.limits.max_view_bytes; }
@@ -227,7 +237,15 @@ function overLimits(l) { const c = levelCost(l); return c.tile > S.limits.max_ti
 // pixel along x (the finest if none has). If the view would read more of it than the limits
 // allow, the nearest coarser level within them stands in; with none, S.blocked is the level
 // and only an outline of its data is drawn.
+let levelMemo = { key: "", level: null, blocked: null };
 function activeLevel() {
+  const v = S.view, P = plotRect();
+  const key = [v.x0, v.spp, v.y0, v.ypp, P.w, P.h, S.pin, S.refused, ...S.levels.map((l) => l.p.id)].join("|");
+  if (key !== levelMemo.key) levelMemo = { key, level: pickLevel(), blocked: S.blocked };
+  S.blocked = levelMemo.blocked;
+  return levelMemo.level;
+}
+function pickLevel() {
   S.blocked = null;
   if (!S.levels.length) return null;
   let i = S.levels.findIndex((l) => l.sx <= S.view.spp * 1.0001);
@@ -235,7 +253,7 @@ function activeLevel() {
   const pinned = S.pin ? S.levels.findIndex((l) => l.p.id === S.pin) : -1;
   if (pinned >= 0) i = pinned;
   else for (let k = i; k >= 0; k--) if (!overLimits(S.levels[k])) return S.levels[k];
-  if (overLimits(S.levels[i])) S.blocked = S.levels[i];
+  if (overLimits(S.levels[i]) || S.refused === S.levels[i].p.id) S.blocked = S.levels[i];
   return S.levels[i];
 }
 function renderLevels() {
@@ -245,9 +263,9 @@ function renderLevels() {
     const cls = ["level", shown && shown.p.id === p.id ? "shown" : "", S.pin === p.id ? "pinned" : ""].join(" ");
     return `<div class="${cls}"><input type="checkbox" data-id="${p.id}" ${ids.has(p.id) ? "checked" : ""}>` +
       `<span class="name" data-pin="${p.id}" title="${esc(JSON.stringify(p.attrs))}">${esc(levelName(p))}</span>` +
-      `<span class="step">${fmtStep(p.coords[S.x].step, S.xTime)} x ${fmtNum(p.coords[S.y].step)} ${esc(S.yUnits)}</span></div>`;
+      `<span class="step">${fmtStep(p.coords[S.x].step, S.xTime)} × ${fmtNum(p.coords[S.y].step)} ${esc(S.yUnits)}</span></div>`;
   }).join("");
-  $("levelNote").textContent = S.pin ? "pinned" : "";
+  $("btnAutoLevel").disabled = !S.pin;
 }
 function updateLevelHighlight() {
   const shown = activeLevel();
@@ -265,17 +283,26 @@ function visibleTiles(l, zx, zy, pc) {
     for (let iy = Math.floor(ya / ty); iy * ty < yb; iy++) out.push([ix, iy]);
   return out;
 }
+// While the view is moving (a wheel turn, a drag) requests wait a moment, so a zoom through
+// ten scales does not start ten screens of tiles the server would still finish.
+const SETTLE_MS = 120;
+let lastMove = 0, settleTimer = 0, settling = false;
 function requestTiles() {
   const l = activeLevel(); if (!l) return;
-  if (S.blocked) { queue = []; return; }
+  if (S.blocked) { queue = []; settling = false; return; }
+  const wait = lastMove + SETTLE_MS - performance.now();
+  settling = wait > 0;
+  if (settling) { clearTimeout(settleTimer); settleTimer = setTimeout(redraw, wait); return; }
   const [zx, zy] = zooms(l), [tx, ty] = tileSpan(l, zx, zy);
   const vis = visibleTiles(l, zx, zy), e = viewEnd();
   const xc = untau((S.view.x0 + e.x1) / 2), yc = (S.view.y0 + e.y1) / 2;
   const want = [], keys = new Set();
   for (const [ix, iy] of vis) {
     const k = tileKey(l, zx, zy, ix, iy); keys.add(k);
-    if (tiles.has(k)) continue;
-    want.push({ k, l, zx, zy, ix, iy, pri: Math.abs((ix + 0.5) * tx - xc) / tx + Math.abs((iy + 0.5) * ty - yc) / ty });
+    const had = tiles.get(k);
+    if (had && !(had.st === "error" && had.retryAt <= Date.now())) continue;
+    if (had) tiles.delete(k);
+    want.push({ k, l, zx, zy, ix, iy, stat: S.disp.stat, tries: had ? had.tries : 0, pri: Math.abs((ix + 0.5) * tx - xc) / tx + Math.abs((iy + 0.5) * ty - yc) / ty });
   }
   want.sort((a, b) => a.pri - b.pri);
   queue = want;  // requests for tiles which left the view are dropped
@@ -287,17 +314,17 @@ function pump() {
     const r = queue.shift();
     if (tiles.has(r.k)) continue;
     const [tx, ty] = tileSpan(r.l, r.zx, r.zy);
-    const tile = { st: "loading", key: r.k, pid: r.l.p.id, stat: S.disp.stat, zx: r.zx, zy: r.zy, ix: r.ix, iy: r.iy, tx, ty, used: frameNo };
+    const tile = { st: "loading", key: r.k, pid: r.l.p.id, stat: r.stat, tries: r.tries, zx: r.zx, zy: r.zy, ix: r.ix, iy: r.iy, tx, ty, used: frameNo };
     tiles.set(r.k, tile); inflight++;
     const url = `${API}/viewer/tile?` + query({
-      product: r.l.p.id, stat: S.disp.stat, width: TILE, height: TILE,
+      product: r.l.p.id, stat: r.stat, width: TILE, height: TILE,
       [`${S.x}_min`]: xWire(r.ix * tx), [`${S.x}_max`]: xWire((r.ix + 1) * tx),
       [`${S.y}_min`]: r.iy * ty, [`${S.y}_max`]: (r.iy + 1) * ty,
     });
     tile.ctrl = new AbortController();
     fetch(url, { signal: tile.ctrl.signal }).then(async (resp) => {
       if (resp.status === 204) { tile.st = "empty"; return; }
-      if (resp.status === 413) { tile.st = "empty"; return; }  // the view's estimate was low; rare
+      if (resp.status === 413) { tile.st = "empty"; S.refused = tile.pid; return; }  // more than the estimate
       if (!resp.ok) { tile.st = "error"; tile.err = await resp.text(); return; }
       tile.data = new Float32Array(await resp.arrayBuffer());
       tile.st = tile.data.length === TILE * TILE ? "ok" : "error";
@@ -305,9 +332,11 @@ function pump() {
     }).catch((e) => { tile.st = "error"; tile.err = String(e); })
       .finally(() => {
         inflight--; tile.ctrl = null;
-        if (tile.st === "error") {  // dropped, so it is asked for again: at once if it only left the view
-          tiles.delete(r.k);
-          if (!tile.aborted) setTimeout(redraw, 3000);
+        if (tile.aborted) tiles.delete(r.k);  // it only left the view: asked for again when it returns
+        else if (tile.st === "error") {       // kept, and asked for again after a growing wait
+          tile.tries += 1;
+          const wait = Math.min(60000, 2000 * 2 ** (tile.tries - 1));
+          tile.retryAt = Date.now() + wait; setTimeout(redraw, wait + 50);
         }
         redraw(); pump();
       });
@@ -359,7 +388,7 @@ function drawTile(tile, off) {
 // zooms are drawn under them, coarse first, so the view is never blank.
 function drawTiles(P) {
   const l = activeLevel(), [zx, zy] = zooms(l), ps = pieces();
-  let pending = 0;
+  let pending = 0, failed = 0;
   const missing = !!S.blocked || visibleTiles(l, zx, zy).some(([ix, iy]) => { const t = tiles.get(tileKey(l, zx, zy, ix, iy)); return !t || t.st === "loading"; });
   let others = [];
   if (missing) {
@@ -376,18 +405,20 @@ function drawTiles(P) {
       const t = tiles.get(tileKey(l, zx, zy, ix, iy));
       if (!t || t.st === "loading") { pending++; continue; }
       t.used = frameNo;
+      if (t.st === "error") failed++;
       if (t.st === "ok") drawTile(t, pc.off);
     }
     ctx.restore();
   }
   if (S.blocked) drawOutline(l, P);
+  S.failed = failed;
   return pending;
 }
 // Where a level has data, for a view too large to load it: an outline of each recorded span.
 function drawOutline(l, P) {
   const cx = l.p.coords[S.x], cy = l.p.coords[S.y];
   const ya = y2px(cy.max + l.sy), yb = y2px(cy.min);
-  ctx.setLineDash([6, 4]); ctx.lineWidth = 1.5; ctx.strokeStyle = "#4fb3ff"; ctx.fillStyle = "rgba(79,179,255,0.07)";
+  ctx.setLineDash([2, 4]); ctx.lineWidth = 1.5; ctx.strokeStyle = THEME.steel; ctx.fillStyle = "rgba(198,199,203,0.06)";
   for (const [a, b] of cx.spans) {
     const xa = x2px(xRead(a)), xb = x2px(xRead(b) + l.sx);
     if (xb < P.x || xa > P.x + P.w) continue;
@@ -446,6 +477,7 @@ function redraw() { if (!rafPending) { rafPending = true; requestAnimationFrame(
 function resize() {
   $("main").style.top = $("top").offsetHeight + "px";
   const dpr = window.devicePixelRatio || 1;
+  PLOT = null;
   cv.width = Math.round(cv.clientWidth * dpr); cv.height = Math.round(cv.clientHeight * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   redraw();
@@ -490,19 +522,20 @@ function draw() {
   drawGaps(P);
   drawAnnotations(P);
   const notes = [];
-  if (S.blocked) notes.push(`${levelName(S.blocked.p)} is outlined: this view is more than is loaded at once. Zoom in, or tick a coarser product.`);
+  if (S.blocked) notes.push(`${levelName(S.blocked.p)}: too much to load here. ${S.pin ? "Unpin it, or zoom in." : "Zoom in, or tick a coarser product."}`);
+  if (S.failed) notes.push(`${S.failed} tile${S.failed > 1 ? "s" : ""} failed; retrying`);
   if (pending) notes.push(`loading ${pending} tile${pending > 1 ? "s" : ""}`);
   ctx.font = "11px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
   notes.forEach((txt, i) => {
     const w = ctx.measureText(txt).width + 12;
     ctx.fillStyle = "rgba(20,22,26,0.85)"; ctx.fillRect(P.x + P.w - w - 6, P.y + 6 + i * 22, w, 18);
-    ctx.fillStyle = "#f0c36b"; ctx.fillText(txt, P.x + P.w - w, P.y + 15 + i * 22);
+    ctx.fillStyle = THEME.gold; ctx.fillText(txt, P.x + P.w - w, P.y + 15 + i * 22);
   });
   ctx.restore();
   drawAxes(P);
   updateLevelHighlight();
   const l = activeLevel();
-  $("stLevel").textContent = `${levelName(l.p)}  ${fmtStep(l.sx, S.xTime)} x ${fmtNum(l.sy)} ${S.yUnits}` + (S.pin ? "  (pinned)" : "");
+  $("stLevel").textContent = `${levelName(l.p)}  ${fmtStep(l.sx, S.xTime)} × ${fmtNum(l.sy)} ${S.yUnits}` + (S.pin ? "  (pinned)" : "");
   scheduleHash();
 }
 function drawAxes(P) {
@@ -603,22 +636,29 @@ async function loadSets() {
   const dims = new Set([S.x, S.y]), old = new Map(S.sets.map((s) => [setKey(s), s]));
   S.sets = (listing ? listing.sets : []).filter((s) => s.dims.length === 2 && s.dims.every((d) => dims.has(d)) &&
     (!s.acquisition_key || s.acquisition_key === S.group));
-  S.sets.forEach((s, i) => {
+  S.sets = S.sets.map((s) => { const was = old.get(setKey(s)); return was && (was.dirty || was.saving) ? was : s; });  // unsaved edits stay
+  S.sets.forEach((s) => {
     const was = old.get(setKey(s));
-    s.color = PALETTE[i % PALETTE.length];
+    if (was === s) return;
+    let h = 0; for (const c of setKey(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0;  // the same colour every visit
+    s.color = PALETTE[h % PALETTE.length];
     s.visible = was ? was.visible : true;
     if (was && was.revision === s.revision && was.feats) s.feats = was.feats;
   });
-  if (!activeSet() || !activeSet().editable) { const mine = S.sets.find((s) => s.editable); S.active = mine ? setKey(mine) : null; S.undo = []; S.redo = []; }
   await Promise.all(S.sets.filter((s) => s.visible && !s.feats).map(loadSet));
+  if (!activeSet() || !activeSet().editable) { const mine = S.sets.find((s) => s.editable && s.feats); S.active = mine ? setKey(mine) : null; S.undo = []; S.redo = []; }
   renderSets(); renderSelected(); redraw();
 }
 async function loadSet(s) {
   try {
     const doc = await api(`/annotations/${s.owner}/${s.name}`);
     s.revision = doc.revision; s.dims = doc.dims; s.acquisition_key = doc.acquisition_key;
-    s.feats = featsFromDoc(doc);
-  } catch (e) { s.feats = []; toast(`could not read ${setKey(s)}: ${e.message}`); }
+    s.feats = featsFromDoc(doc); s.failed = false;
+  } catch (e) {  // unread, so never saved over: an empty list would replace what is stored
+    s.feats = null; s.failed = true; s.visible = false;
+    if (S.active === setKey(s)) S.active = null;
+    toast(`could not read ${setKey(s)}: ${e.message}`, 5000);
+  }
 }
 function renderSets() {
   $("sets").innerHTML = S.sets.map((s) => {
@@ -626,9 +666,9 @@ function renderSets() {
     return `<div class="set ${k === S.active ? "active" : ""}"><input type="checkbox" data-show="${esc(k)}" ${s.visible ? "checked" : ""}>` +
       `<span class="swatch" style="background:${s.color}"></span>` +
       `<span class="name" data-edit="${esc(k)}" title="${s.editable ? "click to edit this set" : "read only: copy features into your own set"}">${esc(k)}</span>` +
-      `<span class="tag">${k === S.active ? "editing" : s.editable ? "" : "read only"} r${s.revision}</span></div>`;
+      `<span class="tag">${s.failed ? "unread" : k === S.active ? "editing" : s.editable ? "" : "read only"}</span></div>`;
   }).join("") || '<div class="hint">No annotation sets yet.</div>';
-  $("annNote").textContent = S.me ? "" : "Sign-in is needed to save annotations on this server.";
+  $("annNote").textContent = S.me ? "" : "Read only: this server gives visitors no name to save under.";
   $("btnNewSet").disabled = !S.me; $("btnDeleteSet").disabled = !activeSet();
 }
 
@@ -647,22 +687,32 @@ function restore(from, to) {
   to.push(snapshot()); s.feats = JSON.parse(from.pop()); touch();
 }
 function setSave(text, bad) { const el = $("saveStatus"); el.textContent = text; el.classList.toggle("bad", !!bad); }
+// Saves every set with unsaved edits, whichever is being edited now, so an edit made just
+// before switching set or recording is not lost with the switch.
 async function save() {
-  const s = activeSet();
-  if (!s || !s.dirty) return;
-  if (s.saving) { clearTimeout(touch.timer); touch.timer = setTimeout(save, 300); return; }
-  s.saving = true; s.dirty = false; setSave("saving...");
-  try {
-    const out = await api(`/annotations/${s.owner}/${s.name}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(docFromFeats(s)) });
-    s.revision = out.revision; setSave(`saved r${out.revision}`);
-    if (!s.dirty) {  // read back the times the server stamped
-      const doc = await api(`/annotations/${s.owner}/${s.name}`);
-      if (!s.dirty && doc.revision === s.revision) s.feats = featsFromDoc(doc);
+  clearTimeout(touch.timer);
+  await Promise.all(S.sets.filter((s) => s.dirty && s.feats).map(saveSet));
+}
+async function saveSet(s) {
+  if (s.saving) { await s.saving; if (!s.dirty) return; }
+  s.dirty = false; setSave("saving...");
+  s.saving = (async () => {
+    try {
+      const out = await api(`/annotations/${s.owner}/${s.name}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(docFromFeats(s)) });
+      s.revision = out.revision; setSave("saved");
+      if (!s.dirty) {  // read back the times the server stamped
+        const doc = await api(`/annotations/${s.owner}/${s.name}`);
+        if (!s.dirty && doc.revision === s.revision) s.feats = featsFromDoc(doc);
+      }
+    } catch (e) {
+      if (e.status === 409) {
+        toast(`${setKey(s)} changed elsewhere (another tab?). It was reloaded and your last edit dropped.`, 8000);
+        S.undo = []; S.redo = []; await loadSet(s); setSave("reloaded", true);
+      } else { s.dirty = true; setSave(`not saved: ${e.message}`, true); touch.timer = setTimeout(save, 5000); }
     }
-  } catch (e) {
-    if (e.status === 409) { toast("This set changed elsewhere (another tab?); it was reloaded and your last edit was dropped.", 6000); S.undo = []; S.redo = []; await loadSet(s); setSave("reloaded", true); }
-    else { s.dirty = true; setSave(`not saved: ${e.message}`, true); }
-  } finally { s.saving = false; renderSets(); renderSelected(); redraw(); }
+  })();
+  await s.saving; s.saving = null;
+  renderSets(); renderSelected(); redraw();
 }
 async function newSet() {
   const name = (prompt("Name of the new annotation set (letters, digits, _ . -):", "annotations") || "").trim();
@@ -742,12 +792,14 @@ function dot(p, r) { ctx.beginPath(); ctx.arc(x2px(p[0]), y2px(p[1]), r, 0, 6.28
 function drawFeature(f, color, sel, P) {
   ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = sel ? 2.5 : 1.5; ctx.setLineDash([]);
   const fill = () => { ctx.globalAlpha = sel ? 0.25 : 0.12; ctx.fill(); ctx.globalAlpha = 1; };
-  if (f.kind === "path") { strokePts(f.pts); ctx.stroke(); }
-  else if (f.kind === "polygon") { strokePts(f.pts, true); fill(); ctx.stroke(); }
-  else if (f.kind === "box") { const r = boxPx(f.box, P); ctx.beginPath(); ctx.rect(...r); fill(); ctx.stroke(); }
+  // each line over a wider dark one, so it reads on any colour of the image
+  const line = () => { const w = ctx.lineWidth; ctx.strokeStyle = "rgba(0,0,0,0.75)"; ctx.lineWidth = w + 2.5; ctx.stroke(); ctx.strokeStyle = color; ctx.lineWidth = w; ctx.stroke(); };
+  if (f.kind === "path") { strokePts(f.pts); line(); }
+  else if (f.kind === "polygon") { strokePts(f.pts, true); fill(); line(); }
+  else if (f.kind === "box") { const r = boxPx(f.box, P); ctx.beginPath(); ctx.rect(...r); fill(); line(); }
   else if (f.kind === "raw") {
     const sh = rawShapes(f);
-    for (const b of sh.boxes) { const r = boxPx(b, P); ctx.beginPath(); ctx.rect(r[0], r[1], Math.max(r[2], 1), Math.max(r[3], 1)); fill(); ctx.stroke(); }
+    for (const b of sh.boxes) { const r = boxPx(b, P); ctx.beginPath(); ctx.rect(r[0], r[1], Math.max(r[2], 1), Math.max(r[3], 1)); fill(); line(); }
     ctx.strokeStyle = "#000"; ctx.lineWidth = 1; for (const p of sh.pts) dot(p, 4);
   }
   if (f.kind === "point" || f.kind === "group") { ctx.strokeStyle = "#000"; ctx.lineWidth = 1; for (const p of f.pts) dot(p, sel ? 6 : 4.5); }
@@ -818,7 +870,7 @@ function drawAnnotations(P) {
     ctx.strokeStyle = "#000"; for (const p of S.draft.pts) dot(p, 3.5);
   }
   const rubber = S.drag && S.drag.kind === "rect" ? S.drag.box : null;
-  for (const [b, color] of [[S.area, "#4fb3ff"], [rubber, "#fff"]]) {
+  for (const [b, color] of [[S.area, THEME.blue], [rubber, "#fff"]]) {
     if (!b) continue;
     const r = boxPx(b, P);
     ctx.setLineDash([6, 4]); ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.strokeRect(...r); ctx.setLineDash([]);
@@ -886,11 +938,13 @@ function moveVertex(f, i, x, y) {
 // ------------------------------------------------------------------ side panels
 function renderSelected() {
   const cur = selected(), el = $("selected");
-  if (!cur) { el.className = "hint"; el.textContent = "Nothing selected."; return; }
+  $("selBox").hidden = !cur;  // shown only while there is something to show
+  if (!cur) { el.textContent = ""; return; }
   const { set, f } = cur, mine = setKey(set) === S.active;
   const names = ["label", "note", ...Object.keys(f.cols).filter((k) => k !== "label" && k !== "note")];
   const rows = names.map((k) => {
-    const v = f.cols[k] ?? "", fixed = !mine || STAMPS.includes(k);
+    let v = f.cols[k] ?? ""; const fixed = !mine || STAMPS.includes(k);
+    if (k.endsWith("_time") && typeof v === "string") v = v.slice(0, 19).replace("T", " ");
     return `<tr><td>${esc(k)}</td><td>${fixed ? esc(v) : `<input type="text" data-col="${esc(k)}" value="${esc(v)}">`}</td></tr>`;
   }).join("");
   el.className = "";
@@ -900,7 +954,7 @@ function renderSelected() {
     (f.kind === "box" ? '<button class="small" id="btnAreaOf">download this area</button>' : "") + "</div>";
 }
 function areaQuery(level) {
-  const a = S.area, q = { ...level.p.attrs };
+  const a = S.area, q = { product: level.p.id };
   if (a.x0 !== null) q[`${S.x}_min`] = xWire(a.x0);
   if (a.x1 !== null) q[`${S.x}_max`] = xWire(a.x1);
   if (a.y0 !== null) q[`${S.y}_min`] = a.y0;
@@ -909,13 +963,14 @@ function areaQuery(level) {
 }
 async function renderArea() {
   const el = $("area"), a = S.area;
-  if (!a) { el.className = "hint"; el.textContent = 'Use "select area" and drag over the data.'; return; }
+  $("areaBox").hidden = !a;
+  if (!a) { el.textContent = ""; return; }
   const stamp = (renderArea.stamp = (renderArea.stamp || 0) + 1);
   const was = $("selAreaLevel"), id = was ? was.value : S.levels[S.levels.length - 1].p.id;
   const level = S.levels.find((l) => l.p.id === id) || S.levels[S.levels.length - 1];
-  const span = (lo, hi, f) => `${lo === null ? "start" : f(lo)} to ${hi === null ? "end" : f(hi)}`;
+  const span = (lo, hi, f) => `${lo === null ? "start" : f(lo)} – ${hi === null ? "end" : f(hi)}`;
   el.className = "";
-  el.innerHTML = `<div class="hint">${esc(S.x)}: ${span(a.x0, a.x1, fmtX)}<br>${esc(S.y)}: ${span(a.y0, a.y1, fmtNum)} ${esc(S.yUnits)}</div>` +
+  el.innerHTML = `<div class="hint">${esc(S.x)}: ${span(a.x0, a.x1, fmtX)}<br>${esc(S.y)}: ${span(a.y0, a.y1, (v) => fmtNum(+v.toPrecision(5)))} ${esc(S.yUnits)}</div>` +
     `<div class="row"><label>product <select id="selAreaLevel">${S.levels.map((l) => `<option value="${l.p.id}" ${l === level ? "selected" : ""}>${esc(levelName(l.p))} (${fmtStep(l.sx, S.xTime)})</option>`).join("")}</select></label></div>` +
     '<div class="row" id="areaSize">estimating...</div>' +
     `<div class="row"><button class="small" id="btnAreaKeep" title="save the area as a box in the set being edited">keep as box</button><button class="small" id="btnAreaClear">clear</button></div>`;
@@ -924,7 +979,7 @@ async function renderArea() {
     const sum = await api("/summary?" + query(q));
     if (stamp !== renderArea.stamp) return;
     $("areaSize").innerHTML = sum.patches
-      ? `about ${fmtBytes(sum.bytes)} in ${sum.patches} patch${sum.patches > 1 ? "es" : ""} &nbsp; <a id="lnkArea" href="${API}/data?${query({ ...q, format: "dasdae" })}" download="dastor.h5">download (DASDAE)</a>`
+      ? `about ${fmtBytes(sum.bytes)} in ${sum.patches} patch${sum.patches > 1 ? "es" : ""} &nbsp; <a id="lnkArea" href="${API}/data?${query({ ...q, format: "dasdae" })}" download="${esc(levelName(level.p).replace(/[^A-Za-z0-9_.-]+/g, "_"))}.h5">download</a>`
       : "no data in this area";
   } catch (e) { if (stamp === renderArea.stamp) $("areaSize").textContent = e.message; }
 }
@@ -935,6 +990,7 @@ function inPlot(p) { const P = plotRect(); return p.x >= P.x && p.x <= P.x + P.w
 function setMode(mode) {
   if (mode !== "nav" && mode !== "area" && !needActive()) mode = "nav";
   S.mode = mode; S.draft = null;
+  cv.style.cursor = mode === "nav" ? "grab" : "crosshair";
   for (const b of $("tools").children) b.classList.toggle("on", b.dataset.mode === mode);
   redraw();
 }
@@ -954,7 +1010,7 @@ window.addEventListener("mousemove", (ev) => {
   const d = S.drag;
   if (d && d.kind === "pan") {
     if (Math.hypot(p.x - d.p.x, p.y - d.p.y) > 4) d.moved = true;
-    if (d.moved) { S.view.x0 = d.x0 - (p.x - d.p.x) * S.view.spp; S.view.y0 = d.y0 + (p.y - d.p.y) * S.view.ypp; }
+    if (d.moved) { moved(); S.view.x0 = d.x0 - (p.x - d.p.x) * S.view.spp; S.view.y0 = d.y0 + (p.y - d.p.y) * S.view.ypp; }
   } else if (d && d.kind === "vertex") {
     const cur = selected();
     if (cur) { d.moved = true; moveVertex(cur.f, d.i, px2x(p.x), px2y(p.y)); }
@@ -1097,7 +1153,7 @@ function initControls() {
     else if (ev.target.id === "btnAreaKeep" && needActive()) addFeature({ id: newId(), kind: "box", cols: {}, box: { ...S.area } });
   });
   window.addEventListener("resize", resize);
-  window.addEventListener("beforeunload", (ev) => { const s = activeSet(); if (s && (s.dirty || s.saving)) ev.preventDefault(); });
+  window.addEventListener("beforeunload", (ev) => { if (S.sets.some((s) => s.dirty || s.saving)) ev.preventDefault(); });
 }
 function scheduleHash() {
   clearTimeout(scheduleHash.timer);
@@ -1123,12 +1179,14 @@ async function init() {
   buildGroups();
   if (!S.groups.size) { redraw(); return; }
   const hash = readHash(), key = S.groups.has(hash.g) ? hash.g : S.groups.keys().next().value;
-  setGroup(key);
+  await setGroup(key);
   const v = (hash.v || "").split(",").map(Number);
   if (hash.g === key && v.length === 4 && v.every(Number.isFinite) && v[1] > 0 && v[3] > 0) {
     Object.assign(S.view, { x0: v[0], spp: v[1], y0: v[2], ypp: v[3] }); clampView();
   }
   setMode("nav");
+  // for tests: nothing is loading, waiting to load, or unsaved
+  window.dastorIdle = () => !settling && inflight === 0 && queue.length === 0 && !rafPending && S.sets.every((s) => !s.dirty && !s.saving);
   window.dastorReady = true;
   redraw();
 }

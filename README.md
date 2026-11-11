@@ -42,6 +42,7 @@ limits:
   max_view_bytes: 536870912     # most the viewer reads for one screen
 annotations:                    # optional: turns on the annotation API
   path: /data/das_annotations   # a directory outside the data directory
+  anonymous_owner: guest        # optional: the name anonymous requests save under
 ```
 
 ```console
@@ -58,15 +59,15 @@ dastor includes a viewer for looking at data in the browser, annotating it and c
 $ dastor browse /data/das
 ```
 
-This serves the directory on `127.0.0.1`, opens the viewer, and keeps annotations beside the data in `/data/das_annotations` (`--annotations` puts them elsewhere). A server started with `dastor serve` has the same viewer at `/viewer/`. The viewer has no sign-in yet, so on a server with users it shows only what anonymous requests may read; use it on a trusted network.
+This serves the directory on `127.0.0.1`, opens the viewer, and keeps annotations beside the data in `/data/das_annotations` (`--annotations` puts them elsewhere). A server started with `dastor serve` has the same viewer at `/viewer/`. The viewer has no sign-in yet, so on a server with users it shows only what anonymous requests may read, and saves annotations only if the config names an `anonymous_owner`; use it on a trusted network.
 
-**Products and levels.** The viewer draws products: the patches of one kind (the same `acquisition_key`, `tag` and DASCore's other kind attributes) with the same dims and steps. Products sharing an `acquisition_key` are one recording, and the Levels panel lists them from coarse to fine. Tick the ones to zoom through; the viewer draws the coarsest ticked product with at least one sample for each pixel, and a click on a name pins the view to it. dastor does not make coarse products: write them into the directory with DASCore (for example the maximum over each second), tagged so they can be told apart.
+**Products and levels.** The viewer draws products: the patches of one kind (the same `acquisition_key`, `tag` and DASCore's other kind attributes) with the same dims and steps. Products sharing an `acquisition_key` are one recording, and the Levels panel lists them from coarse to fine. Tick the ones to zoom through; the viewer draws the coarsest ticked product with at least one sample for each pixel along time (the finest, when none has), and a click on a name pins the view to it. dastor does not make coarse products: write them into the directory with DASCore (for example the maximum over each second), tagged so they can be told apart.
 
-**Limits.** A view which would read more than `max_view_bytes` of a product is not loaded. The nearest coarser ticked product stands in, and with none the viewer draws an outline of where the product has data. Tick a coarser product, or zoom in.
+**Limits.** A view which would read more than `max_view_bytes` of a product is not loaded. The nearest coarser ticked product stands in; with none, or when the product is pinned, the viewer draws an outline of where the product has data. Tick a coarser product, unpin, or zoom in.
 
-**Annotations.** Points, paths, polygons and boxes are saved as DASCore annotation sets, one directory per set under `<owner>/<name>/` with Parquet tables, which `dascore.annotations(path)` reads. Every set can be read by anyone who may read its data; only its owner changes it. To correct someone else's annotations (or a detector's), select a feature and copy it into your own set: the copy records its source in `derived_from` (`owner/set/feature id`) and `derived_revision`. The server sets each feature's `created_time`, `modified_time` and `modified_by`. Features too close together to tell apart are drawn as one marker with their number; hovering says what it holds and a click zooms in.
+**Annotations.** Points, paths, polygons and boxes are saved as DASCore annotation sets, each a directory `<owner>/<name>/` with Parquet tables, which `dascore.annotations(path)` reads. Only a set's owner changes it. Others read it if they may read every file of the acquisition it was made on (a set made on data naming no acquisition counts as on all such files), so annotations never describe data their reader can't see. To correct someone else's annotations (or a detector's), select a feature and copy it into your own set: the copy records its source in `derived_from` (`owner/set/feature id`) and `derived_revision`. The server sets each feature's `created_time`, `modified_time` and `modified_by`. Features too close together to tell apart are drawn as one marker with their number; hovering says what it holds and a click zooms in.
 
-**Downloading an area.** "select area" and a drag give the size of that part of a product and a link which downloads it as a DASDAE file from `/v1/data`.
+**Downloading an area.** "select area" and a drag give the size of that part of a product and a link which downloads it as a DASDAE file from `/v1/data?product=<id>`.
 
 ## Access control
 
@@ -85,11 +86,11 @@ Access is per file. A file is visible to a user only when every patch in it matc
 | `GET /v1/index` | A DASCore spool index (SQLite) of the patches the caller may read: metadata only, for the client. |
 | `GET /v1/viewer/products` | The products the caller may read (see [Viewer](#viewer)), each with an `id`, its steps, extents and recorded spans, and the viewer's limits. |
 | `GET /v1/viewer/tile?product=<id>` | One image of a product: `<x>_min`/`<x>_max` and `<y>_min`/`<y>_max` bound it, `width` and `height` size it, and `stat` is `max`, `mean` or `absmax`. Little-endian float32 rows, the lowest y first, NaN where there is no data (204 if none, 413 over `max_tile_bytes`). |
-| `GET /v1/annotations` | The annotation sets on data the caller may read, and the name the caller saves under. |
+| `GET /v1/annotations` | The annotation sets the caller may read (their own, and those on acquisitions all of whose files they may read), and the name the caller saves under. |
 | `GET`, `PUT`, `DELETE /v1/annotations/{owner}/{name}` | One annotation set, as the JSON records of its annotations and features tables. A save states the `base_revision` it was read at (409 if the set has moved on); only the owner saves or deletes. |
 | `GET /health` | Server status. |
 
-Every endpoint but `/health` sees only what the caller may read, and the summary, contents, coverage, gaps, data, patch and tile endpoints take query parameters that select patches: `<coord>_min` and `<coord>_max` bound a coordinate, and any other parameter selects an attribute, with DASCore's `*` and `?` wildcards:
+Every endpoint but `/health` sees only what the caller may read, and the summary, contents, coverage, gaps, data, patch and tile endpoints take query parameters that select patches: `<coord>_min` and `<coord>_max` bound a coordinate, `product=<id>` keeps one product of `/v1/viewer/products`, and any other parameter selects an attribute, with DASCore's `*` and `?` wildcards:
 
 ```console
 $ curl -H "Authorization: Bearer $KEY" \
