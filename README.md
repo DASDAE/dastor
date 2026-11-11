@@ -1,7 +1,5 @@
 <p align="center"><img src="docs/images/dastor-logo.svg" alt="DAS Tor logo" width="420"></p>
 
-# dastor
-
 **Experimental.** dastor is an early-stage, experimental package. Its API and wire format will change without notice. Don't depend on it yet.
 
 dastor is a server for distributed acoustic sensing (DAS) data, similar in spirit to FDSN web services, built on [DASCore](https://github.com/DASDAE/dascore). It serves one directory of DAS files as one spool: metadata queries backed by DASCore's spool index, and patch data trimmed to the request, with per-file access control. Datasets live together under the directory and are told apart by their attributes (such as `tag` or `station`) or their paths.
