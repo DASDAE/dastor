@@ -1,8 +1,11 @@
 """Tests for stored annotation sets and their API."""
 
+import io
+import zipfile
 from pathlib import Path
 
 import dascore as dc
+import pandas as pd
 import pytest
 from conftest import ALICE_KEY, BOB_KEY, VIEW_KEY, auth
 from fastapi.testclient import TestClient
@@ -183,6 +186,130 @@ class TestStore:
             store.save("me", name, _document(), "me")
         with pytest.raises(AnnotationError, match="not a valid"):
             store.load(name, "picks")
+
+
+class TestFiles:
+    """Tests for saving a set to a file and loading one from a file."""
+
+    def test_export_unpacks_to_a_dascore_set(self, store, tmp_path):
+        """The archive of a set is its folder, which DASCore reads."""
+        store.save("me", "picks", _document(), "me")
+        with zipfile.ZipFile(io.BytesIO(store.export_zip("me", "picks"))) as archive:
+            names = sorted(archive.namelist())
+            archive.extractall(tmp_path)
+        assert names == [
+            "picks/annotations.parquet",
+            "picks/attrs.json",
+            "picks/features.parquet",
+        ]
+        assert dc.annotations(tmp_path / "picks") == store.load("me", "picks")
+        with pytest.raises(MissingSetError):
+            store.export_zip("me", "nothing")
+
+    def test_exported_set_loads_as_a_new_set(self, store):
+        """What `export_zip` gives, `import_file` stores under another name."""
+        store.save("me", "picks", _document(acquisition_key=VIEW_KEY), "me")
+        payload = store.export_zip("me", "picks")
+        out = store.import_file("you", "copy", "picks.zip", payload, "you")
+        assert out["revision"] == 1
+        copy, source = store.document("you", "copy"), store.document("me", "picks")
+        assert copy["acquisition_key"] == VIEW_KEY
+        assert copy["annotations"] == source["annotations"]
+        labels = {x["id"]: x["label"] for x in copy["features"]}
+        assert labels == {"track": "car", "area": "noise"}
+        assert {x["modified_by"] for x in copy["features"]} == {"you"}
+        with pytest.raises(RevisionConflictError):
+            store.import_file("you", "copy", "picks.zip", payload, "you")
+
+    @pytest.mark.parametrize("suffix", [".csv", ".parquet"])
+    def test_bare_table_loads(self, store, tmp_path, suffix):
+        """A table of picks alone becomes a set, each row its own feature."""
+        frame = pd.DataFrame(
+            {
+                "time": pd.to_datetime(["2024-05-01T00:00:01", "2024-05-01T00:00:02"]),
+                "distance": [10.0, 20.0],
+                "phase": ["P", "S"],
+            }
+        )
+        picks = dc.AnnotationSet(frame, dims=DIMS)
+        path = tmp_path / f"picks{suffix}"
+        getattr(picks.io, "to_csv" if suffix == ".csv" else "to_parquet")(path)
+        store.import_file(
+            "me", "picks", path.name, path.read_bytes(), "me", tuple(DIMS), VIEW_KEY
+        )
+        document = store.document("me", "picks")
+        assert document["acquisition_key"] == VIEW_KEY
+        assert [x["phase"] for x in document["annotations"]] == ["P", "S"]
+        assert len({x["feature_id"] for x in document["annotations"]}) == 2
+        assert len(document["features"]) == 2
+
+    def test_archive_paths_never_choose_where_files_land(self, store, tmp_path):
+        """A member named to climb out of the folder is written inside it."""
+        store.save("me", "picks", _document(), "me")
+        good = zipfile.ZipFile(io.BytesIO(store.export_zip("me", "picks")))
+        payload = io.BytesIO()
+        with zipfile.ZipFile(payload, "w") as bad:
+            for member in good.namelist():
+                name = Path(member).name
+                bad.writestr(f"../../escape/{name}", good.read(member))
+        before = sorted(x.name for x in tmp_path.iterdir())
+        store.import_file("me", "again", "x.zip", payload.getvalue(), "me")
+        assert sorted(x.name for x in tmp_path.iterdir()) == before
+        assert not (store.root.parent / "escape").exists()
+        assert len(store.document("me", "again")["features"]) == 2
+
+    @pytest.mark.parametrize(
+        "filename, payload, message",
+        [
+            ("set.zip", b"not a zip", "not a zip archive"),
+            ("set.txt", b"", "uploaded as .zip, .parquet or .csv"),
+            ("set.parquet", b"junk", "not an annotation set"),
+        ],
+    )
+    def test_bad_uploads(self, store, filename, payload, message):
+        """Files which are no annotation set are refused, and nothing saved."""
+        with pytest.raises(AnnotationError, match=message):
+            store.import_file("me", "picks", filename, payload, "me", tuple(DIMS))
+        assert store.list() == []
+
+    def test_archive_without_a_set(self, store):
+        """An archive of something else is refused."""
+        payload = io.BytesIO()
+        with zipfile.ZipFile(payload, "w") as archive:
+            archive.writestr("notes.txt", "hello")
+        with pytest.raises(AnnotationError, match="holds no attrs.json"):
+            store.import_file("me", "picks", "x.zip", payload.getvalue(), "me")
+        with zipfile.ZipFile(payload, "w") as archive:
+            archive.writestr("a/attrs.json", "{}")
+            archive.writestr("b/attrs.json", "{}")
+        with pytest.raises(AnnotationError, match="not one annotation set"):
+            store.import_file("me", "picks", "x.zip", payload.getvalue(), "me")
+
+    def test_api_round_trip(self, viewer):
+        """A set saved to a file through the API loads back under a new name."""
+        viewer.put("/v1/annotations/me/picks", json=_document())
+        exported = viewer.get("/v1/annotations/me/picks/export")
+        assert exported.headers["content-type"] == "application/zip"
+        assert 'filename="picks.zip"' in exported.headers["content-disposition"]
+        headers = {"Content-Type": "application/octet-stream"}
+        params = {"filename": "picks.zip"}
+        url = "/v1/annotations/me/copy/import"
+        loaded = viewer.post(
+            url, params=params, content=exported.content, headers=headers
+        )
+        assert loaded.json()["revision"] == 1
+        again = viewer.post(
+            url, params=params, content=exported.content, headers=headers
+        )
+        assert again.status_code == 409
+        other = "/v1/annotations/you/copy/import"
+        refused = viewer.post(
+            other, params=params, content=exported.content, headers=headers
+        )
+        assert refused.status_code == 403
+        junk = viewer.post(url, params={"filename": "x.zip"}, content=b"junk")
+        assert junk.status_code == 400
+        assert viewer.get("/v1/annotations/me/nothing/export").status_code == 404
 
 
 class TestApi:

@@ -566,6 +566,52 @@ def create_app(settings: Settings) -> FastAPI:
             detail = {"detail": str(exc), "revision": exc.current}
             return JSONResponse(detail, status_code=409)
 
+    @app.get("/v1/annotations/{owner}/{name}/export")
+    def export_annotation_set(owner: str, name: str, who: Who, store: Store):
+        """
+        Return one annotation set as a zip archive of its directory.
+
+        Unpacked, it is a folder `dascore.annotations` reads.
+        """
+        key = store.document(owner, name)["acquisition_key"]
+        if not readable(who)(owner, key):
+            raise MissingSetError(f"no annotation set {owner}/{name}")
+        headers = {"Content-Disposition": f'attachment; filename="{name}.zip"'}
+        body = store.export_zip(owner, name)
+        return Response(body, media_type="application/zip", headers=headers)
+
+    @app.post("/v1/annotations/{owner}/{name}/import")
+    def import_annotation_set(
+        owner: str,
+        name: str,
+        who: Who,
+        store: Store,
+        filename: str,
+        payload: Annotated[bytes, Body(media_type="application/octet-stream")],
+        dims: str = "",
+        acquisition_key: str = "",
+    ):
+        """
+        Save an uploaded file as a new annotation set; only its owner may.
+
+        The body is the file: a zip of a set's directory (as `export`
+        gives) or a bare annotations table, `.parquet` or `.csv`, named by
+        `filename`. `dims` (comma separated) are for a table stating none,
+        and `acquisition_key` for a set naming none. A set of the name
+        already stored is 409.
+        """
+        user = own(who, owner)
+        if len(payload) > settings.limits.max_upload_bytes:
+            raise HTTPException(413, "the file is larger than is accepted")
+        wanted = tuple(x for x in dims.split(",") if x)
+        try:
+            return store.import_file(
+                owner, name, filename, payload, user, wanted, acquisition_key
+            )
+        except RevisionConflictError as exc:
+            detail = {"detail": f"{owner}/{name} exists", "revision": exc.current}
+            return JSONResponse(detail, status_code=409)
+
     @app.delete("/v1/annotations/{owner}/{name}", status_code=204)
     def delete_annotation_set(owner: str, name: str, who: Who, store: Store):
         """Delete an annotation set; only its owner may."""

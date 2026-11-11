@@ -14,10 +14,10 @@
   <label>Recording <select id="selGroup" title="products are grouped by acquisition_key"></select></label>
   <button id="btnWhole" title="show everything (w)">whole</button>
   <span class="tools" id="tools">
-    <button data-mode="nav" title="pan and select (Esc)">pan</button>
+    <button data-mode="select" title="select annotations; drag one, or a vertex, to move it (Esc)">select</button>
     <button data-mode="point" title="place points (1)">point</button>
-    <button data-mode="path" title="draw a path; Enter or double-click ends it (2)">path</button>
-    <button data-mode="polygon" title="draw a polygon; Enter or double-click closes it (3)">polygon</button>
+    <button data-mode="path" title="click to add points; Enter, double-click or right-click ends the path (2)">path</button>
+    <button data-mode="polygon" title="click to add corners; Enter, double-click or right-click closes the polygon (3)">polygon</button>
     <button data-mode="box" title="drag a box (4)">box</button>
     <button data-mode="area" title="drag an area to download (d)">select area</button>
   </span>
@@ -52,7 +52,10 @@
       <div id="sets"></div>
       <div class="row">
         <button class="small" id="btnNewSet">new set</button>
+        <button class="small" id="btnLoadSet" title="load a set from a file: a zip of a DASCore annotation set, or a .parquet or .csv table">load set</button>
+        <button class="small" id="btnSaveSet" title="save the set being edited to a file: a zip of a DASCore annotation set">save set</button>
         <button class="small" id="btnDeleteSet" title="delete the set being edited">delete set</button>
+        <input type="file" id="fileSet" accept=".zip,.parquet,.csv" hidden>
       </div>
       <div class="hint" id="annNote"></div>
     </details>
@@ -63,12 +66,25 @@
       <div id="area"></div>
     </details>
     <details><summary>Keys</summary>
-      <div class="hint">
-        Wheel zooms both axes, Shift+wheel the x axis, Ctrl+wheel the y axis. Drag pans.
-        Esc: pan mode. 1-4: point, path, polygon, box. d: select area. Enter: finish a shape.
-        Delete: remove the selection (or the vertex under the cursor). Ctrl+Z / Ctrl+Y: undo, redo.
-        w: whole view. a: auto contrast.
-      </div>
+      <table class="keys">
+        <tr><td><b>Wheel</b></td><td>zoom both axes</td></tr>
+        <tr><td><b>Shift + wheel</b></td><td>zoom the x axis</td></tr>
+        <tr><td><b>Ctrl + wheel</b></td><td>zoom the y axis</td></tr>
+        <tr><td><b>Middle drag</b></td><td>pan (or hold Space and drag)</td></tr>
+        <tr><td><b>Arrows</b></td><td>pan a tenth of the view; half with Shift</td></tr>
+        <tr><td><b>Tab</b></td><td>next screen in time; Shift + Tab goes back</td></tr>
+        <tr><td><b>Drag</b></td><td>move the annotation, or the vertex, under the cursor</td></tr>
+        <tr><td><b>+ -</b></td><td>zoom in, out</td></tr>
+        <tr><td><b>w</b></td><td>whole view</td></tr>
+        <tr><td><b>a</b></td><td>auto contrast</td></tr>
+        <tr><td><b>Esc</b></td><td>select tool; cancel a shape being drawn</td></tr>
+        <tr><td><b>1 2 3 4</b></td><td>point, path, polygon, box</td></tr>
+        <tr><td><b>d</b></td><td>select an area to download</td></tr>
+        <tr><td><b>Enter</b></td><td>finish a path or polygon (also double-click or right-click)</td></tr>
+        <tr><td><b>Delete</b></td><td>remove the selection, or the vertex under the cursor</td></tr>
+        <tr><td><b>Ctrl + Z</b></td><td>undo</td></tr>
+        <tr><td><b>Ctrl + Y</b></td><td>redo</td></tr>
+      </table>
     </details>
   </div>
 </div>

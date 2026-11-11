@@ -40,6 +40,7 @@ limits:
   max_concurrent_loads: 4       # patches loading at once
   max_tile_bytes: 67108864      # most one viewer tile may read
   max_view_bytes: 536870912     # most the viewer reads for one screen
+  max_upload_bytes: 67108864    # largest annotation set uploaded as a file
 annotations:                    # optional: turns on the annotation API
   path: /data/das_annotations   # a directory outside the data directory
   anonymous_owner: guest        # optional: the name anonymous requests save under
@@ -65,7 +66,7 @@ This serves the directory on `127.0.0.1`, opens the viewer, and keeps annotation
 
 **Limits.** A view which would read more than `max_view_bytes` of a product is not loaded. The nearest coarser ticked product stands in; with none, or when the product is pinned, the viewer draws an outline of where the product has data. Tick a coarser product, unpin, or zoom in.
 
-**Annotations.** Points, paths, polygons and boxes are saved as DASCore annotation sets, each a directory `<owner>/<name>/` with Parquet tables, which `dascore.annotations(path)` reads. Only a set's owner changes it. Others read it if they may read every file of the acquisition it was made on (a set made on data naming no acquisition counts as on all such files), so annotations never describe data their reader can't see. To correct someone else's annotations (or a detector's), select a feature and copy it into your own set: the copy records its source in `derived_from` (`owner/set/feature id`) and `derived_revision`. The server sets each feature's `created_time`, `modified_time` and `modified_by`. Features too close together to tell apart are drawn as one marker with their number; hovering says what it holds and a click zooms in.
+**Annotations.** Points, paths, polygons and boxes are saved as DASCore annotation sets, each a directory `<owner>/<name>/` with Parquet tables, which `dascore.annotations(path)` reads. Only a set's owner changes it. Others read it if they may read every file of the acquisition it was made on (a set made on data naming no acquisition counts as on all such files), so annotations never describe data their reader can't see. To correct someone else's annotations (or a detector's), select a feature and copy it into your own set: the copy records its source in `derived_from` (`owner/set/feature id`) and `derived_revision`. The server sets each feature's `created_time`, `modified_time` and `modified_by`. "save set" downloads the set being edited as a zip of its folder, and "load set" makes a new set from such a zip or from a bare table of annotations (`.parquet` or `.csv`), so sets move between the viewer and DASCore scripts. Features too close together to tell apart are drawn as one marker with their number; hovering says what it holds and a click zooms in.
 
 **Downloading an area.** "select area" and a drag give the size of that part of a product and a link which downloads it as a DASDAE file from `/v1/data?product=<id>`.
 
@@ -88,6 +89,8 @@ Access is per file. A file is visible to a user only when every patch in it matc
 | `GET /v1/viewer/tile?product=<id>` | One image of a product: `<x>_min`/`<x>_max` and `<y>_min`/`<y>_max` bound it, `width` and `height` size it, and `stat` is `max`, `mean` or `absmax`. Little-endian float32 rows, the lowest y first, NaN where there is no data (204 if none, 413 over `max_tile_bytes`). |
 | `GET /v1/annotations` | The annotation sets the caller may read (their own, and those on acquisitions all of whose files they may read), and the name the caller saves under. |
 | `GET`, `PUT`, `DELETE /v1/annotations/{owner}/{name}` | One annotation set, as the JSON records of its annotations and features tables. A save states the `base_revision` it was read at (409 if the set has moved on); only the owner saves or deletes. |
+| `GET /v1/annotations/{owner}/{name}/export` | The set as a zip archive of its directory. |
+| `POST /v1/annotations/{owner}/{name}/import?filename=<name>` | Makes a new set from the request body: a zip of a set's directory, or a bare `.parquet` or `.csv` table (`dims` for a table stating none, `acquisition_key` for a set naming none). 409 if the set exists. |
 | `GET /health` | Server status. |
 
 Every endpoint but `/health` sees only what the caller may read, and the summary, contents, coverage, gaps, data, patch and tile endpoints take query parameters that select patches: `<coord>_min` and `<coord>_max` bound a coordinate, `product=<id>` keeps one product of `/v1/viewer/products`, and any other parameter selects an attribute, with DASCore's `*` and `?` wildcards:

@@ -155,15 +155,22 @@ class Browser:
         self._mouse("mousePressed", x, y, button="left", clickCount=1, buttons=1)
         self._mouse("mouseReleased", x, y, button="left", clickCount=1)
 
-    def drag(self, start: tuple, end: tuple, steps: int = 6) -> None:
-        """Drag with the left button from one point to another."""
+    def drag(self, start: tuple, end: tuple, button: str = "left") -> None:
+        """Drag with a button (left or middle) from one point to another."""
         (x0, y0), (x1, y1) = start, end
+        held = {"button": button, "buttons": {"left": 1, "middle": 4}[button]}
         self._mouse("mouseMoved", x0, y0)
-        self._mouse("mousePressed", x0, y0, button="left", clickCount=1, buttons=1)
-        for step in range(1, steps + 1):
-            x, y = x0 + (x1 - x0) * step / steps, y0 + (y1 - y0) * step / steps
-            self._mouse("mouseMoved", x, y, button="left", buttons=1)
-        self._mouse("mouseReleased", x1, y1, button="left", clickCount=1)
+        self._mouse("mousePressed", x0, y0, clickCount=1, **held)
+        for step in range(1, 7):
+            x, y = x0 + (x1 - x0) * step / 6, y0 + (y1 - y0) * step / 6
+            self._mouse("mouseMoved", x, y, **held)
+        self._mouse("mouseReleased", x1, y1, button=button, clickCount=1)
+
+    def right_click(self, x: float, y: float) -> None:
+        """Click the right button at a point of the page."""
+        self._mouse("mouseMoved", x, y)
+        self._mouse("mousePressed", x, y, button="right", clickCount=1, buttons=2)
+        self._mouse("mouseReleased", x, y, button="right", clickCount=1)
 
     def wheel(self, x: float, y: float, delta: float) -> None:
         """Turn the wheel at a point of the page."""
@@ -300,6 +307,46 @@ class TestViewing:
         value = page.js("valueAt(parseTime('2024-05-01T00:00:10'), 60)")
         assert isinstance(value, float)
 
+    def test_arrow_keys_pan(self, page):
+        """The arrows move the view a tenth of its size; up shows more distance."""
+        before = page.js("[S.view.x0, S.view.y0, S.view.spp, S.view.ypp]")
+        page.key("ArrowUp", 38)
+        page.key("ArrowRight", 39)
+        after = page.js("[S.view.x0, S.view.y0, S.view.spp, S.view.ypp]")
+        size = page.js("[plotRect().w, plotRect().h]")
+        assert after[0] == pytest.approx(before[0] + size[0] * before[2] / 10)
+        assert after[1] == pytest.approx(before[1] + size[1] * before[3] / 10)
+        page.key("ArrowDown", 40)
+        page.key("ArrowLeft", 37)
+        assert page.js("[S.view.x0, S.view.y0]") == pytest.approx(before[:2])
+
+    def test_middle_button_drags_the_view(self, page):
+        """The middle button pans in any tool; the left button never does."""
+        start = _pixel(page, "2024-05-01T00:00:20", 60)
+        end = (start[0] - 120, start[1] + 50)
+        before = page.js("[S.view.x0, S.view.y0, S.view.spp, S.view.ypp]")
+        page.drag(start, end)  # the select tool, on nothing
+        assert page.js("[S.view.x0, S.view.y0]") == pytest.approx(before[:2])
+        for tool in ("select", "path"):
+            page.js(f"setMode('{tool}')" if tool == "select" else "S.mode = 'path'")
+            page.drag(start, end, button="middle")
+            after = page.js("[S.view.x0, S.view.y0]")
+            assert after[0] == pytest.approx(before[0] + 120 * before[2])
+            assert after[1] == pytest.approx(before[1] + 50 * before[3])
+            page.drag(end, start, button="middle")
+        assert page.js("S.draft") is None  # panning placed no point
+
+    def test_tab_pages_through_time(self, page):
+        """Tab moves on by a screen less a small overlap; Shift+Tab goes back."""
+        page.click(*_pixel(page, "2024-05-01T00:00:20", 60))  # focus the view
+        before, spp = page.js("[S.view.x0, S.view.spp]")
+        width = page.js("plotRect().w")
+        page.key("Tab", 9)
+        assert page.js("S.view.x0") == pytest.approx(before + width * spp * 0.97)
+        page.key("Tab", 9, modifiers=8)
+        assert page.js("S.view.x0") == pytest.approx(before)
+        assert page.js("document.activeElement === cv")
+
 
 class TestAnnotating:
     """Shapes drawn on the page are saved as a DASCore annotation set."""
@@ -332,7 +379,7 @@ class TestAnnotating:
         page.settle()
         assert len(_saved(viewer_settings).features) == 1
 
-        page.js("setMode('nav')")
+        page.js("setMode('select')")
         page.click(*_pixel(page, "2024-05-01T00:00:08", 60))
         label = "document.querySelector('#selected input[data-col=label]')"
         page.js(
@@ -349,6 +396,31 @@ class TestAnnotating:
         assert saved.annotations["distance"].round().tolist() == [20, 60, 120]
         # five edits; ones made within the save delay share a revision
         assert 3 <= page.js("activeSet().revision") <= 5
+
+    def test_right_click_ends_a_polygon_and_a_drag_moves_it(
+        self, page, viewer_settings
+    ):
+        """A polygon ends with a right-click; the select tool then drags it."""
+        _new_set(page)
+        page.js("setMode('polygon')")
+        corners = (("00:00:10", 20), ("00:00:20", 20), ("00:00:20", 60))
+        for when, distance in corners:
+            page.click(*_pixel(page, f"2024-05-01T{when}", distance))
+        assert page.js("S.draft.pts.length") == 3  # still open: nothing saved yet
+        page.right_click(*_pixel(page, "2024-05-01T00:00:15", 40))
+        page.settle()
+        saved = _saved(viewer_settings)
+        assert saved.features["geometry"].tolist() == ["polygon"]
+        assert saved.annotations["distance"].round().tolist() == [20, 20, 60]
+
+        page.js("setMode('select')")
+        edge = _pixel(page, "2024-05-01T00:00:15", 20)  # on its lower side
+        page.drag(edge, (edge[0], edge[1] - 80))
+        page.settle()
+        moved = _saved(viewer_settings).annotations["distance"]
+        assert (moved.diff().dropna().round().tolist()) == [0, 40]  # same shape
+        assert moved.iloc[0] > 25  # carried up the plot
+        assert page.js("S.sel.id") == saved.features["id"].iloc[0]
 
     def test_copy_from_another_set(self, page, viewer_settings):
         """A feature of a read-only set is copied, recording where it came from."""
@@ -375,7 +447,7 @@ class TestDownloading:
         start = _pixel(page, "2024-05-01T00:00:04", 20)
         page.drag(start, _pixel(page, "2024-05-01T00:00:12", 80))
         page.wait("document.getElementById('lnkArea') !== null")
-        assert "about" in page.js("document.getElementById('areaSize').textContent")
+        assert "Download" in page.js("document.getElementById('lnkArea').textContent")
         link = page.js("document.getElementById('lnkArea').href")
         assert "product=" in link and "format=dasdae" in link
         with urllib.request.urlopen(link) as reply:
@@ -456,3 +528,14 @@ class TestCrowding:
         # and the view is on them, not somewhere empty
         middle = "px2x(plotRect().x + plotRect().w / 2)"
         assert page.js(f"Math.abs({middle} - parseTime('2024-05-01T00:03:30'))") < 2
+
+    def test_download_around_an_annotation(self, page):
+        """A selected annotation's download button sets the area to its box."""
+        page.click(*_pixel(page, "2024-05-01T00:00:05", 30))
+        page.js("document.getElementById('btnAreaOf').click()")
+        page.wait("document.getElementById('lnkArea') !== null")
+        area = page.js("S.area")
+        when = page.js("parseTime('2024-05-01T00:00:05')")
+        # a point has no extent, so the area is padded round it
+        assert area["x0"] < when < area["x1"] and area["y0"] < 30 < area["y1"]
+        assert "product=" in page.js("document.getElementById('lnkArea').href")

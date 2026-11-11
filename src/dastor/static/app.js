@@ -34,7 +34,7 @@ const S = {
   lut: null, lutVer: 0, autoPending: true, autoFor: null, manual: false,
   me: null, annotations: false, sets: [], active: null,
   sel: null,                      // {set, id}
-  mode: "nav", draft: null, area: null,
+  mode: "select", draft: null, area: null, space: false,
   undo: [], redo: [],
   mouse: null, drag: null, blocked: null,
   refused: null,                  // a product the server refused a tile of, at this view
@@ -522,6 +522,7 @@ function draw() {
   drawGaps(P);
   drawAnnotations(P);
   const notes = [];
+  if (S.draft) notes.push(`${S.draft.kind}: Enter, double-click or right-click to finish · Esc to cancel`);
   if (S.blocked) notes.push(`${levelName(S.blocked.p)}: too much to load here. ${S.pin ? "Unpin it, or zoom in." : "Zoom in, or tick a coarser product."}`);
   if (S.failed) notes.push(`${S.failed} tile${S.failed > 1 ? "s" : ""} failed; retrying`);
   if (pending) notes.push(`loading ${pending} tile${pending > 1 ? "s" : ""}`);
@@ -669,7 +670,8 @@ function renderSets() {
       `<span class="tag">${s.failed ? "unread" : k === S.active ? "editing" : s.editable ? "" : "read only"}</span></div>`;
   }).join("") || '<div class="hint">No annotation sets yet.</div>';
   $("annNote").textContent = S.me ? "" : "Read only: this server gives visitors no name to save under.";
-  $("btnNewSet").disabled = !S.me; $("btnDeleteSet").disabled = !activeSet();
+  $("btnNewSet").disabled = !S.me; $("btnLoadSet").disabled = !S.me;
+  $("btnDeleteSet").disabled = !activeSet(); $("btnSaveSet").disabled = !activeSet();
 }
 
 // ------------------------------------------------------------------ editing and saving
@@ -724,6 +726,29 @@ async function newSet() {
   } catch (e) { toast(e.status === 409 ? "A set of that name exists." : e.message, 4000); return; }
   S.active = `${S.me}/${name}`; S.undo = []; S.redo = [];
   await loadSets();
+}
+// A set from a file on this computer: a zip of a DASCore set's folder, or one bare table.
+async function loadSetFile(file) {
+  const stem = file.name.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^[_.-]+/, "") || "annotations";
+  const name = (prompt("Name for the loaded annotation set:", stem) || "").trim();
+  if (!name) return;
+  const first = groupProducts()[0];
+  const q = query({ filename: file.name, dims: first.dims.join(","), acquisition_key: S.group });
+  try {
+    await api(`/annotations/${S.me}/${name}/import?${q}`, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file });
+  } catch (e) { toast(e.status === 409 ? "A set of that name exists." : `not loaded: ${e.message}`, 6000); return; }
+  await save();
+  S.active = `${S.me}/${name}`; S.undo = []; S.redo = [];
+  await loadSets();
+  if (!findSet(S.active)) toast("Loaded, but it is on other dims or another recording, so it is not shown here.", 6000);
+}
+// The set being edited, to a file: its DASCore folder, zipped.
+async function saveSetFile() {
+  const s = activeSet(); if (!s) return;
+  await save();  // what is on disk is what is on screen
+  const link = document.createElement("a");
+  link.href = `${API}/annotations/${s.owner}/${s.name}/export`; link.download = `${s.name}.zip`;
+  document.body.appendChild(link); link.click(); link.remove();
 }
 async function deleteSet() {
   const s = activeSet();
@@ -907,6 +932,21 @@ function hitFeature(px, py) {
   }
   return best;
 }
+// The box around a feature, in data coordinates, as an area to download. A feature with no
+// extent along a dim (a point, a level line) takes a twentieth of the view either side.
+function worldBounds(f) {
+  let pts = f.pts || [], boxes = f.kind === "box" ? [f.box] : [];
+  if (f.kind === "raw") { const sh = rawShapes(f); pts = sh.pts; boxes = sh.boxes; }
+  const lo = (a, b) => (a === null || b === null ? null : Math.min(a, b)), hi = (a, b) => (a === null || b === null ? null : Math.max(a, b));
+  let b = null;
+  const add = (o) => { b = b ? { x0: lo(b.x0, o.x0), x1: hi(b.x1, o.x1), y0: lo(b.y0, o.y0), y1: hi(b.y1, o.y1) } : { ...o }; };
+  for (const p of pts) add({ x0: p[0], x1: p[0], y0: p[1], y1: p[1] });
+  for (const o of boxes) add(o);
+  const P = plotRect(), padX = (P.w * S.view.spp) / 20, padY = (P.h * S.view.ypp) / 20;
+  if (b.x0 !== null && b.x1 - b.x0 <= 0) { b.x0 -= padX; b.x1 += padX; }
+  if (b.y0 !== null && b.y1 - b.y0 <= 0) { b.y0 -= padY; b.y1 += padY; }
+  return b;
+}
 function hitCluster(px, py) { return S.clusters.find((c) => Math.hypot(px - c.x, py - c.y) <= c.r + 2) || null; }
 function clusterText(c) {
   const counts = new Map();
@@ -951,7 +991,7 @@ function renderSelected() {
   el.innerHTML = `<div class="hint">${esc(f.kind)} in ${esc(setKey(set))}</div><table class="cols">${rows}</table><div class="row">` +
     (mine ? '<button class="small" id="btnAddCol">add column</button><button class="small" id="btnDelete">delete</button>' : "") +
     (!mine && S.me ? `<button class="small" id="btnCopy">copy to ${esc(S.active || "my set")}</button>` : "") +
-    (f.kind === "box" ? '<button class="small" id="btnAreaOf">download this area</button>' : "") + "</div>";
+    '<button class="small" id="btnAreaOf" title="download the data around this annotation">download</button></div>';
 }
 function areaQuery(level) {
   const a = S.area, q = { product: level.p.id };
@@ -973,13 +1013,14 @@ async function renderArea() {
   el.innerHTML = `<div class="hint">${esc(S.x)}: ${span(a.x0, a.x1, fmtX)}<br>${esc(S.y)}: ${span(a.y0, a.y1, (v) => fmtNum(+v.toPrecision(5)))} ${esc(S.yUnits)}</div>` +
     `<div class="row"><label>product <select id="selAreaLevel">${S.levels.map((l) => `<option value="${l.p.id}" ${l === level ? "selected" : ""}>${esc(levelName(l.p))} (${fmtStep(l.sx, S.xTime)})</option>`).join("")}</select></label></div>` +
     '<div class="row" id="areaSize">estimating...</div>' +
-    `<div class="row"><button class="small" id="btnAreaKeep" title="save the area as a box in the set being edited">keep as box</button><button class="small" id="btnAreaClear">clear</button></div>`;
+    `<div class="row"><button class="small" id="btnAreaClear">clear</button></div>`;
+  redraw();
   const q = areaQuery(level);
   try {
     const sum = await api("/summary?" + query(q));
     if (stamp !== renderArea.stamp) return;
     $("areaSize").innerHTML = sum.patches
-      ? `about ${fmtBytes(sum.bytes)} in ${sum.patches} patch${sum.patches > 1 ? "es" : ""} &nbsp; <a id="lnkArea" href="${API}/data?${query({ ...q, format: "dasdae" })}" download="${esc(levelName(level.p).replace(/[^A-Za-z0-9_.-]+/g, "_"))}.h5">download</a>`
+      ? `<a id="lnkArea" class="btn" href="${API}/data?${query({ ...q, format: "dasdae" })}" download="${esc(levelName(level.p).replace(/[^A-Za-z0-9_.-]+/g, "_"))}.h5">Download ${fmtBytes(sum.bytes)}</a>`
       : "no data in this area";
   } catch (e) { if (stamp === renderArea.stamp) $("areaSize").textContent = e.message; }
 }
@@ -988,29 +1029,52 @@ async function renderArea() {
 function evPos(ev) { const r = cv.getBoundingClientRect(); return { x: ev.clientX - r.left, y: ev.clientY - r.top }; }
 function inPlot(p) { const P = plotRect(); return p.x >= P.x && p.x <= P.x + P.w && p.y >= P.y && p.y <= P.y + P.h; }
 function setMode(mode) {
-  if (mode !== "nav" && mode !== "area" && !needActive()) mode = "nav";
+  if (mode !== "select" && mode !== "area" && !needActive()) mode = "select";
   S.mode = mode; S.draft = null;
-  cv.style.cursor = mode === "nav" ? "grab" : "crosshair";
+  cv.style.cursor = mode === "select" ? "default" : "crosshair";
   for (const b of $("tools").children) b.classList.toggle("on", b.dataset.mode === mode);
   redraw();
 }
+// The mouse. The middle button (or Space with the left) drags the view, in every tool. The
+// left button belongs to the tool: select picks a feature and drags it or one of its
+// vertices; the drawing tools place points and drag boxes.
+function shiftFeature(f, dx, dy) {
+  if (f.pts) for (const p of f.pts) { p[0] += dx; p[1] += dy; }
+  else if (f.box) { const b = f.box; if (b.x0 !== null) { b.x0 += dx; b.x1 += dx; } if (b.y0 !== null) { b.y0 += dy; b.y1 += dy; } }
+}
 cv.addEventListener("mousedown", (ev) => {
-  if (ev.button !== 0 || !S.levels.length) return;
-  cv.focus();
+  if (!S.levels.length) return;
   const p = evPos(ev); if (!inPlot(p)) return;
-  if (S.mode === "box" || S.mode === "area") { S.drag = { kind: "rect", from: [px2x(p.x), px2y(p.y)], box: null }; return; }
-  if (S.mode === "nav") {
-    const i = hitVertex(p.x, p.y);
-    if (i >= 0) { S.drag = { kind: "vertex", i, before: snapshot(), moved: false }; return; }
+  cv.focus();
+  if (ev.button === 1 || (ev.button === 0 && S.space)) {
+    ev.preventDefault();  // no autoscroll
+    S.drag = { kind: "pan", p, x0: S.view.x0, y0: S.view.y0 }; cv.style.cursor = "grabbing";
+    return;
   }
-  S.drag = { kind: "pan", p, x0: S.view.x0, y0: S.view.y0, moved: false };
+  if (ev.button !== 0) return;
+  if (S.mode === "box" || S.mode === "area") { S.drag = { kind: "rect", from: [px2x(p.x), px2y(p.y)], box: null }; return; }
+  S.drag = { kind: "click", p, moved: false };
+  if (S.mode !== "select") return;
+  const i = hitVertex(p.x, p.y);
+  if (i >= 0) { S.drag = { kind: "vertex", i, before: snapshot(), moved: false }; return; }
+  const hit = hitCluster(p.x, p.y) ? null : hitFeature(p.x, p.y), f = hit && hit.set === S.active && findSet(hit.set).feats.find((x) => x.id === hit.id);
+  if (f && (f.pts || f.box)) {  // one of the set being edited: selected now, moved if dragged
+    S.sel = { set: hit.set, id: hit.id }; renderSelected();
+    S.drag = { kind: "move", p, f, at: [px2x(p.x), px2y(p.y)], before: snapshot(), moved: false };
+  }
 });
+cv.addEventListener("auxclick", (ev) => ev.preventDefault());
+cv.addEventListener("contextmenu", (ev) => { if (S.draft) { ev.preventDefault(); finishDraft(); } });  // right-click ends a shape
 window.addEventListener("mousemove", (ev) => {
   const p = evPos(ev); S.mouse = inPlot(p) ? p : null;
-  const d = S.drag;
+  const d = S.drag, far = d && d.p && Math.hypot(p.x - d.p.x, p.y - d.p.y) > 4;
   if (d && d.kind === "pan") {
-    if (Math.hypot(p.x - d.p.x, p.y - d.p.y) > 4) d.moved = true;
-    if (d.moved) { moved(); S.view.x0 = d.x0 - (p.x - d.p.x) * S.view.spp; S.view.y0 = d.y0 + (p.y - d.p.y) * S.view.ypp; }
+    moved(); S.view.x0 = d.x0 - (p.x - d.p.x) * S.view.spp; S.view.y0 = d.y0 + (p.y - d.p.y) * S.view.ypp;
+  } else if (d && d.kind === "click") {
+    if (far) d.moved = true;
+  } else if (d && d.kind === "move") {
+    if (far) d.moved = true;
+    if (d.moved) { const x = px2x(p.x), y = px2y(p.y); shiftFeature(d.f, x - d.at[0], y - d.at[1]); d.at = [x, y]; }
   } else if (d && d.kind === "vertex") {
     const cur = selected();
     if (cur) { d.moved = true; moveVertex(cur.f, d.i, px2x(p.x), px2y(p.y)); }
@@ -1031,7 +1095,8 @@ window.addEventListener("mouseup", (ev) => {
   const d = S.drag; if (!d) return;
   S.drag = null;
   const p = evPos(ev);
-  if (d.kind === "vertex") {
+  if (d.kind === "pan") cv.style.cursor = S.mode === "select" ? "default" : "crosshair";
+  else if (d.kind === "vertex" || d.kind === "move") {
     if (d.moved) { S.undo.push(d.before); S.redo = []; touch(); }
   } else if (d.kind === "rect") {
     const b = d.box;
@@ -1039,7 +1104,7 @@ window.addEventListener("mouseup", (ev) => {
       if (S.mode === "area") { S.area = b; renderArea(); }
       else addFeature({ id: newId(), kind: "box", cols: {}, box: b });
     }
-  } else if (!d.moved) click(p);
+  } else if (d.kind === "click" && !d.moved) click(p);
   redraw();
 });
 function click(p) {
@@ -1067,13 +1132,22 @@ cv.addEventListener("wheel", (ev) => {
   const p = evPos(ev), f = Math.exp(clamp(ev.deltaY, -300, 300) * 0.0015);
   zoomAt(p.x, p.y, ev.ctrlKey ? 1 : f, ev.shiftKey ? 1 : f);
 }, { passive: false });
+const PAGE_OVERLAP = 0.03;  // of a screen, shared by the view before and after Tab
+window.addEventListener("keyup", (ev) => {
+  if (ev.key === " ") { S.space = false; if (!S.drag) cv.style.cursor = S.mode === "select" ? "default" : "crosshair"; }
+});
 window.addEventListener("keydown", (ev) => {
   if (/^(INPUT|SELECT|TEXTAREA)$/.test(ev.target.tagName)) return;
   const k = ev.key;
   if ((ev.ctrlKey || ev.metaKey) && k.toLowerCase() === "z") { ev.preventDefault(); if (ev.shiftKey) restore(S.redo, S.undo); else restore(S.undo, S.redo); return; }
   if ((ev.ctrlKey || ev.metaKey) && k.toLowerCase() === "y") { ev.preventDefault(); restore(S.redo, S.undo); return; }
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
-  if (k === "Escape") { if (S.draft) { S.draft = null; redraw(); } else setMode("nav"); }
+  if (k === " ") { S.space = true; cv.style.cursor = "grab"; }  // hold to drag the view with the left button
+  else if (k === "Tab") {  // a screen on in x, or back with Shift, keeping a little in common
+    if (document.activeElement !== cv) return;
+    moved(); S.view.x0 += (ev.shiftKey ? -1 : 1) * plotRect().w * S.view.spp * (1 - PAGE_OVERLAP); redraw();
+  }
+  else if (k === "Escape") { if (S.draft) { S.draft = null; redraw(); } else setMode("select"); }
   else if (k === "Enter") finishDraft();
   else if (k === "Delete" || k === "Backspace") {
     const cur = selected(), i = S.mouse ? hitVertex(S.mouse.x, S.mouse.y) : -1;
@@ -1084,6 +1158,19 @@ window.addEventListener("keydown", (ev) => {
   else if (k === "d") setMode("area");
   else if (k === "w") wholeView();
   else if (k === "a") { S.manual = false; autoContrast(); }
+  else if (k.startsWith("Arrow")) {  // a tenth of the view; half with Shift
+    const P = plotRect(), f = ev.shiftKey ? 0.5 : 0.1;
+    moved();
+    if (k === "ArrowLeft") S.view.x0 -= P.w * S.view.spp * f;
+    else if (k === "ArrowRight") S.view.x0 += P.w * S.view.spp * f;
+    else if (k === "ArrowUp") S.view.y0 += P.h * S.view.ypp * f;
+    else S.view.y0 -= P.h * S.view.ypp * f;
+    redraw();
+  }
+  else if (k === "+" || k === "=" || k === "-") {
+    const P = plotRect(), f = k === "-" ? 1.25 : 0.8;
+    zoomAt(P.x + P.w / 2, P.y + P.h / 2, f, f);
+  }
   else return;
   ev.preventDefault();
 });
@@ -1132,6 +1219,9 @@ function initControls() {
     }
   };
   $("btnNewSet").onclick = newSet; $("btnDeleteSet").onclick = deleteSet;
+  $("btnSaveSet").onclick = saveSetFile;
+  $("btnLoadSet").onclick = () => $("fileSet").click();
+  $("fileSet").onchange = async (ev) => { const file = ev.target.files[0]; ev.target.value = ""; if (file) await loadSetFile(file); };
   $("selected").addEventListener("change", (ev) => {
     const col = ev.target.dataset.col, cur = selected(); if (!col || !cur) return;
     change(() => { if (ev.target.value === "") delete cur.f.cols[col]; else cur.f.cols[col] = ev.target.value; });
@@ -1140,7 +1230,7 @@ function initControls() {
     const cur = selected(); if (!cur) return;
     if (ev.target.id === "btnDelete") deleteSelected();
     else if (ev.target.id === "btnCopy") copySelected();
-    else if (ev.target.id === "btnAreaOf") { S.area = { ...cur.f.box }; renderArea(); redraw(); }
+    else if (ev.target.id === "btnAreaOf") { S.area = worldBounds(cur.f); renderArea(); redraw(); }
     else if (ev.target.id === "btnAddCol") {
       const name = (prompt("Column name:") || "").trim();
       if (!name || ["id", "geometry", ...STAMPS].includes(name)) return;
@@ -1150,7 +1240,6 @@ function initControls() {
   $("area").addEventListener("change", (ev) => { if (ev.target.id === "selAreaLevel") renderArea(); });
   $("area").addEventListener("click", (ev) => {
     if (ev.target.id === "btnAreaClear") { S.area = null; renderArea(); redraw(); }
-    else if (ev.target.id === "btnAreaKeep" && needActive()) addFeature({ id: newId(), kind: "box", cols: {}, box: { ...S.area } });
   });
   window.addEventListener("resize", resize);
   window.addEventListener("beforeunload", (ev) => { if (S.sets.some((s) => s.dirty || s.saving)) ev.preventDefault(); });
@@ -1184,7 +1273,7 @@ async function init() {
   if (hash.g === key && v.length === 4 && v.every(Number.isFinite) && v[1] > 0 && v[3] > 0) {
     Object.assign(S.view, { x0: v[0], spp: v[1], y0: v[2], ypp: v[3] }); clampView();
   }
-  setMode("nav");
+  setMode("select");
   // for tests: nothing is loading, waiting to load, or unsaved
   window.dastorIdle = () => !settling && inflight === 0 && queue.length === 0 && !rafPending && S.sets.every((s) => !s.dirty && !s.saving);
   window.dastorReady = true;

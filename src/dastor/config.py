@@ -118,6 +118,8 @@ class Limits(_Model):
     max_concurrent_loads: int = Field(default=4, gt=0)
     # The most array bytes one viewer tile may read, estimated before loading.
     max_tile_bytes: int = Field(default=64 * 1024**2, gt=0)
+    # The largest annotation set which may be uploaded, as a file.
+    max_upload_bytes: int = Field(default=64 * 1024**2, gt=0)
     # The most array bytes the viewer's page reads for one screen. The page
     # keeps to it (the server enforces only the tile limit): beyond it a
     # coarser product stands in, and with none the data is only outlined.

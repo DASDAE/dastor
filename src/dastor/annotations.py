@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
+import tempfile
 import threading
 import uuid
+import zipfile
 from pathlib import Path
 
 import dascore as dc
@@ -34,6 +37,12 @@ _FEATURE_COLUMNS = {
         "description": "The revision of the source set when it was copied.",
     },
 }
+
+
+# The most a set read from an upload may unpack to, and the files it may hold.
+_MAX_UNPACKED = 256 * 1024**2
+_MAX_MEMBERS = 16
+_TABLE_SUFFIXES = (".csv", ".parquet")
 
 
 class AnnotationError(ValueError):
@@ -98,6 +107,32 @@ def _by_feature(annotations: dc.AnnotationSet) -> dict[str, str]:
         content = {"feature": record, "rows": members.get(key, [])}
         out[key] = json.dumps(content, sort_keys=True)
     return out
+
+
+def _unpack(payload: bytes, folder: Path) -> Path:
+    """
+    Unpack a zipped annotation set into a folder, and return its directory.
+
+    Only plain files are written, each under its own name, from the
+    archive's root or from one folder inside it: a member's path never
+    chooses where it lands.
+    """
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(payload))
+    except zipfile.BadZipFile as exc:
+        raise AnnotationError("the upload is not a zip archive") from exc
+    with archive:
+        members = [x for x in archive.infolist() if not x.is_dir()]
+        parents = {str(Path(x.filename).parent) for x in members}
+        if not members or len(members) > _MAX_MEMBERS or len(parents) != 1:
+            raise AnnotationError("the archive is not one annotation set's folder")
+        if sum(x.file_size for x in members) > _MAX_UNPACKED:
+            raise AnnotationError("the archive unpacks to more than is accepted")
+        for member in members:
+            (folder / Path(member.filename).name).write_bytes(archive.read(member))
+    if not (folder / "attrs.json").is_file():
+        raise AnnotationError("the archive holds no attrs.json")
+    return folder
 
 
 def _revision(attrs) -> int:
@@ -269,6 +304,77 @@ class AnnotationStore:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
             shutil.rmtree(retired, ignore_errors=True)
+
+    def export_zip(self, owner: str, name: str) -> bytes:
+        """
+        Return a stored set as a zip archive of its directory, `<name>/`.
+
+        Unpacked, the folder is a DASCore annotation set:
+        `dascore.annotations("<name>")` reads it.
+        """
+        path = self._path(owner, name)
+        with self._lock:
+            if not (path / "attrs.json").is_file():
+                raise MissingSetError(f"no annotation set {owner}/{name}")
+            out = io.BytesIO()
+            with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+                for member in sorted(x for x in path.iterdir() if x.is_file()):
+                    archive.write(member, f"{name}/{member.name}")
+        return out.getvalue()
+
+    def import_file(
+        self,
+        owner: str,
+        name: str,
+        filename: str,
+        payload: bytes,
+        user: str,
+        dims: tuple[str, ...] = (),
+        acquisition_key: str = "",
+    ) -> dict:
+        """
+        Save an uploaded annotation set as a new stored set, and return it.
+
+        The upload is a zip of a set's directory (as `export_zip` gives, or
+        any DASCore set zipped) or one bare annotations table, CSV or
+        Parquet. `dims` are for a table which doesn't state its own, and
+        `acquisition_key` for a set which names none. Rows naming no
+        feature each become a feature, since the store needs every row to
+        name one. A set of the name already stored is a revision conflict.
+        """
+        self._path(owner, name)  # refuse a bad name before reading anything
+        suffix = Path(filename).suffix.lower()
+        with tempfile.TemporaryDirectory(prefix="dastor-import-") as folder:
+            try:
+                if suffix == ".zip":
+                    source = _unpack(payload, Path(folder))
+                    loaded = dc.annotations(source)
+                elif suffix in _TABLE_SUFFIXES:
+                    source = Path(folder) / f"annotations{suffix}"
+                    source.write_bytes(payload)
+                    loaded = dc.annotations(source, dims=dims or None)
+                else:
+                    msg = "an annotation set is uploaded as .zip, .parquet or .csv"
+                    raise AnnotationError(msg)
+            except AnnotationError:
+                raise
+            except (DASCoreError, KeyError, TypeError, ValueError, OSError) as exc:
+                raise AnnotationError(f"not an annotation set: {exc}") from exc
+            rows = loaded.annotations
+            if len(rows):
+                ids = rows["feature_id"].astype("string").fillna("")
+                blank = (ids == "").to_numpy()
+                ids = ids.astype(object)
+                ids[blank] = [f"row_{number}" for number in range(int(blank.sum()))]
+                rows = rows.assign(feature_id=ids.to_numpy())
+            document = {
+                "dims": list(loaded.dims),
+                "acquisition_key": loaded.attrs.acquisition_key or acquisition_key,
+                "base_revision": 0,
+                "annotations": _records(rows),
+                "features": _records(loaded.features),
+            }
+        return self.save(owner, name, document, user)
 
     def delete(self, owner: str, name: str) -> None:
         """Remove a stored set; MissingSetError if there is none."""
