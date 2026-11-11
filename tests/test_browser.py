@@ -682,6 +682,39 @@ class TestAnnotating:
         assert saved["label"].tolist() == ["car"]
         assert saved["note"].tolist() == ["half typed"]
 
+    def test_a_column_carries_to_others_of_its_kind(self, page, viewer_settings):
+        """A column added to one point is offered on the next point, not a box."""
+        _new_set(page)
+        page.js("setMode('point')")
+        page.click(*_pixel(page, "2024-05-01T00:00:40", 100))
+        page.key("Escape", 27)
+        page.js(
+            "(() => { const e = document.querySelector('#selected [data-newcol]');"
+            " e.value = 'speed';"
+            " e.dispatchEvent(new Event('change', {bubbles: true})); })()"
+        )
+        speed = "document.querySelector('#selected input[data-col=speed]')"
+        assert page.js(f"{speed} !== null")
+        page.click(*_pixel(page, "2024-05-01T00:00:50", 100))  # a second point
+        page.key("Escape", 27)
+        assert page.js("activeSet().feats.length") == 2
+        assert page.js(f"{speed}.value") == ""
+        page.js(
+            f"(() => {{ const e = {speed}; e.value = '12';"
+            " e.dispatchEvent(new Event('change', {bubbles: true})); })()"
+        )
+        page.js("setMode('box')")
+        page.drag(
+            _pixel(page, "2024-05-01T00:01:00", 60),
+            _pixel(page, "2024-05-01T00:01:10", 80),
+        )
+        page.key("Escape", 27)
+        assert page.js("selected().f.kind") == "box"
+        assert page.js(f"{speed}") is None
+        page.settle()
+        saved = _saved(viewer_settings).features
+        assert saved["speed"].iloc[1] == "12"
+
     def test_copy_several_at_once(self, page, viewer_settings):
         """A window over another user's crowd copies them all with one key."""
         page.js("setMode('select')")

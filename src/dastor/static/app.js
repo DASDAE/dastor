@@ -1269,7 +1269,11 @@ function renderSelected() {
   }
   if (!cur) { el.textContent = ""; el.dataset.sig = ""; return; }
   const { set, f } = cur, mine = setKey(set) === S.active;
-  const names = ["label", "note", ...Object.keys(f.cols).filter((k) => k !== "label" && k !== "note" && !HIDDEN_COLS.has(k))];
+  // a column given to one annotation is offered, empty, on the others of its kind in the set
+  const cols = new Set(["label", "note"]);
+  for (const g of set.feats) if (g.kind === f.kind) for (const k in g.cols) if (!HIDDEN_COLS.has(k)) cols.add(k);
+  for (const k in f.cols) if (!HIDDEN_COLS.has(k)) cols.add(k);
+  const names = [...cols];
   const sig = `${setKey(set)}|${f.id}|${mine}|${names.join(",")}`;
   if (el.dataset.sig === sig) {  // the same fields: only their values may have changed
     for (const box of el.querySelectorAll("input[data-col]")) if (box !== document.activeElement) box.value = f.cols[box.dataset.col] ?? "";
@@ -1723,7 +1727,7 @@ function initControls() {
     if (t.dataset.newcol !== undefined) {
       const name = t.value.trim();
       if (!name) return;
-      if (["id", "geometry", ...STAMPS].includes(name) || name in cur.f.cols) { toast(`"${name}" is taken; choose another name`); return; }
+      if (["id", "geometry", ...STAMPS].includes(name) || name in cur.f.cols || $("selected").querySelector(`[data-col="${CSS.escape(name)}"]`)) { toast(`"${name}" is taken; choose another name`); return; }
       change(() => { cur.f.cols[name] = ""; });
       const box = $("selected").querySelector(`input[data-col="${CSS.escape(name)}"]`); if (box) box.focus();
     } else if (t.dataset.col) {
