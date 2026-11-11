@@ -1134,11 +1134,27 @@ function click(p) {
   S.sel = hit ? { set: hit.set, id: hit.id } : null;
   renderSelected();
 }
+// The side of the selected path or polygon under a point, as the index a new vertex takes.
+function hitSide(px, py) {
+  const cur = selected();
+  if (!cur || setKey(cur.set) !== S.active || (cur.f.kind !== "path" && cur.f.kind !== "polygon")) return -1;
+  const pts = cur.f.pts.map((p) => [x2px(p[0]), y2px(p[1])]), n = pts.length, last = cur.f.kind === "polygon" ? n : n - 1;
+  for (let i = 0; i < last; i++) {
+    const a = pts[i], b = pts[(i + 1) % n];
+    if (distToSegment(px, py, a[0], a[1], b[0], b[1]) < 6) return i + 1;
+  }
+  return -1;
+}
 cv.addEventListener("dblclick", (ev) => {
-  if (!S.draft) return;
   ev.preventDefault();
-  S.draft.pts.pop();  // the second click of the pair added the same point twice
-  finishDraft();
+  if (S.draft) {
+    S.draft.pts.pop();  // the second click of the pair added the same point twice
+    finishDraft();
+    return;
+  }
+  if (S.mode !== "select") return;
+  const p = evPos(ev), at = hitVertex(p.x, p.y) >= 0 ? -1 : hitSide(p.x, p.y), cur = selected();
+  if (at >= 0) change(() => cur.f.pts.splice(at, 0, [px2x(p.x), px2y(p.y), {}]));  // a new vertex on that side
 });
 cv.addEventListener("wheel", (ev) => {
   ev.preventDefault();

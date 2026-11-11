@@ -422,6 +422,30 @@ class TestAnnotating:
         assert moved.iloc[0] > 25  # carried up the plot
         assert page.js("S.sel.id") == saved.features["id"].iloc[0]
 
+    def test_vertices_are_added_and_removed(self, page, viewer_settings):
+        """A double-click on a side adds a vertex; Delete over one removes it."""
+        _new_set(page)
+        page.js("setMode('path')")
+        for when, distance in (("00:00:10", 20), ("00:00:30", 20)):
+            page.click(*_pixel(page, f"2024-05-01T{when}", distance))
+        page.key("Enter", 13)
+        page.settle()
+        page.js("setMode('select')")
+        middle = _pixel(page, "2024-05-01T00:00:20", 20)
+        page._mouse("mouseMoved", *middle)
+        for count in (1, 2):
+            page._mouse("mousePressed", *middle, button="left", clickCount=count)
+            page._mouse("mouseReleased", *middle, button="left", clickCount=count)
+        page.settle()
+        times = _saved(viewer_settings).annotations["time"]
+        assert [x.round("s").second for x in times] == [10, 20, 30]
+
+        page._mouse("mouseMoved", *middle)  # over the new vertex
+        page.key("Delete", 46)
+        page.settle()
+        times = _saved(viewer_settings).annotations["time"]
+        assert [x.round("s").second for x in times] == [10, 30]
+
     def test_copy_from_another_set(self, page, viewer_settings):
         """A feature of a read-only set is copied, recording where it came from."""
         _new_set(page)
