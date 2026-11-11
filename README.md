@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/images/dastor-logo.svg" alt="DAS Tor logo" width="420"></p>
+
 # dastor
 
 **Experimental.** dastor is an early-stage, experimental package. Its API and wire format will change without notice. Don't depend on it yet.

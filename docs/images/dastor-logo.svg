@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="126 138 1284 754"
+   role="img"
+   aria-labelledby="title"
+   version="1.1"
+   id="svg19"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <title
+     id="title">DAS Tor laser gate in Colorado flag colors</title>
+  <defs
+     id="defs4">
+    <linearGradient
+       id="steel"
+       x2="0%"
+       y2="100%">
+      <stop
+         stop-color="#f7f7f8"
+         id="stop1" />
+      <stop
+         offset="1"
+         stop-color="#c6c7cb"
+         id="stop2" />
+    </linearGradient>
+    <linearGradient
+       id="lettering"
+       x2="0%"
+       y2="100%">
+      <stop
+         stop-color="#fdfdfd"
+         id="stop3" />
+      <stop
+         offset="1"
+         stop-color="#d5d6d9"
+         id="stop4" />
+    </linearGradient>
+    <path
+       id="blue-rays"
+       d="M521 347 768 482 515 414 M515 482H768L515 550 M520 623 768 482" />
+    <path
+       id="red-rays"
+       d="M1014 347 768 482 1017 414 M1017 482H768L1017 550 M1014 623 768 482" />
+  </defs>
+  <g
+     fill="url(#steel)"
+     stroke="#232426"
+     stroke-width="10"
+     stroke-linejoin="round"
+     id="g7">
+    <path
+       d="M418 292 568 165H824L774 196Q708 236 725 240H778L890 198H980L1100 299V476L1040 427V330L953 260H571L492 329V412L418 475Z"
+       id="path4" />
+    <path
+       d="M418 516 492 452V643L450 686H329L397 617H418Z"
+       id="path5" />
+    <path
+       d="M1040 452 1113 515V618H1139L1206 686H1082L1040 643Z"
+       id="path6" />
+    <path
+       fill="#b5b7bb"
+       d="M453 686 492 643V331L572 270H954L1040 332V643L1081 686H1030L1017 673V344L950 292H584L515 345V674L504 686Z"
+       id="path7" />
+  </g>
+  <path
+     d="M498 266 543 232H576L534 266Z"
+     fill="#ffc934"
+     stroke="#232426"
+     stroke-width="5"
+     id="path8" />
+  <g
+     fill="none"
+     stroke-width="10"
+     id="g13">
+    <use
+       xlink:href="#blue-rays"
+       stroke-width="13"
+       stroke="#3978d6"
+       id="use9" />
+    <use
+       xlink:href="#blue-rays"
+       stroke="#002868"
+       id="use10" />
+    <use
+       xlink:href="#red-rays"
+       stroke="#d0002a"
+       id="use11" />
+    <use
+       xlink:href="#blue-rays"
+       stroke-width="2.7"
+       stroke="#eff6ff"
+       id="use12" />
+    <use
+       xlink:href="#red-rays"
+       stroke-width="2.7"
+       stroke="#fff1f0"
+       id="use13" />
+  </g>
+  <path
+     d="m768 462 19 20-19 20-19-20Z"
+     fill="#fff"
+     stroke="#232426"
+     stroke-width="4"
+     id="path13" />
+  <g
+     fill="url(#lettering)"
+     fill-rule="evenodd"
+     stroke="#232426"
+     stroke-width="11"
+     stroke-linejoin="round"
+     id="g19">
+    <path
+       d="M151 758 186 715H349L393 755V821L344 868H167V758ZM228 764 222 822H303L328 800V776L318 764Z"
+       id="path14" />
+    <path
+       d="M367 868 462 715H529L628 868H559L539 835H455L434 868ZM475 797H520L499 760Z"
+       id="path15" />
+    <path
+       d="M600 742 628 714H800L810 725 781 758H673L667 764H777L811 798V837L778 868H648L615 825H747V810H628L600 781Z"
+       id="path16" />
+    <path
+       d="M834 759 857 715H1062V736L1038 761H983V868H915V759Z"
+       id="path17" />
+    <path
+       d="M1022 779 1056 744H1175L1219 779V836L1182 868H1060L1022 832ZM1080 799V815L1088 824H1150L1158 816V796L1150 789H1089Z"
+       id="path18" />
+    <path
+       d="M1217 778 1254 744H1371L1385 759 1361 790H1297L1281 804V868H1217Z"
+       id="path19" />
+  </g>
+  <path
+     d="m 1017.9332,259.5 -45.00001,-34 h -33 l 42,34 z"
+     fill="#ffc934"
+     stroke="#232426"
+     stroke-width="5"
+     id="path8-6" />
+</svg>
