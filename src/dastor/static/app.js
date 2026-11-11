@@ -7,7 +7,7 @@
 // ------------------------------------------------------------------ constants
 const API = "../v1";
 const TILE = 256;
-const M = { l: 70, r: 8, t: 8, b: 36 };  // plot margins (CSS px)
+const M = { l: 80, r: 8, t: 8, b: 42 };  // plot margins (CSS px)
 const MAX_INFLIGHT = 6;
 const TILE_BYTE_CAP = 320 * 2 ** 20;
 // Annotation colours: ones the colour maps do not pass through, each drawn over a dark edge.
@@ -440,7 +440,7 @@ function drawGaps(P) {
     ctx.restore();
     if (xb - xa > 14) {
       ctx.save(); ctx.translate((xa + xb) / 2, P.y + P.h / 2); ctx.rotate(-Math.PI / 2);
-      ctx.fillStyle = "rgba(255,210,120,0.95)"; ctx.font = "12px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillStyle = "rgba(255,210,120,0.95)"; ctx.font = "14px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillText(`no data ${fmtStep(sg[k + 1].a - sg[k].b, true)}`, 0, 0); ctx.restore();
     }
   }
@@ -506,7 +506,7 @@ function draw() {
   const W = cv.clientWidth, H = cv.clientHeight, P = plotRect();
   ctx.fillStyle = "#101214"; ctx.fillRect(0, 0, W, H);
   if (!S.levels.length || !S.lut) {
-    ctx.fillStyle = "#888"; ctx.font = "13px system-ui"; ctx.textAlign = "left";
+    ctx.fillStyle = "#888"; ctx.font = "15px system-ui"; ctx.textAlign = "left";
     ctx.fillText(S.products.length || !S.ready ? "loading..." : "No viewable data: this server holds no patches of two dims you may read.", 80, 40);
     return;
   }
@@ -528,11 +528,11 @@ function draw() {
   if (S.blocked) notes.push(`${levelName(S.blocked.p)}: too much to load here. ${S.pin ? "Unpin it, or zoom in." : "Zoom in, or tick a coarser product."}`);
   if (S.failed) notes.push(`${S.failed} tile${S.failed > 1 ? "s" : ""} failed; retrying`);
   if (pending) notes.push(`loading ${pending} tile${pending > 1 ? "s" : ""}`);
-  ctx.font = "11px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.font = "13px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
   notes.forEach((txt, i) => {
     const w = ctx.measureText(txt).width + 12;
-    ctx.fillStyle = "rgba(20,22,26,0.85)"; ctx.fillRect(P.x + P.w - w - 6, P.y + 6 + i * 22, w, 18);
-    ctx.fillStyle = THEME.gold; ctx.fillText(txt, P.x + P.w - w, P.y + 15 + i * 22);
+    ctx.fillStyle = "rgba(20,22,26,0.85)"; ctx.fillRect(P.x + P.w - w - 6, P.y + 6 + i * 26, w, 22);
+    ctx.fillStyle = THEME.gold; ctx.fillText(txt, P.x + P.w - w, P.y + 17 + i * 26);
   });
   ctx.restore();
   drawAxes(P);
@@ -543,7 +543,7 @@ function draw() {
 }
 function drawAxes(P) {
   const e = viewEnd();
-  ctx.fillStyle = "#cfd3d8"; ctx.strokeStyle = "#777"; ctx.lineWidth = 1; ctx.font = "11px system-ui, sans-serif";
+  ctx.fillStyle = "#cfd3d8"; ctx.strokeStyle = "#777"; ctx.lineWidth = 1; ctx.font = "13px system-ui, sans-serif";
   ctx.strokeRect(P.x + 0.5, P.y + 0.5, P.w, P.h);
   const xs = S.xTime ? niceStep(S.view.spp * 110, T_STEPS) : niceNumber(S.view.spp * 90);
   ctx.textAlign = "center"; ctx.textBaseline = "top";
@@ -551,13 +551,13 @@ function drawAxes(P) {
   for (const t of xTicks(xs)) {
     const x = x2px(t);
     ctx.beginPath(); ctx.moveTo(x, P.y + P.h); ctx.lineTo(x, P.y + P.h + 4); ctx.stroke();
-    if (x - lastX > 70) { ctx.fillText(fmtTick(t, xs), x, P.y + P.h + 5); lastX = x; }
+    if (x - lastX > 82) { ctx.fillText(fmtTick(t, xs), x, P.y + P.h + 6); lastX = x; }
   }
   const ps = pieces();
   ctx.textAlign = "left";
-  if (S.xTime && ps.length) ctx.fillText(isoOf(ps[0].a).slice(0, 10) + " UTC", P.x, P.y + P.h + 20);
+  if (S.xTime && ps.length) ctx.fillText(isoOf(ps[0].a).slice(0, 10) + " UTC", P.x, P.y + P.h + 24);
   ctx.textAlign = "right";
-  ctx.fillText(S.x + (S.xTime ? " (UTC)" : S.xUnits ? ` (${S.xUnits})` : ""), P.x + P.w, P.y + P.h + 20);
+  ctx.fillText(S.x + (S.xTime ? " (UTC)" : S.xUnits ? ` (${S.xUnits})` : ""), P.x + P.w, P.y + P.h + 24);
   const ys = niceNumber(S.view.ypp * 50);
   ctx.textBaseline = "middle";
   for (let d = Math.ceil(S.view.y0 / ys) * ys; d < e.y1; d += ys) {
@@ -850,7 +850,7 @@ function drawFeature(f, color, sel, P) {
   if (sel === 1 && f.kind !== "point" && f.kind !== "group") { ctx.fillStyle = "#fff"; ctx.strokeStyle = "#000"; ctx.lineWidth = 1; for (const p of vertices(f)) dot(p, 3.5); }
   const label = f.cols.label, at = labelAnchor(f, P);
   if (label && at) {
-    ctx.font = "11px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "bottom";
+    ctx.font = "13px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "bottom";
     ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,0.8)"; ctx.strokeText(label, at[0] + 5, at[1] - 4);
     ctx.fillStyle = color; ctx.fillText(label, at[0] + 5, at[1] - 4);
   }
@@ -905,7 +905,7 @@ function drawAnnotations(P) {
     ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, 6.2832);
     ctx.fillStyle = c.color; ctx.globalAlpha = 0.85; ctx.fill(); ctx.globalAlpha = 1;
     ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.setLineDash([]); ctx.stroke();
-    ctx.fillStyle = "#000"; ctx.font = "bold 11px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillStyle = "#000"; ctx.font = "bold 13px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.fillText(c.feats.length > 999 ? "999+" : String(c.feats.length), c.x, c.y + 0.5);
   }
   if (S.draft) {
@@ -1266,7 +1266,8 @@ window.addEventListener("keydown", (ev) => {
 
 // ------------------------------------------------------------------ controls
 function showSide(show) {
-  $("side").hidden = !show; $("btnSide").classList.toggle("on", show); $("btnSide").setAttribute("aria-pressed", String(show));
+  const handle = $("sideHandle"), what = `${show ? "Hide" : "Show"} the side panel (p)`;
+  $("side").hidden = !show; handle.textContent = show ? "\u203a" : "\u2039"; handle.title = what; handle.setAttribute("aria-label", what);
   try { localStorage.setItem("dastor.side", show ? "shown" : "hidden"); } catch (e) { /* private mode */ }
   resize();
 }
@@ -1315,7 +1316,7 @@ function initControls() {
   $("btnHelp").onclick = () => $("help").showModal();
   $("btnHelpClose").onclick = () => $("help").close();
   $("help").onclick = (ev) => { if (ev.target === $("help")) $("help").close(); };  // a click outside it
-  $("btnSide").onclick = () => showSide($("side").hidden);
+  $("sideHandle").onclick = () => showSide($("side").hidden);
   try { showSide(localStorage.getItem("dastor.side") !== "hidden"); } catch (e) { /* private mode */ }
   $("btnNewSet").onclick = newSet; $("btnDeleteSet").onclick = deleteSet;
   $("btnSaveSet").onclick = saveSetFile;

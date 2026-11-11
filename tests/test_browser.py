@@ -323,10 +323,10 @@ class TestViewing:
     def test_side_panel_folds_and_help_opens(self, page):
         """The side panel gives its width to the plot; "?" opens the keys."""
         wide = page.js("plotRect().w")
-        page.js("document.getElementById('btnSide').click()")
+        page.js("document.getElementById('sideHandle').click()")
         assert page.js("document.getElementById('side').hidden") is True
-        assert page.js("plotRect().w") == pytest.approx(wide + 300, abs=20)
-        page.js("document.getElementById('btnSide').click()")
+        assert page.js("plotRect().w") == pytest.approx(wide + 340, abs=20)
+        page.js("document.getElementById('sideHandle').click()")
         assert page.js("plotRect().w") == pytest.approx(wide)
         assert page.js("document.getElementById('help').open") is False
         page.js("document.getElementById('btnHelp').click()")
