@@ -1,100 +1,10 @@
-<?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<svg
-   viewBox="318 -25 900 900"
-   role="img"
-   aria-labelledby="title"
-   version="1.1"
-   id="svg19"
-   xmlns:xlink="http://www.w3.org/1999/xlink"
-   xmlns="http://www.w3.org/2000/svg"
-   xmlns:svg="http://www.w3.org/2000/svg">
-  <title
-     id="title">DAS Tor laser gate</title>
-  <defs
-     id="defs4">
-    <linearGradient
-       id="steel"
-       x2="0%"
-       y2="100%">
-      <stop
-         stop-color="#f7f7f8"
-         id="stop1" />
-      <stop
-         offset="1"
-         stop-color="#c6c7cb"
-         id="stop2" />
-    </linearGradient>
-    <path
-       id="blue-rays"
-       d="M521 347 768 482 515 414 M515 482H768L515 550 M520 623 768 482" />
-    <path
-       id="red-rays"
-       d="M1014 347 768 482 1017 414 M1017 482H768L1017 550 M1014 623 768 482" />
-  </defs>
-  <g
-     fill="url(#steel)"
-     stroke="#232426"
-     stroke-width="10"
-     stroke-linejoin="round"
-     id="g7">
-    <path
-       d="M418 292 568 165H824L774 196Q708 236 725 240H778L890 198H980L1100 299V476L1040 427V330L953 260H571L492 329V412L418 475Z"
-       id="path4" />
-    <path
-       d="M418 516 492 452V643L450 686H329L397 617H418Z"
-       id="path5" />
-    <path
-       d="M1040 452 1113 515V618H1139L1206 686H1082L1040 643Z"
-       id="path6" />
-    <path
-       fill="#b5b7bb"
-       d="M453 686 492 643V331L572 270H954L1040 332V643L1081 686H1030L1017 673V344L950 292H584L515 345V674L504 686Z"
-       id="path7" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">DAS Tor</title>
+  <rect width="64" height="64" rx="13" fill="#232426"/>
+  <g fill="none" stroke-width="6" stroke-linecap="round">
+    <path d="M10 14 32 32M9 32H32M10 50 32 32" stroke="#3978d6"/>
+    <path d="M54 14 32 32M55 32H32M54 50 32 32" stroke="#d0002a"/>
   </g>
-  <path
-     d="M498 266 543 232H576L534 266Z"
-     fill="#ffc934"
-     stroke="#232426"
-     stroke-width="5"
-     id="path8" />
-  <g
-     fill="none"
-     stroke-width="10"
-     id="g13">
-    <use
-       xlink:href="#blue-rays"
-       stroke-width="13"
-       stroke="#3978d6"
-       id="use9" />
-    <use
-       xlink:href="#blue-rays"
-       stroke="#002868"
-       id="use10" />
-    <use
-       xlink:href="#red-rays"
-       stroke="#d0002a"
-       id="use11" />
-    <use
-       xlink:href="#blue-rays"
-       stroke-width="2.7"
-       stroke="#eff6ff"
-       id="use12" />
-    <use
-       xlink:href="#red-rays"
-       stroke-width="2.7"
-       stroke="#fff1f0"
-       id="use13" />
-  </g>
-  <path
-     d="m768 462 19 20-19 20-19-20Z"
-     fill="#fff"
-     stroke="#232426"
-     stroke-width="4"
-     id="path13" />
-  <path
-     d="m 1017.9332,259.5 -45.00001,-34 h -33 l 42,34 z"
-     fill="#ffc934"
-     stroke="#232426"
-     stroke-width="5"
-     id="path8-6" />
+  <path d="M32 21 43 32 32 43 21 32Z" fill="#fff" stroke="#232426" stroke-width="3"/>
+  <path d="M24 7H40" stroke="#ffc934" stroke-width="5" stroke-linecap="round"/>
 </svg>

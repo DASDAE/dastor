@@ -13,7 +13,8 @@
   <span class="brand"><img src="favicon.svg" alt="">DAS Tor</span>
   <select id="selGroup" title="Recording" aria-label="Recording"></select>
   <span class="tools" id="tools">
-    <button class="tool" data-mode="select" title="Select: click an annotation, or drag a window round several; drag one, or a vertex, to move it (Esc)" aria-label="select" aria-pressed="false"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 2.5v13l3.4-3.2 2.3 5 2-.9-2.3-5H15z" fill="currentColor" stroke-width="1"/></svg></button>
+    <button class="tool" data-mode="pan" title="Pan: drag the view; click an annotation to select it; double-click for the select tool (h)" aria-label="pan" aria-pressed="false"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v16M2 10h16M10 2 7.5 4.5M10 2l2.500 2.500M10 18l-2.500-2.500M10 18l2.500-2.500M2 10l2.500-2.500M2 10l2.500 2.500M18 10l-2.500-2.500M18 10l-2.500 2.500"/></svg></button>
+    <button class="tool" data-mode="select" title="Select: click an annotation, or drag a window round several; drag one, or a vertex, to move it (v, or double-click the data)" aria-label="select" aria-pressed="false"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 2.5v13l3.4-3.2 2.3 5 2-.9-2.3-5H15z" fill="currentColor" stroke-width="1"/></svg></button>
     <button class="tool" data-mode="point" title="Point: click to place points (1)" aria-label="point" aria-pressed="false"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="3.5" fill="currentColor"/></svg></button>
     <button class="tool" data-mode="path" title="Path: click to add points; Enter, double-click or right-click ends it (2)" aria-label="path" aria-pressed="false"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 15.5 8 6.5l4.5 6 4-8"/><circle cx="3.5" cy="15.5" r="1.6" fill="currentColor"/><circle cx="8" cy="6.5" r="1.6" fill="currentColor"/><circle cx="12.5" cy="12.5" r="1.6" fill="currentColor"/><circle cx="16.5" cy="4.5" r="1.6" fill="currentColor"/></svg></button>
     <button class="tool" data-mode="polygon" title="Polygon: click to add corners; Enter, double-click or right-click closes it (3)" aria-label="polygon" aria-pressed="false"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3 17 8.5 14.5 16.5h-9L3 8.5z"/><circle cx="10" cy="3" r="1.5" fill="currentColor"/><circle cx="17" cy="8.5" r="1.5" fill="currentColor"/><circle cx="14.5" cy="16.5" r="1.5" fill="currentColor"/><circle cx="5.5" cy="16.5" r="1.5" fill="currentColor"/><circle cx="3" cy="8.5" r="1.5" fill="currentColor"/></svg></button>
@@ -38,7 +39,8 @@
       <div class="row">
         <button class="small" id="btnNewSet" title="a new, empty set">new</button>
         <button class="small" id="btnLoadSet" title="a set from a file: a zip of a DASCore annotation set, or a .parquet or .csv table">load</button>
-        <button class="small" id="btnSaveSet" title="the set being edited, to a file: a zip of a DASCore annotation set">save</button>
+        <button class="small" id="btnSaveSet" title="write the set being edited to the server's annotation directory now (edits are also saved as you go)">save</button>
+        <button class="small" id="btnDownloadSet" title="the set being edited, as a file: a zip of a DASCore annotation set">download</button>
         <button class="small" id="btnDeleteSet" title="delete the set being edited">delete set</button>
         <input type="file" id="fileSet" accept=".zip,.parquet,.csv" hidden>
       </div>
@@ -75,7 +77,7 @@
     <tr class="group"><th colspan="2">Move</th></tr>
     <tr><td><b>Wheel</b></td><td>zoom; with Shift time only, with Ctrl distance only</td></tr>
     <tr><td><b>+ &minus;</b></td><td>zoom in, out</td></tr>
-    <tr><td><b>Middle drag</b></td><td>pan (or hold Space and drag)</td></tr>
+    <tr><td><b>Drag</b></td><td>pan, with the pan tool (<b>h</b>); in any tool the middle button, or Space and drag</td></tr>
     <tr><td><b>Arrows</b></td><td>pan a tenth of the view; half with Shift</td></tr>
     <tr><td><b>Tab</b></td><td>the next screen in time; Shift + Tab goes back</td></tr>
     <tr><td><b>w</b></td><td>fit the whole recording</td></tr>
@@ -83,13 +85,14 @@
     <tr><td><b>Strip under the axis</b></td><td>the whole recording: click or drag to move the window</td></tr>
     <tr class="group"><th colspan="2">Select and edit</th></tr>
     <tr><td><b>Click</b></td><td>select an annotation; Shift + click adds or removes one</td></tr>
-    <tr><td><b>Drag</b></td><td>on empty space, select everything in a window; on an annotation or a vertex, move it</td></tr>
-    <tr><td><b>Double-click</b></td><td>add a vertex on a side of the selected path or polygon</td></tr>
+    <tr><td><b>Double-click</b></td><td>from the pan tool, the select tool (also <b>v</b>)</td></tr>
+    <tr><td><b>Drag</b></td><td>with the select tool: on empty space, select everything in a window; on an annotation or a vertex, move it</td></tr>
+    <tr><td><b>Double-click</b></td><td>with the select tool: add a vertex on a side of the selected path or polygon</td></tr>
     <tr><td><b>Enter</b></td><td>label the selected annotation</td></tr>
     <tr><td><b>c</b></td><td>copy what is selected into the set being edited</td></tr>
     <tr><td><b>Delete</b></td><td>remove the vertex under the cursor, else everything selected</td></tr>
     <tr><td><b>Ctrl + Z, Ctrl + Y</b></td><td>undo, redo</td></tr>
-    <tr><td><b>Esc</b></td><td>clear the selection; back to the select tool</td></tr>
+    <tr><td><b>Esc</b></td><td>clear the selection; then back a tool: drawing, select, pan</td></tr>
     <tr class="group"><th colspan="2">Draw</th></tr>
     <tr><td><b>1 2 3 4</b></td><td>point, path, polygon, box</td></tr>
     <tr><td><b>Enter</b></td><td>end a path or polygon (also double-click or right-click); Esc cancels it</td></tr>
@@ -97,6 +100,7 @@
     <tr><td><b>d</b></td><td>drag an area to download</td></tr>
     <tr class="group"><th colspan="2">View</th></tr>
     <tr><td><b>a</b></td><td>colour limits from what is on screen (also a click on the colour bar)</td></tr>
+    <tr><td><b>Colour bar</b></td><td>drag its top or bottom to move that limit, its middle to move both</td></tr>
     <tr><td><b>p</b></td><td>show or hide the side panel</td></tr>
     <tr><td><b>?</b></td><td>this help</td></tr>
   </table>

@@ -300,6 +300,18 @@ class TestViewerPage:
         reply = viewer.get("/v1/summary", params={"product": "nonsense"})
         assert reply.status_code == 400
 
+    def test_several_products(self, viewer):
+        """`product` given more than once keeps each of them and nothing else."""
+        products = _products(viewer)
+        ids = [p["id"] for p in products.values()]
+        one = viewer.get("/v1/summary", params={"product": ids[0]}).json()
+        two = viewer.get("/v1/summary", params={"product": ids[:2]}).json()
+        other = viewer.get("/v1/summary", params={"product": ids[1]}).json()
+        assert two["patches"] == one["patches"] + other["patches"]
+        assert two["bytes"] == one["bytes"] + other["bytes"]
+        rows = viewer.get("/v1/contents", params={"product": ids[:2]}).json()
+        assert {r["tag"] for r in rows} == set(list(products)[:2])
+
     def test_missing_data_file_is_not_a_missing_set(self, viewer_settings, tmp_path):
         """A file removed since indexing doesn't answer 404 with its path."""
         import shutil  # noqa: PLC0415

@@ -61,7 +61,8 @@ function toast(msg, ms = Math.max(2500, 60 * String(msg).length)) {  // long eno
   const el = $("toast"); el.textContent = msg; el.style.display = "block";
   clearTimeout(toast.timer); toast.timer = setTimeout(() => (el.style.display = "none"), ms);
 }
-function query(o) { return Object.entries(o).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&"); }
+// a list as a value repeats its key
+function query(o) { return Object.entries(o).flatMap(([k, v]) => [].concat(v).map((x) => `${encodeURIComponent(k)}=${encodeURIComponent(x)}`)).join("&"); }
 async function api(path, opt) {
   const r = await fetch(API + path, opt);
   if (r.status === 204) return null;
@@ -211,7 +212,7 @@ async function setGroup(key) {
   S.x = all[0].x; S.y = all[0].y;
   S.xTime = all[0].coords[S.x].timelike;
   S.xUnits = all[0].coords[S.x].units; S.yUnits = all[0].coords[S.y].units;
-  S.pin = null; S.sel = null; S.many = []; S.area = null; S.draft = null;
+  S.pin = null; S.sel = null; S.many = []; S.area = null; S.areaProducts = null; S.draft = null;
   buildLadder();
   wholeView();
   await loadSets();
@@ -778,7 +779,7 @@ function renderSets() {
   $("annNote").textContent = S.annError ? `Could not list the sets: ${S.annError}` : S.me ? "" : "Read only here: visitors have no name to save under.";
   const can = !!S.me;
   $("btnNewSet").disabled = !can; $("btnLoadSet").disabled = !can;
-  $("btnDeleteSet").disabled = !activeSet(); $("btnSaveSet").disabled = !activeSet();
+  $("btnDeleteSet").disabled = !activeSet(); $("btnSaveSet").disabled = !activeSet(); $("btnDownloadSet").disabled = !activeSet();
   for (const b of $("tools").children) {  // with nowhere to save, the drawing tools are off, and say why
     if (b.dataset.mode === "select") continue;
     b.disabled = !can; if (!can) b.title = `${b.getAttribute("aria-label")}: annotations can't be saved here`;
@@ -815,6 +816,11 @@ function restore(from, to) {
 async function save() {
   clearTimeout(touch.timer);
   await Promise.all(S.sets.filter((s) => s.dirty && s.feats).map(saveSet));
+}
+async function saveNow() {
+  const s = activeSet(); if (!s) return;
+  await save();
+  toast(S.saveError ? `not saved: ${S.saveError}` : `saved ${setKey(s)}`);
 }
 // The times and name the server stamped, written onto the annotations in place: the objects
 // on screen (one may be mid-drag, or have a field being typed in) are never swapped.
@@ -1240,8 +1246,8 @@ function renderSelected() {
     (!mine && S.me ? '<button class="small" id="btnCopy" title="copy into the set being edited (c)">copy to my set</button>' : "") +
     "</div>";
 }
-function areaQuery(level) {
-  const a = S.area, q = { product: level.p.id };
+function areaQuery(ids) {
+  const a = S.area, q = { product: ids };
   if (a.x0 !== null) q[`${S.x}_min`] = xWire(a.x0);
   if (a.x1 !== null) q[`${S.x}_max`] = xWire(a.x1);
   if (a.y0 !== null) q[`${S.y}_min`] = a.y0;
@@ -1282,20 +1288,24 @@ async function renderArea() {
     '<button class="small" id="btnAreaWindow" title="what is on screen now">window</button>' +
     `<button class="small ${S.mode === "area" ? "on" : ""}" id="btnAreaDraw" title="drag a box over the data (d)">a drawn box</button></div>`;
   if (!a || !S.levels.length) { el.innerHTML = pick; return; }
-  const was = $("selAreaLevel"), id = was ? was.value : S.levels[S.levels.length - 1].p.id;
-  const level = S.levels.find((l) => l.p.id === id) || S.levels[S.levels.length - 1];
+  // every product of the recording can be downloaded, in the ladder or not; the finest by default
+  const all = groupProducts().slice().sort((p, q) => p.coords[S.x].step - q.coords[S.x].step || p.coords[S.y].step - q.coords[S.y].step);
+  if (!S.areaProducts) S.areaProducts = new Set([S.levels[S.levels.length - 1].p.id]);
+  const ids = all.map((p) => p.id).filter((id) => S.areaProducts.has(id));
   const syncTip = S.sync ? "copy this area into the local data directory" : "start the viewer with a local data directory to sync into it";
-  el.innerHTML = pick + `<div class="hint">${areaText(a)}</div>` +
-    `<div class="row"><select id="selAreaLevel" title="the product to download" aria-label="product">${S.levels.map((l) => `<option value="${l.p.id}" ${l === level ? "selected" : ""}>${esc(levelName(l.p))} (${fmtStep(l.sx, S.xTime)})</option>`).join("")}</select>` +
+  el.innerHTML = pick + `<div class="row"><span class="hint">${areaText(a)}</span>` +
     '<button class="small" id="btnAreaClear" title="forget this area">clear</button></div>' +
-    `<div class="row"><span id="areaSize">…</span><button id="btnSync" ${S.sync ? "" : "disabled"} title="${syncTip}">Sync</button></div>`;
+    `<div id="areaProducts" title="the products to download">${all.map((p) => `<label><input type="checkbox" value="${p.id}" ${S.areaProducts.has(p.id) ? "checked" : ""}> ${esc(levelName(p))} <span class="hint">${fmtStep(p.coords[S.x].step, S.xTime)}</span></label>`).join("")}</div>` +
+    `<div class="row"><span id="areaSize">${ids.length ? "…" : "choose a product"}</span><button id="btnSync" ${S.sync && ids.length ? "" : "disabled"} title="${syncTip}">Sync</button></div>`;
   redraw();
-  const q = areaQuery(level);
+  if (!ids.length) return;
+  const q = areaQuery(ids);
   try {
     const sum = await api("/summary?" + query(q));
     if (stamp !== renderArea.stamp) return;
     const start = a.x0 === null ? "" : `_${S.xTime ? isoOf(a.x0).slice(0, 19) : fmtNum(a.x0)}`;
-    const file = `${S.group || "data"}_${levelName(level.p)}${start}`.replace(/[^A-Za-z0-9_.-]+/g, "_");
+    const what = ids.length === 1 ? levelName(all.find((p) => p.id === ids[0])) : `${ids.length}_products`;
+    const file = `${S.group || "data"}_${what}${start}`.replace(/[^A-Za-z0-9_.-]+/g, "_");
     const big = sum.bytes > BIG_DOWNLOAD;
     $("areaSize").innerHTML = sum.patches
       ? `<a id="lnkArea" class="btn ${big ? "big" : ""}" href="${API}/data?${query({ ...q, format: "dasdae" })}" download="${esc(file)}.h5" title="${big ? "a large download" : "as a DASDAE file"}">Download ${fmtBytes(sum.bytes)}</a>`
@@ -1306,9 +1316,9 @@ async function renderArea() {
 // ------------------------------------------------------------------ mouse and keyboard
 function evPos(ev) { const r = cv.getBoundingClientRect(); return { x: ev.clientX - r.left, y: ev.clientY - r.top }; }
 function inPlot(p) { const P = plotRect(); return p.x >= P.x && p.x <= P.x + P.w && p.y >= P.y && p.y <= P.y + P.h; }
-function toolCursor() { return S.mode === "select" ? "default" : "crosshair"; }
+function toolCursor() { return S.mode === "pan" ? "grab" : S.mode === "select" ? "default" : "crosshair"; }
 async function setMode(mode) {
-  if (mode !== "select" && mode !== "area" && !(await ensureSet())) mode = "select";  // drawing needs a set; one is made
+  if (!["pan", "select", "area"].includes(mode) && !(await ensureSet())) mode = "select";  // drawing needs a set; one is made
   closeLabel(true);
   S.mode = mode; S.draft = null;
   cv.style.cursor = toolCursor();
@@ -1317,7 +1327,8 @@ async function setMode(mode) {
   redraw();
 }
 // The mouse. The middle button (or Space with the left) drags the view, in every tool. The
-// left button belongs to the tool: select picks an annotation and drags it or one of its
+// left button belongs to the tool: pan (the tool to begin with) drags the view too, and a
+// double-click turns it into select; select picks an annotation and drags it or one of its
 // vertices; the drawing tools place points and drag boxes.
 function shiftFeature(f, dx, dy) {
   if (f.pts) for (const p of f.pts) { p[0] += dx; p[1] += dy; }
@@ -1333,12 +1344,18 @@ cv.addEventListener("mousedown", (ev) => {
   if (!S.levels.length) return;
   const p = evPos(ev), P = plotRect();
   cv.focus();
-  if (ev.button === 0 && within(p, barRect(P), 4)) { S.manual = false; autoContrast(); return; }  // the colour bar: limits from the screen
+  if (ev.button === 0 && within(p, barRect(P), 4)) {  // the colour bar: dragged to move its limits, clicked to take them from the screen
+    const b = barRect(P), f = clamp((b.y + b.h - p.y) / b.h, 0, 1);
+    S.drag = { kind: "bar", p, moved: false, part: f > 0.75 ? "max" : f < 0.25 ? "min" : "both", f, vmin: S.disp.vmin, vmax: S.disp.vmax };
+    return;
+  }
   if (ev.button === 0 && within(p, stripRect(P), 5)) { pushView(); S.drag = { kind: "strip" }; stripTo(p.x); return; }
   if (!inPlot(p)) return;
-  if (ev.button === 1 || (ev.button === 0 && S.space)) {
+  if (ev.button === 1 || (ev.button === 0 && (S.space || S.mode === "pan"))) {
     ev.preventDefault();  // no autoscroll
-    S.drag = { kind: "pan", p, x0: S.view.x0, y0: S.view.y0 }; cv.style.cursor = "grabbing";
+    // with the pan tool a press which does not move is a click: it selects
+    S.drag = { kind: "pan", p, x0: S.view.x0, y0: S.view.y0, moved: false, click: ev.button === 0 && !S.space, shift: ev.shiftKey };
+    cv.style.cursor = "grabbing";
     return;
   }
   if (ev.button !== 0) return;
@@ -1362,7 +1379,9 @@ cv.addEventListener("contextmenu", (ev) => { if (S.draft) { ev.preventDefault();
 const MOVE_SLOP = 8;  // a press which wobbles less than this selects; it does not nudge the annotation
 // What a press would take hold of, shown by the cursor before it is made.
 function hoverCursor(p) {
-  if (S.mode !== "select" || S.space) return S.space ? "grab" : toolCursor();
+  if (S.space) return "grab";
+  if (S.mode === "pan") return hitCluster(p.x, p.y) ? "zoom-in" : hitFeature(p.x, p.y) ? "pointer" : "grab";
+  if (S.mode !== "select") return toolCursor();
   if (hitVertex(p.x, p.y) >= 0) return "grab";
   if (hitCluster(p.x, p.y)) return "zoom-in";
   const hit = hitFeature(p.x, p.y);
@@ -1371,7 +1390,12 @@ function hoverCursor(p) {
 window.addEventListener("mousemove", (ev) => {
   const p = evPos(ev), P = plotRect(); S.mouse = inPlot(p) ? p : null;
   const d = S.drag, off = d && d.p ? Math.hypot(p.x - d.p.x, p.y - d.p.y) : 0;
-  if (d && d.kind === "pan") {
+  if (d && d.kind === "bar") {
+    if (off > 3) d.moved = true;
+    if (d.moved) dragBar(d, p);
+  } else if (d && d.kind === "pan") {
+    if (off > 4) d.moved = true;
+    if (d.click && !d.moved) return;
     moved(); S.view.x0 = d.x0 - (p.x - d.p.x) * S.view.spp; S.view.y0 = d.y0 + (p.y - d.p.y) * S.view.ypp;
   } else if (d && d.kind === "strip") {
     stripTo(p.x);
@@ -1399,8 +1423,8 @@ window.addEventListener("mousemove", (ev) => {
   } else if (!d) $("stPos").textContent = "";
   if (!d && S.levels.length) {
     const onBar = within(p, barRect(P), 4), onStrip = within(p, stripRect(P), 5);
-    cv.style.cursor = onBar || onStrip ? "pointer" : S.mouse ? hoverCursor(p) : "default";
-    cv.title = onBar ? "click: set the colour limits from what is on screen (a)" : onStrip ? "the whole recording: click or drag to move the window" : "";
+    cv.style.cursor = onBar ? "ns-resize" : onStrip ? "pointer" : S.mouse ? hoverCursor(p) : "default";
+    cv.title = onBar ? "drag an end to move that colour limit, the middle to move both; click to take them from what is on screen (a)" : onStrip ? "the whole recording: click or drag to move the window" : "";
   }
   const crowd = S.mouse && !d ? hitCluster(p.x, p.y) : null, tip = $("tip");
   tip.style.display = crowd ? "block" : "none";
@@ -1411,13 +1435,14 @@ window.addEventListener("mouseup", (ev) => {
   const d = S.drag; if (!d) return;
   S.drag = null;
   const p = evPos(ev);
-  if (d.kind === "pan") cv.style.cursor = toolCursor();
+  if (d.kind === "bar") { if (!d.moved) { S.manual = false; autoContrast(); } }
+  else if (d.kind === "pan") { cv.style.cursor = toolCursor(); if (d.click && !d.moved) click(p, d.shift); }
   else if (d.kind === "vertex" || d.kind === "move") {
     if (d.moved) { S.undo.push(d.before); S.redo = []; touch(); }
   } else if (d.kind === "rect") {
     const b = d.box;
     if (b && x2px(b.x1) - x2px(b.x0) > 3 && y2px(b.y0) - y2px(b.y1) > 3) {
-      if (S.mode === "area") { S.area = b; setMode("select"); }  // one area, then back to selecting
+      if (S.mode === "area") { S.area = b; setMode("pan"); }  // one area, then back to the tool to begin with
       else addFeature({ id: newId(), kind: "box", cols: {}, box: b }, true);
     }
   } else if (d.kind === "band" && d.moved) {
@@ -1426,6 +1451,20 @@ window.addEventListener("mouseup", (ev) => {
   } else if ((d.kind === "click" || d.kind === "band") && !d.moved) click(p, d.shift);
   redraw();
 });
+// The colour bar dragged: the value which was under the cursor stays under it. An end moves
+// its own limit, the middle moves both.
+function dragBar(d, p) {
+  const b = barRect(plotRect()), span = d.vmax - d.vmin, v = d.vmin + d.f * span;
+  const f = (b.y + b.h - p.y) / b.h;
+  let { vmin, vmax } = d;
+  if (d.part === "max") vmax = vmin + (v - vmin) / clamp(f, 0.05, 1);
+  else if (d.part === "min") vmin = vmax - (vmax - v) / (1 - clamp(f, 0, 0.95));
+  else { vmin -= (f - d.f) * span; vmax -= (f - d.f) * span; }
+  if (!(vmax > vmin)) return;
+  S.disp.vmin = +vmin.toPrecision(6); S.disp.vmax = +vmax.toPrecision(6);
+  $("inpVmin").value = S.disp.vmin; $("inpVmax").value = S.disp.vmax;
+  S.autoPending = false; S.manual = true; S.lutVer++;
+}
 // The annotations of the visible sets a window catches: any vertex inside it, or a box overlapping it.
 function inWindow(b) {
   const P = plotRect(), r = boxPx(b, P), x0 = r[0], x1 = r[0] + r[2], y0 = r[1], y1 = r[1] + r[3], out = [];
@@ -1478,6 +1517,7 @@ cv.addEventListener("dblclick", (ev) => {
     finishDraft();
     return;
   }
+  if (S.mode === "pan" && inPlot(evPos(ev))) { setMode("select"); toast("select tool: drag a window, move annotations (Esc returns to pan)"); return; }
   if (S.mode !== "select") return;
   const p = evPos(ev), at = hitVertex(p.x, p.y) >= 0 ? -1 : hitSide(p.x, p.y), cur = selected();
   if (at >= 0) change(() => cur.f.pts.splice(at, 0, [px2x(p.x), px2y(p.y), {}]));  // a new vertex on that side
@@ -1512,7 +1552,9 @@ window.addEventListener("keydown", (ev) => {
   else if (k === "Escape") {
     if (S.draft) S.draft = null;
     else if (S.conflict) S.conflict = null;
-    else { if (S.mode === "select") setPicked([]); setMode("select"); }
+    else if (S.mode === "pan") setPicked([]);
+    else if (S.mode === "select") { if (picked().length) setPicked([]); else setMode("pan"); }  // first the selection, then the tool
+    else setMode("select");
     redraw();
   }
   else if (k === "Enter") { if (S.draft) finishDraft(); else if (mine) openLabel(cur.f); else return; }
@@ -1524,6 +1566,8 @@ window.addEventListener("keydown", (ev) => {
   }
   else if (k >= "1" && k <= "4") setMode(["point", "path", "polygon", "box"][+k - 1]);
   else if (k === "d") setMode("area");
+  else if (k === "v") setMode("select");
+  else if (k === "h") setMode("pan");
   else if (k === "c") copySelected();
   else if (k === "b") backView();
   else if (k === "?") $("help").showModal();
@@ -1604,7 +1648,8 @@ function initControls() {
     if (ev.key === "Enter" && ev.target.value.trim()) newSet(ev.target.value.trim());
     else if (ev.key === "Escape") { $("newSetRow").hidden = true; cv.focus(); }
   };
-  $("btnSaveSet").onclick = saveSetFile;
+  $("btnSaveSet").onclick = saveNow;
+  $("btnDownloadSet").onclick = saveSetFile;
   $("btnLoadSet").onclick = () => $("fileSet").click();
   $("fileSet").onchange = async (ev) => { const file = ev.target.files[0]; ev.target.value = ""; if (file) await loadSetFile(file); };
   // the label box at a new annotation
@@ -1641,7 +1686,11 @@ function initControls() {
     if (ev.target.id === "btnDelete") deleteSelected();
     else if (ev.target.id === "btnCopy") copySelected();
   });
-  $("area").addEventListener("change", (ev) => { if (ev.target.id === "selAreaLevel") renderArea(); });
+  $("area").addEventListener("change", (ev) => {
+    if (!ev.target.closest("#areaProducts")) return;
+    S.areaProducts[ev.target.checked ? "add" : "delete"](ev.target.value);
+    renderArea();
+  });
   $("area").addEventListener("click", (ev) => {
     const all = picked();
     if (ev.target.id === "btnAreaOf" && all.length) {  // one box round everything selected
@@ -1650,7 +1699,7 @@ function initControls() {
       renderArea(); redraw();
     }
     else if (ev.target.id === "btnAreaWindow") { S.area = windowBounds(); renderArea(); redraw(); }
-    else if (ev.target.id === "btnAreaDraw") setMode(S.mode === "area" ? "select" : "area");
+    else if (ev.target.id === "btnAreaDraw") setMode(S.mode === "area" ? "pan" : "area");
     else if (ev.target.id === "btnAreaClear") { S.area = null; renderArea(); redraw(); }
   });
   // a press on a button or tick box hands the keys back to the plot (a text field keeps them)
@@ -1692,7 +1741,7 @@ async function init() {
   if (hash.g === key && v.length === 4 && v.every(Number.isFinite) && v[1] > 0 && v[3] > 0) {
     Object.assign(S.view, { x0: v[0], spp: v[1], y0: v[2], ypp: v[3] }); clampView();
   }
-  setMode("select");
+  setMode("pan");
   // for tests: nothing is loading, waiting to load, or unsaved
   window.dastorIdle = () => !settling && inflight === 0 && queue.length === 0 && !rafPending && S.sets.every((s) => !s.dirty && !s.saving);
   window.dastorReady = true;

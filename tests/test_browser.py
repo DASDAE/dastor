@@ -155,6 +155,12 @@ class Browser:
         self._mouse("mousePressed", x, y, button="left", clickCount=1, buttons=1)
         self._mouse("mouseReleased", x, y, button="left", clickCount=1)
 
+    def double_click(self, x: float, y: float) -> None:
+        """Click the left button twice at a point of the page."""
+        self.click(x, y)
+        self._mouse("mousePressed", x, y, button="left", clickCount=2, buttons=1)
+        self._mouse("mouseReleased", x, y, button="left", clickCount=2)
+
     def drag(self, start: tuple, end: tuple, button: str = "left") -> None:
         """Drag with a button (left or middle) from one point to another."""
         (x0, y0), (x1, y1) = start, end
@@ -334,17 +340,29 @@ class TestViewing:
         assert page.js("document.getElementById('help').open") is False
         page.js("document.getElementById('btnHelp').click()")
         assert page.js("document.getElementById('help').open") is True
-        assert "Middle drag" in page.js("document.getElementById('help').textContent")
+        assert "Space and drag" in page.js(
+            "document.getElementById('help').textContent"
+        )
         page.js("document.getElementById('btnHelpClose').click()")
         assert page.js("document.getElementById('help').open") is False
 
     def test_middle_button_drags_the_view(self, page):
-        """The middle button pans in any tool; the left button never does."""
+        """The left button pans with the pan tool only; the middle one always."""
         start = _pixel(page, "2024-05-01T00:00:20", 60)
         end = (start[0] - 120, start[1] + 50)
         before = page.js("[S.view.x0, S.view.y0, S.view.spp, S.view.ypp]")
-        page.drag(start, end)  # the select tool, on nothing
+        assert page.js("S.mode") == "pan"  # the tool to begin with
+        page.drag(start, end)
+        after = page.js("[S.view.x0, S.view.y0]")
+        assert after[0] == pytest.approx(before[0] + 120 * before[2])
+        assert after[1] == pytest.approx(before[1] + 50 * before[3])
+        page.drag(end, start)
+        page.double_click(*start)  # which makes it the select tool
+        assert page.js("S.mode") == "select"
+        page.drag(start, end)  # a window, on nothing: the view stays
         assert page.js("[S.view.x0, S.view.y0]") == pytest.approx(before[:2])
+        page.key("Escape", 27)
+        assert page.js("S.mode") == "pan"
         for tool in ("select", "path"):
             page.js(f"setMode('{tool}')" if tool == "select" else "S.mode = 'path'")
             page.drag(start, end, button="middle")
@@ -434,6 +452,18 @@ class TestViewing:
         page.click(left, top)
         assert page.js("S.manual") is False
         assert page.js("S.disp.vmax") < 50
+        # dragged, the bar moves its limits: the top end the high one, the middle both
+        low, high = page.js("[S.disp.vmin, S.disp.vmax]")
+        height = page.js("barRect(plotRect()).h")
+        page.drag((left, top - 0.45 * height), (left, top - 0.2 * height))
+        assert page.js("S.manual") is True
+        raised = page.js("S.disp.vmax")
+        assert raised > high and page.js("S.disp.vmin") == low
+        assert page.js("+document.getElementById('inpVmax').value") == raised
+        page.drag((left, top), (left, top - 0.1 * height))
+        shifted = page.js("[S.disp.vmin, S.disp.vmax]")
+        assert shifted[0] < low and shifted[1] < raised
+        assert shifted[1] - shifted[0] == pytest.approx(raised - low, rel=1e-3)
 
 
 class TestAnnotating:
@@ -615,6 +645,7 @@ class TestAnnotating:
 
     def test_copy_several_at_once(self, page, viewer_settings):
         """A window over another user's crowd copies them all with one key."""
+        page.js("setMode('select')")
         page.drag(
             _pixel(page, "2024-05-01T00:03:25", 115),
             _pixel(page, "2024-05-01T00:03:36", 90),
@@ -758,6 +789,17 @@ class TestCrowding:
         assert area["x1"] > area["x0"] and area["y1"] > area["y0"]
         assert page.js("document.getElementById('btnSync').disabled") is True
         assert page.js("document.getElementById('btnAreaOf').disabled") is True
+        # the finest product is ticked; ticking another downloads both in one file
+        boxes = "[...document.querySelectorAll('#areaProducts input')]"
+        assert page.js(f"{boxes}.map(b => b.checked).filter(Boolean).length") == 1
+        assert page.js(f"{boxes}.length") > 1
+        page.js(f"{boxes}.find(b => !b.checked).click()")
+        link = "(document.getElementById('lnkArea') || {href: ''}).href"
+        page.wait(f"{link}.split('product=').length === 3")
+        for _ in range(2):  # one at a time: each change redraws the boxes
+            page.js("document.querySelector('#areaProducts input:checked').click()")
+        size = "document.getElementById('areaSize').textContent"
+        page.wait(f"{size} === 'choose a product'")
         page.js("document.getElementById('btnAreaClear').click()")
         assert page.js("S.area") is None
         assert page.js("document.getElementById('lnkArea')") is None

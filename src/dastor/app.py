@@ -251,15 +251,21 @@ def create_app(settings: Settings) -> FastAPI:
         """
         Return a principal's view and its patches matching the query.
 
-        `product=<id>` (from `/v1/viewer/products`) keeps one product. Its
-        attributes go into the selection, so the index narrows to it before
-        any rows are read; its dims and steps are matched on what is left.
+        `product=<id>` (from `/v1/viewer/products`) keeps one product, and
+        may be given more than once to keep several. The attributes they
+        share go into the selection, so the index narrows before any rows
+        are read; dims, steps and the other attributes are matched on what
+        is left.
         """
         kwargs = selection(request.query_params.multi_items(), reserved)
-        product = request.query_params.get("product")
-        wanted = decode_product(product) if product else None
-        attrs = wanted["attrs"] if wanted else {}
-        kwargs.update({k: v for k, v in attrs.items() if k not in kwargs})
+        wanted = [decode_product(p) for p in request.query_params.getlist("product")]
+        first = wanted[0]["attrs"] if wanted else {}
+        shared = {
+            k: v
+            for k, v in first.items()
+            if all(w["attrs"].get(k) == v for w in wanted)
+        }
+        kwargs.update({k: v for k, v in shared.items() if k not in kwargs})
         view = catalog.view(who)
         try:
             spool = view.select(**kwargs, **extra)
@@ -267,7 +273,10 @@ def create_app(settings: Settings) -> FastAPI:
             # e.g. a malformed time, or text bounding a numeric coordinate
             raise QueryError(str(exc)) from exc
         if wanted and len(contents := spool.get_contents()):
-            spool = spool[product_rows(contents, wanted)]
+            keep = np.zeros(len(contents), dtype=bool)
+            for product in wanted:
+                keep |= product_rows(contents, product)
+            spool = spool[keep]
         return view, spool
 
     def selected(request: Request, who: Principal) -> dc.BaseSpool:
