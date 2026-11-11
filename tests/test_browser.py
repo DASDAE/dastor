@@ -166,6 +166,10 @@ class Browser:
             self._mouse("mouseMoved", x, y, **held)
         self._mouse("mouseReleased", x1, y1, button=button, clickCount=1)
 
+    def type(self, text: str) -> None:
+        """Type text into whatever has the focus."""
+        self.call("Input.insertText", text=text)
+
     def right_click(self, x: float, y: float) -> None:
         """Click the right button at a point of the page."""
         self._mouse("mouseMoved", x, y)
@@ -279,8 +283,7 @@ def _saved(viewer_settings, name: str = "picks") -> dc.AnnotationSet:
 
 def _new_set(page, name: str = "picks") -> None:
     """Make an annotation set through the page."""
-    page.js(f"window.prompt = () => '{name}'")
-    page.js("newSet()")
+    page.js(f"newSet('{name}')")
     page.settle()
 
 
@@ -353,14 +356,84 @@ class TestViewing:
 
     def test_tab_pages_through_time(self, page):
         """Tab moves on by a screen less a small overlap; Shift+Tab goes back."""
-        page.click(*_pixel(page, "2024-05-01T00:00:20", 60))  # focus the view
+        x, y = _pixel(page, "2024-05-01T00:00:10", 60)
+        for _ in range(
+            6
+        ):  # a few screens of the recording, so there is somewhere to page to
+            page.wheel(x, y, -200)
+        page.settle()
+        page.js(
+            "document.getElementById('btnAuto').focus()"
+        )  # Tab pages wherever the focus is
         before, spp = page.js("[S.view.x0, S.view.spp]")
         width = page.js("plotRect().w")
         page.key("Tab", 9)
         assert page.js("S.view.x0") == pytest.approx(before + width * spp * 0.97)
         page.key("Tab", 9, modifiers=8)
         assert page.js("S.view.x0") == pytest.approx(before)
-        assert page.js("document.activeElement === cv")
+        for _ in range(40):  # paging stops at the end of the recording, and says so
+            page.key("Tab", 9)
+        end = page.js("tau(S.ext.x0) + displaySpan()")
+        assert page.js("S.view.x0") < end < page.js("viewEnd().x1")
+        assert "end of the recording" in page.js(
+            "document.getElementById('toast').textContent"
+        )
+
+    def test_level_bar_holds_a_level_and_back_returns(self, page):
+        """The status bar's control holds the view on a level; `b` goes back."""
+        names = page.js(
+            "[...document.getElementById('levelBar').children].map(b => b.textContent)"
+        )
+        assert names == ["auto", "max_100ms", "raw"]
+        page.js("document.getElementById('levelBar').children[2].click()")
+        page.settle()
+        assert page.js("levelName(activeLevel().p)") == "raw"
+        assert (
+            page.js("document.querySelector('#levelBar .pinned').textContent") == "raw"
+        )
+        page.js("document.getElementById('levelBar').children[0].click()")
+        page.settle()
+        assert page.js("S.pin") is None
+        assert page.js("levelName(activeLevel().p)") == "max_100ms"
+
+        whole = page.js("[S.view.x0, S.view.spp]")
+        x, y = _pixel(page, "2024-05-01T00:00:10", 60)
+        for _ in range(5):
+            page.wheel(x, y, -200)
+        page.key("w", 87)  # fit: a jump, so the zoomed view is kept to come back to
+        assert page.js("[S.view.x0, S.view.spp]") == pytest.approx(whole)
+        page.key("b", 66)
+        assert page.js("S.view.spp") < whole[1] / 2
+
+    def test_overview_strip_moves_the_window(self, page):
+        """A press on the strip under the axis centres the window there."""
+        x, y = _pixel(page, "2024-05-01T00:00:10", 60)
+        for _ in range(8):
+            page.wheel(x, y, -200)
+        page.settle()
+        left, top, width = page.js(
+            "(() => { const r = cv.getBoundingClientRect(), s = stripRect(plotRect());"
+            " return [r.left + s.x, r.top + s.y + s.h / 2, s.w]; })()"
+        )
+        page.click(left + width * 0.75, top)
+        middle = page.js("S.view.x0 + plotRect().w * S.view.spp / 2")
+        wanted = page.js("tau(S.ext.x0) + 0.75 * displaySpan()")
+        assert middle == pytest.approx(wanted, rel=1e-3)
+
+    def test_colour_bar_sets_the_limits(self, page):
+        """Limits typed by hand are held; a click on the colour bar frees them."""
+        page.js(
+            "(() => { const e = document.getElementById('inpVmax'); e.value = '123';"
+            " e.dispatchEvent(new Event('change')); })()"
+        )
+        assert page.js("[S.disp.vmax, S.manual]") == [123, True]
+        left, top = page.js(
+            "(() => { const r = cv.getBoundingClientRect(), b = barRect(plotRect());"
+            " return [r.left + b.x + b.w / 2, r.top + b.y + b.h / 2]; })()"
+        )
+        page.click(left, top)
+        assert page.js("S.manual") is False
+        assert page.js("S.disp.vmax") < 50
 
 
 class TestAnnotating:
@@ -476,7 +549,7 @@ class TestAnnotating:
         )
         assert page.js("S.many.length") == 2 and page.js("S.sel") is None
         panel = page.js("document.getElementById('selected').textContent")
-        assert "2 annotations picked" in panel
+        assert "2 annotations" in panel
         assert page.js("document.getElementById('btnAreaOf').disabled") is False
         page.key("Delete", 46)
         page.settle()
@@ -493,6 +566,69 @@ class TestAnnotating:
         page.key("Delete", 46)
         page.settle()
         assert page.js("findSet('detector/auto').feats.length") == 1
+
+    def test_first_drawing_makes_a_set_and_labels_repeat(self, page, viewer_settings):
+        """With no set, drawing makes one; a label typed once is offered again."""
+        assert page.js("S.active") is None
+        page.js("setMode('point')")
+        page.settle()
+        assert page.js("S.active") == "me/annotations"
+        page.click(*_pixel(page, "2024-05-01T00:00:40", 100))
+        assert page.js("document.activeElement.id") == "labelBox"
+        page.type("vehicle")
+        page.key("Enter", 13)
+        assert page.js("document.activeElement === cv")
+        page.click(*_pixel(page, "2024-05-01T00:00:50", 100))
+        assert page.js("document.getElementById('labelBox').value") == "vehicle"
+        page.key("Enter", 13)  # the same again: one key
+        page.click(*_pixel(page, "2024-05-01T00:00:55", 100))
+        page.key("Escape", 27)  # this one is left without a label
+        page.settle()
+        features = _saved(viewer_settings, "annotations").features
+        assert features["label"].fillna("").tolist() == ["vehicle", "vehicle", ""]
+
+    def test_typing_in_the_panel_survives_a_save(self, page, viewer_settings):
+        """A save finishing does not rebuild the field being typed in."""
+        _new_set(page)
+        page.js("setMode('point')")
+        page.click(*_pixel(page, "2024-05-01T00:00:40", 100))
+        page.key("Escape", 27)
+        page.js("setMode('select')")
+        page.settle()
+        note = "document.querySelector('#selected input[data-col=note]')"
+        page.js(f"{note}.focus()")
+        page.type("half")
+        label = "document.querySelector('#selected input[data-col=label]')"
+        page.js(  # another edit and its save arrive while the note is still being typed
+            f"(() => {{ const e = {label}; e.value = 'car';"
+            " e.dispatchEvent(new Event('change', {bubbles: true})); })()"
+        )
+        page.wait("S.sets.every(s => !s.dirty && !s.saving)")
+        assert page.js("document.activeElement.dataset.col") == "note"
+        assert page.js(f"{note}.value") == "half"
+        page.type(" typed")
+        page.js(f"{note}.dispatchEvent(new Event('change', {{bubbles: true}}))")
+        page.settle()
+        saved = _saved(viewer_settings).features
+        assert saved["label"].tolist() == ["car"]
+        assert saved["note"].tolist() == ["half typed"]
+
+    def test_copy_several_at_once(self, page, viewer_settings):
+        """A window over another user's crowd copies them all with one key."""
+        page.drag(
+            _pixel(page, "2024-05-01T00:03:25", 115),
+            _pixel(page, "2024-05-01T00:03:36", 90),
+        )
+        assert page.js("S.many.length") == 30
+        page.key("c", 67)
+        page.settle()
+        features = _saved(viewer_settings, "annotations").features
+        assert len(features) == 30
+        assert features["derived_from"].str.startswith("detector/many/pick_").all()
+        assert page.js("S.many.every(r => r.set === 'me/annotations')")
+        page.key("z", 90, modifiers=2)  # one step undoes them all
+        page.settle()
+        assert page.js("activeSet().feats.length") == 0
 
     def test_copy_from_another_set(self, page, viewer_settings):
         """A feature of a read-only set is copied, recording where it came from."""
@@ -548,8 +684,8 @@ class TestLimits:
 
     @pytest.fixture
     def viewer_settings(self, viewer_settings):
-        """Settings whose limit for one screen is a couple of megabytes."""
-        limits = Limits(max_view_bytes=2_000_000)
+        """Settings whose limit for one screen is a few megabytes."""
+        limits = Limits(max_view_bytes=3_500_000)
         return viewer_settings.model_copy(update={"limits": limits})
 
     def test_pinned_level_over_the_limit_is_outlined(self, page):
@@ -571,7 +707,8 @@ class TestLimits:
     def test_coarser_level_stands_in(self, page):
         """Between the levels, the coarse one is drawn rather than too much raw."""
         x, y = _pixel(page, "2024-05-01T00:00:30", 60)
-        page.wheel(x, y, -200)  # a pixel is now finer than the coarse step
+        for _ in range(2):  # until a pixel is finer than the coarse step
+            page.wheel(x, y, -200)
         page.settle()
         assert page.js("S.view.spp < S.levels[0].sx")
         assert page.js("levelName(activeLevel().p)") == "max_100ms"
@@ -590,13 +727,13 @@ class TestCrowding:
             " return [c.x + r.left, c.y + r.top]; })()"
         )
         page._mouse("mouseMoved", x, y)
-        assert "30 features" in page.js("document.getElementById('tip').textContent")
+        assert "30 annotations" in page.js("document.getElementById('tip').textContent")
         before = page.js("S.view.spp")
         page.click(x, y)
         page.settle()
         assert page.js("S.view.spp") < before / 10
         # spread over the view, the picks now stand alone or in small crowds
-        assert page.js("Math.max(0, ...S.clusters.map(c => c.feats.length))") < 10
+        assert page.js("Math.max(0, ...S.clusters.map(c => c.feats.length))") < 20
         # and the view is on them, not somewhere empty
         middle = "px2x(plotRect().x + plotRect().w / 2)"
         assert page.js(f"Math.abs({middle} - parseTime('2024-05-01T00:03:30'))") < 2

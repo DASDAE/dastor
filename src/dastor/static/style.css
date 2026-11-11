@@ -1,79 +1,95 @@
 /* Colours from the DAS Tor logo: charcoal, flag blue, gold, red and the gate's steel. */
 :root {
-  --bg: #17181a; --panel: #232426; --raised: #2d2f32; --line: #3d4044;
-  --text: #e4e5e8; --muted: #a5a8ad;
-  --blue: #3978d6; --blue-soft: #8db4ee; --navy: #002868;
-  --gold: #ffc934; --red: #ff5a6e; --red-deep: #d0002a;
+  --bg: #17181a; --panel: #232426; --raised: #33363a; --line: #5d6167;
+  --text: #e8e9ec; --muted: #adb0b6;
+  --blue: #2f6cc7; --blue-soft: #9bbdf0; --navy: #002868;
+  --gold: #ffc934; --red: #ff6b7c; --red-deep: #d0002a;
 }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 15px system-ui, sans-serif; }
+[hidden] { display: none !important; }
 #top { position: fixed; top: 0; left: 0; right: 0; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
   padding: 8px 12px; background: var(--panel); border-bottom: 2px solid var(--blue); z-index: 5; font-size: 16px; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 18px; letter-spacing: 0.04em; margin-right: 8px; }
 .brand img { height: 28px; }
-.tools { display: flex; gap: 10px; padding-left: 12px; margin-left: 2px; border-left: 1px solid var(--line); }
+.tools { display: flex; gap: 10px; padding: 0 12px; margin-left: 2px; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
 button.tool { width: 36px; height: 36px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
 button.tool svg { pointer-events: none; }
 #top select { padding: 5px 8px; }
 .spacer { flex: 1; }
-#main { position: fixed; top: 58px; bottom: 26px; left: 0; right: 0; display: flex; }
+/* The set being edited and whether it is saved. */
+#setChip { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px; }
+.swatch { width: 11px; height: 11px; border-radius: 2px; flex: none; border: 1px solid #000; }
+.dot { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--muted); box-sizing: border-box; }
+.dot.ok { background: var(--muted); }
+.dot.busy { background: none; border-color: var(--gold); }
+.dot.bad { background: var(--red); border-color: var(--red); }
+#main { position: fixed; top: 58px; bottom: 30px; left: 0; right: 0; display: flex; }
 #view { position: relative; flex: 1; min-width: 0; }
 #cv { width: 100%; height: 100%; display: block; cursor: default; }
-#cv:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+#cv:focus-visible { outline: 1px solid var(--blue); outline-offset: -1px; }
 #side { width: 340px; overflow-y: auto; scrollbar-gutter: stable; background: var(--panel); border-left: 1px solid var(--line); padding: 4px 8px; }
-#status { position: fixed; bottom: 0; left: 0; right: 0; height: 26px; line-height: 26px; padding: 0 8px;
-  background: var(--panel); border-top: 1px solid var(--line); display: flex; gap: 24px; font-size: 14px; color: var(--muted);
-  font-variant-numeric: tabular-nums; }
+#status { position: fixed; bottom: 0; left: 0; right: 0; height: 30px; padding: 0 8px; box-sizing: border-box;
+  background: var(--panel); border-top: 1px solid var(--line); display: flex; gap: 16px; align-items: center; font-size: 14px;
+  color: var(--muted); font-variant-numeric: tabular-nums; }
+/* The level drawn: one of these is lit; gold when the view is held on it. */
+#levelBar { display: inline-flex; }
+#levelBar button { font-size: 13px; padding: 1px 9px; border-radius: 0; margin-left: -1px; }
+#levelBar button:first-child { border-radius: 3px 0 0 3px; margin-left: 0; }
+#levelBar button:last-child { border-radius: 0 3px 3px 0; }
+#levelBar button.shown { box-shadow: inset 0 -3px 0 var(--gold); color: #fff; }
+#levelBar button.pinned { background: var(--gold); border-color: var(--gold); color: #1c1c1c; font-weight: 600; }
 details { border-bottom: 1px solid var(--line); padding: 4px 0 8px; }
 summary { cursor: pointer; font-weight: 600; padding: 3px 0; }
 summary::marker { color: var(--gold); }
-.row { margin: 4px 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.row { margin: 5px 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .hint { color: var(--muted); font-size: 14px; line-height: 1.4; }
 button, select, input { background: var(--raised); color: var(--text); border: 1px solid var(--line); border-radius: 3px;
   font: inherit; padding: 2px 6px; }
 button { cursor: pointer; }
 button:hover:not(:disabled) { border-color: var(--blue-soft); }
-button:disabled { opacity: 0.4; cursor: default; }
+button:disabled { opacity: 0.45; cursor: default; }
 button.on { background: var(--blue); border-color: var(--blue-soft); color: #fff; }
-button.small { font-size: 14px; padding: 1px 6px; }
-:is(button, select, input, summary):focus-visible { outline: 2px solid var(--blue-soft); outline-offset: 1px; }
+button.danger { background: var(--red-deep); border-color: var(--red); color: #fff; }
+button.small { font-size: 14px; padding: 1px 7px; }
+:is(button, select, input, summary, a):focus-visible { outline: 2px solid var(--blue-soft); outline-offset: 1px; }
 input[type=checkbox] { accent-color: var(--blue); }
-input[type=number] { width: 88px; }
+input[type=number] { width: 84px; }
 input[type=text] { width: 170px; }
-.save { font-size: 14px; color: var(--muted); }
-.save.bad { color: var(--red); font-weight: 600; }
+#inpNewSet, #inpBulkLabel { width: 100%; box-sizing: border-box; }
 .level, .set { display: flex; gap: 6px; align-items: center; padding: 2px 4px; border-radius: 3px; border-left: 3px solid transparent; }
-.level .name, .set .name { flex: 1; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.level .name, .set .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set .name { cursor: pointer; }
 .level .step { color: var(--muted); font-size: 14px; white-space: nowrap; }
 .level.shown, .set.active { background: var(--raised); border-left-color: var(--blue); }
-.level.pinned { border-left-color: var(--gold); }
-.level.pinned .name { color: var(--gold); font-weight: 600; }
-.set .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; border: 1px solid #000; }
-.set .tag { color: var(--muted); font-size: 14px; }
+.set.active .name { font-weight: 600; }
+.set.locked .name { color: var(--muted); }
+.set .tag { color: var(--muted); font-size: 13px; }
 table.cols { border-collapse: collapse; width: 100%; }
-table.cols td { padding: 1px 2px; vertical-align: middle; }
+table.cols td { padding: 2px 2px; vertical-align: middle; }
 table.cols td:first-child { color: var(--muted); white-space: nowrap; }
 table.cols input { width: 100%; box-sizing: border-box; }
-table.keys { border-collapse: collapse; width: 100%; font-size: 14px; }
-table.keys td { padding: 2px 4px; vertical-align: top; border-top: 1px solid var(--line); }
-table.keys tr:first-child td { border-top: 0; }
-table.keys td:first-child { white-space: nowrap; color: var(--text); }
+table.keys { border-collapse: collapse; width: 100%; font-size: 15px; margin-top: 4px; }
+table.keys td { padding: 3px 6px; vertical-align: top; border-top: 1px solid #3d4044; }
+table.keys td:first-child { white-space: nowrap; }
 table.keys td:last-child { color: var(--muted); }
+table.keys tr.group th { text-align: left; padding: 12px 6px 3px; color: var(--gold); font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; }
 #toast, #tip { position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; display: none; z-index: 4; }
-#toast { left: 50%; top: 12px; transform: translateX(-50%); padding: 5px 10px; border-left: 3px solid var(--gold); }
+#toast { left: 50%; top: 12px; transform: translateX(-50%); padding: 6px 12px; border-left: 3px solid var(--gold); max-width: 70%; }
 #tip { pointer-events: none; padding: 3px 8px; font-size: 14px; white-space: nowrap; }
-#side[hidden] { display: none; }
+/* The label of a new annotation, typed where it was drawn. */
+#labelBox { position: absolute; width: 170px; z-index: 4; border: 2px solid var(--gold); background: var(--panel); padding: 3px 6px; }
 /* The tab on the side panel's edge, halfway down, which folds it away. */
 #sideHandle { position: absolute; right: 0; top: 50%; transform: translateY(-50%); width: 16px; height: 56px; padding: 0;
   border-radius: 6px 0 0 6px; border-right: 0; background: var(--panel); color: var(--muted); font-size: 18px; line-height: 1; z-index: 3; }
 #sideHandle:hover { color: var(--gold); border-color: var(--gold); }
 dialog#help { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-top: 3px solid var(--gold);
-  border-radius: 6px; padding: 12px 16px; width: min(560px, 90vw); max-height: 85vh; overflow-y: auto; }
+  border-radius: 6px; padding: 14px 18px; width: min(640px, 92vw); max-height: 88vh; overflow-y: auto; }
 #btnHelpClose { position: absolute; top: 6px; right: 8px; border: 0; background: none; color: var(--muted);
   font-size: 24px; line-height: 1; padding: 2px 6px; }
 #btnHelpClose:hover { color: var(--gold); }
 dialog#help::backdrop { background: rgba(0, 0, 0, 0.55); }
-dialog#help table.keys { font-size: 15px; margin-top: 8px; }
 a { color: var(--blue-soft); }
 a.btn { display: inline-block; background: var(--blue); color: #fff; border: 1px solid var(--blue-soft); border-radius: 3px;
   padding: 3px 12px; font-weight: 600; text-decoration: none; }
 a.btn:hover { background: var(--blue-soft); color: var(--navy); }
+a.btn.big { background: var(--gold); border-color: var(--gold); color: #1c1c1c; }

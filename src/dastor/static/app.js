@@ -7,11 +7,14 @@
 // ------------------------------------------------------------------ constants
 const API = "../v1";
 const TILE = 256;
-const M = { l: 80, r: 8, t: 8, b: 42 };  // plot margins (CSS px)
+const M = { l: 80, r: 78, t: 8, b: 66 };  // plot margins (CSS px): the colour bar on the right, the overview strip below
+const BAR = { gap: 12, w: 14 };            // the colour bar, right of the plot
+const STRIP = { top: 46, h: 10 };          // the overview strip, below the x axis
 const MAX_INFLIGHT = 6;
 const TILE_BYTE_CAP = 320 * 2 ** 20;
-// Annotation colours: ones the colour maps do not pass through, each drawn over a dark edge.
-const PALETTE = ["#ff5d73", "#ffffff", "#ff9d42", "#ff6ad5", "#9fd4ff", "#ffc934"];
+// Annotation colours, each drawn over a dark edge. None is the gold of a selection, and none
+// sits near the bright end of the colour maps, where the events are.
+const PALETTE = ["#ff5d73", "#ffffff", "#ff9d42", "#6ef0c2", "#9fd4ff", "#d9a6ff"];
 const THEME = { blue: "#3978d6", gold: "#ffc934", red: "#d0002a", steel: "#c6c7cb" };
 const STAMPS = ["created_time", "modified_time", "modified_by", "derived_from", "derived_revision"];
 const CMAPS = {
@@ -38,6 +41,9 @@ const S = {
   many: [],                       // [{set, id}]: several picked together, by a selection window
   mode: "select", draft: null, area: null, space: false,
   undo: [], redo: [],
+  lastLabel: "",                  // the label last given, offered for the next annotation
+  history: [],                    // views left by a jump (fit, a crowd, the strip, a pin), for "back"
+  saveError: null, conflict: null, listError: null, annError: null,  // what went wrong, shown until it is put right
   mouse: null, drag: null, blocked: null,
   refused: null,                  // a product the server refused a tile of, at this view
   clusters: [],                   // aggregated features of the last frame
@@ -51,7 +57,7 @@ const cv = $("cv"), ctx = cv.getContext("2d");
 // ------------------------------------------------------------------ utilities
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
-function toast(msg, ms = 2200) {
+function toast(msg, ms = Math.max(2500, 60 * String(msg).length)) {  // long enough to read
   const el = $("toast"); el.textContent = msg; el.style.display = "block";
   clearTimeout(toast.timer); toast.timer = setTimeout(() => (el.style.display = "none"), ms);
 }
@@ -137,6 +143,22 @@ function clampView() {
   v.spp = clamp(v.spp, fine.sx / 16, Math.max(displaySpan() / 50, fine.sx));
   v.ypp = clamp(v.ypp, fine.sy / 16, Math.max((S.ext.y1 - S.ext.y0) / 50, fine.sy));
 }
+// Keeps a tenth of the plot over the data, so paging or dragging can't lose it. True if it moved the view.
+function clampPos() {
+  if (!S.ext) return false;
+  const v = S.view, P = plotRect(), a = tau(S.ext.x0), b = a + displaySpan(), W = P.w * v.spp, H = P.h * v.ypp;
+  const x = clamp(v.x0, a - 0.9 * W, b - 0.1 * W), y = clamp(v.y0, S.ext.y0 - 0.9 * H, S.ext.y1 - 0.1 * H);
+  const hit = Math.abs(x - v.x0) > W * 1e-9 || Math.abs(y - v.y0) > H * 1e-9;
+  v.x0 = x; v.y0 = y;
+  return hit;
+}
+// The views a jump left behind, so there is a way back from fit, a crowd, the strip or a pin.
+function pushView() { S.history.push({ ...S.view }); if (S.history.length > 30) S.history.shift(); }
+function backView() {
+  const v = S.history.pop();
+  if (!v) { toast("no earlier view"); return; }
+  moved(); Object.assign(S.view, v); redraw();
+}
 function wholeView() {
   if (!S.ext) return;
   const P = plotRect(), a = tau(S.ext.x0), span = displaySpan(), h = S.ext.y1 - S.ext.y0;
@@ -165,7 +187,7 @@ function buildGroups() {
     if (!S.groups.has(k)) S.groups.set(k, []);
     S.groups.get(k).push(p);
   }
-  const sel = $("selGroup"); sel.innerHTML = "";
+  const sel = $("selGroup"); sel.innerHTML = ""; sel.hidden = S.groups.size < 2;  // nothing to choose between
   for (const k of S.groups.keys()) sel.add(new Option(k || "(no acquisition key)", k));
 }
 function groupProducts() {
@@ -258,20 +280,33 @@ function pickLevel() {
   if (overLimits(S.levels[i]) || S.refused === S.levels[i].p.id) S.blocked = S.levels[i];
   return S.levels[i];
 }
+function stepText(p) { return `${fmtStep(p.coords[S.x].step, S.xTime)} × ${fmtNum(p.coords[S.y].step)} ${S.yUnits || S.y}`; }
 function renderLevels() {
-  const ids = new Set(S.levels.map((l) => l.p.id)), shown = activeLevel();
+  const ids = new Set(S.levels.map((l) => l.p.id));
   const all = groupProducts().slice().sort((a, b) => b.coords[S.x].step - a.coords[S.x].step || levelName(a).localeCompare(levelName(b)));
-  $("levels").innerHTML = all.map((p) => {
-    const cls = ["level", shown && shown.p.id === p.id ? "shown" : "", S.pin === p.id ? "pinned" : ""].join(" ");
-    return `<div class="${cls}"><input type="checkbox" data-id="${p.id}" ${ids.has(p.id) ? "checked" : ""}>` +
-      `<span class="name" data-pin="${p.id}" title="${esc(JSON.stringify(p.attrs))}">${esc(levelName(p))}</span>` +
-      `<span class="step">${fmtStep(p.coords[S.x].step, S.xTime)} × ${fmtNum(p.coords[S.y].step)} ${esc(S.yUnits)}</span></div>`;
-  }).join("");
-  $("btnAutoLevel").disabled = !S.pin;
+  $("levels").innerHTML = all.map((p) =>
+    `<label class="level"><input type="checkbox" data-id="${p.id}" ${ids.has(p.id) ? "checked" : ""}>` +
+    `<span class="name" title="${esc(JSON.stringify(p.attrs))}">${esc(levelName(p))}</span><span class="step">${esc(stepText(p))}</span></label>`).join("");
+  // the status bar's control: auto follows the zoom, a level holds the view on it
+  $("levelBar").innerHTML = '<button data-level="" title="follow the zoom">auto</button>' +
+    S.levels.map((l) => `<button data-level="${l.p.id}" title="hold the view on ${esc(levelName(l.p))} (${esc(stepText(l.p))})">${esc(levelName(l.p))}</button>`).join("");
+  updateLevelHighlight();
+}
+function setPin(id) {
+  if (id && !S.levels.some((l) => l.p.id === id)) return;
+  S.pin = S.pin === id ? null : id || null; S.autoPending = true;
+  updateLevelHighlight(); redraw();
 }
 function updateLevelHighlight() {
-  const shown = activeLevel();
+  const shown = S.levels.length ? activeLevel() : null;
   for (const el of $("levels").children) el.classList.toggle("shown", !!shown && el.querySelector("input").dataset.id === shown.p.id);
+  for (const b of $("levelBar").children) {
+    const id = b.dataset.level;
+    b.classList.toggle("on", !id && !S.pin);                          // auto: following the zoom
+    b.classList.toggle("shown", !!id && !!shown && shown.p.id === id);  // the level on screen now
+    b.classList.toggle("pinned", !!id && S.pin === id);
+    b.setAttribute("aria-pressed", String(id ? S.pin === id : !S.pin));
+  }
 }
 
 // ------------------------------------------------------------------ tiles
@@ -506,10 +541,13 @@ function draw() {
   const W = cv.clientWidth, H = cv.clientHeight, P = plotRect();
   ctx.fillStyle = "#101214"; ctx.fillRect(0, 0, W, H);
   if (!S.levels.length || !S.lut) {
-    ctx.fillStyle = "#888"; ctx.font = "15px system-ui"; ctx.textAlign = "left";
-    ctx.fillText(S.products.length || !S.ready ? "loading..." : "No viewable data: this server holds no patches of two dims you may read.", 80, 40);
+    const text = S.listError ? `Could not reach the server: ${S.listError}. Click to try again.`
+      : S.ready ? "No data to show: nothing here of two dims that you may read." : "loading...";
+    ctx.fillStyle = S.listError ? "#ff8b96" : "#9aa0a6"; ctx.font = "15px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+    ctx.fillText(text, 80, 40);
     return;
   }
+  clampPos();
   requestTiles();
   frameNo++;
   ctx.save();
@@ -523,23 +561,88 @@ function draw() {
   if (!pending && S.autoPending && autoContrast(true)) S.autoPending = false;
   drawGaps(P);
   drawAnnotations(P);
+  if (S.blocked) drawBlocked(P);
+  // notes, top right: what is wrong stays until it is put right; the rest is passing
   const notes = [];
-  if (S.draft) notes.push(`${S.draft.kind}: Enter, double-click or right-click to finish · Esc to cancel`);
-  if (S.blocked) notes.push(`${levelName(S.blocked.p)}: too much to load here. ${S.pin ? "Unpin it, or zoom in." : "Zoom in, or tick a coarser product."}`);
-  if (S.failed) notes.push(`${S.failed} tile${S.failed > 1 ? "s" : ""} failed; retrying`);
-  if (pending) notes.push(`loading ${pending} tile${pending > 1 ? "s" : ""}`);
+  if (S.saveError) notes.push([`not saved (${S.saveError}); trying again`, true]);
+  if (S.conflict) notes.push([`${S.conflict} was changed elsewhere and reloaded; your unsaved edits to it were dropped (Esc)`, true]);
+  if (S.draft) notes.push([`${S.draft.kind}: Enter, double-click or right-click ends it · Esc cancels`, false]);
+  if (S.failed) notes.push([`${S.failed} tile${S.failed > 1 ? "s" : ""} failed; trying again`, true]);
   ctx.font = "13px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
-  notes.forEach((txt, i) => {
+  notes.forEach(([txt, bad], i) => {
     const w = ctx.measureText(txt).width + 12;
-    ctx.fillStyle = "rgba(20,22,26,0.85)"; ctx.fillRect(P.x + P.w - w - 6, P.y + 6 + i * 26, w, 22);
-    ctx.fillStyle = THEME.gold; ctx.fillText(txt, P.x + P.w - w, P.y + 17 + i * 26);
+    ctx.fillStyle = "rgba(20,22,26,0.9)"; ctx.fillRect(P.x + P.w - w - 6, P.y + 6 + i * 26, w, 22);
+    ctx.fillStyle = bad ? "#ff8b96" : THEME.gold; ctx.fillText(txt, P.x + P.w - w, P.y + 17 + i * 26);
   });
+  if (pending) { ctx.fillStyle = THEME.gold; ctx.fillRect(P.x, P.y, P.w * 0.25, 2); }  // a quiet sign that tiles are coming
   ctx.restore();
   drawAxes(P);
+  drawColorBar(P);
+  drawOverview(P);
   updateLevelHighlight();
-  const l = activeLevel();
-  $("stLevel").textContent = `${levelName(l.p)}  ${fmtStep(l.sx, S.xTime)} × ${fmtNum(l.sy)} ${S.yUnits}` + (S.pin ? "  (pinned)" : "");
   scheduleHash();
+}
+// A level the view is too large for: said in the middle of the plot, where the data would be.
+function drawBlocked(P) {
+  const lines = [`${levelName(S.blocked.p)} is too much to load at this zoom`,
+    S.pin ? "Zoom in, or set the level (bottom right) to auto." : "Zoom in, or tick a coarser product under Levels."];
+  ctx.font = "15px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  const w = Math.max(...lines.map((t) => ctx.measureText(t).width)) + 28, x = P.x + P.w / 2, y = P.y + P.h / 2;
+  ctx.fillStyle = "rgba(20,22,26,0.92)"; ctx.fillRect(x - w / 2, y - 30, w, 60);
+  ctx.strokeStyle = THEME.gold; ctx.lineWidth = 1; ctx.strokeRect(x - w / 2 + 0.5, y - 29.5, w - 1, 59);
+  ctx.fillStyle = THEME.gold; ctx.fillText(lines[0], x, y - 11);
+  ctx.fillStyle = "#cfd3d8"; ctx.fillText(lines[1], x, y + 11);
+}
+// What the colours mean: the map from the high limit (top) to the low (bottom). A click on it
+// sets the limits from what is on screen.
+function barRect(P) { return { x: P.x + P.w + BAR.gap, y: P.y, w: BAR.w, h: P.h }; }
+function drawColorBar(P) {
+  const b = barRect(P), stops = CMAPS[S.disp.cmap] || CMAPS.viridis, g = ctx.createLinearGradient(0, b.y + b.h, 0, b.y);
+  stops.forEach((c, i) => g.addColorStop(i / (stops.length - 1), c));
+  ctx.fillStyle = g; ctx.fillRect(b.x, b.y, b.w, b.h);
+  ctx.strokeStyle = "#777"; ctx.lineWidth = 1; ctx.strokeRect(b.x + 0.5, b.y + 0.5, b.w, b.h);
+  const { vmin, vmax } = S.disp, n = 4;
+  ctx.fillStyle = "#cfd3d8"; ctx.font = "12px system-ui"; ctx.textAlign = "left";
+  for (let i = 0; i <= n; i++) {
+    const y = b.y + b.h - (i / n) * b.h, v = vmin + (i / n) * (vmax - vmin);
+    ctx.beginPath(); ctx.moveTo(b.x + b.w, y); ctx.lineTo(b.x + b.w + 3, y); ctx.stroke();
+    ctx.textBaseline = i === 0 ? "bottom" : i === n ? "top" : "middle";
+    ctx.fillText(fmtNum(+v.toPrecision(3)), b.x + b.w + 5, y);
+  }
+  ctx.textBaseline = "top"; ctx.fillStyle = "#9aa0a6";
+  ctx.fillText(`${S.disp.scale === "log" ? "log10 " : ""}${S.disp.stat}`, b.x - 2, b.y + b.h + 6);
+  if (S.manual) ctx.fillText("held", b.x - 2, b.y + b.h + 22);
+}
+// The whole recording in one strip under the axis: where there is data, where the annotations
+// are, and where the window on screen sits. A press or drag on it moves the window.
+function stripRect(P) { return { x: P.x, y: P.y + P.h + STRIP.top, w: P.w, h: STRIP.h }; }
+function stripX(P, u) { return P.x + ((u - tau(S.ext.x0)) / displaySpan()) * P.w; }
+function featureX(f) {
+  if (f.pts && f.pts.length) return f.pts[0][0];
+  if (f.box) return f.box.x0 === null || f.box.x1 === null ? null : (f.box.x0 + f.box.x1) / 2;
+  const sh = f.rows ? rawShapes(f) : null;
+  return sh && sh.pts.length ? sh.pts[0][0] : null;
+}
+function drawOverview(P) {
+  const r = stripRect(P);
+  ctx.fillStyle = "#3a3d42"; ctx.fillRect(r.x, r.y, r.w, r.h);
+  ctx.fillStyle = "#15161a";
+  for (let k = 0; k + 1 < S.segs.length; k++) {  // the squeezed gaps
+    const xa = stripX(P, tau(S.segs[k].b)), xb = stripX(P, tau(S.segs[k + 1].a));
+    ctx.fillRect(xa, r.y, Math.max(xb - xa, 1), r.h);
+  }
+  for (const s of S.sets) {
+    if (!s.visible || !s.feats) continue;
+    ctx.fillStyle = s.color;
+    const every = Math.ceil(s.feats.length / 4000);  // enough marks to show where the work is
+    for (let i = 0; i < s.feats.length; i += every) {
+      const x = featureX(s.feats[i]);
+      if (x !== null) ctx.fillRect(stripX(P, tau(x)) - 0.75, r.y + 1, 1.5, r.h - 2);
+    }
+  }
+  const xa = clamp(stripX(P, S.view.x0), r.x, r.x + r.w), xb = clamp(stripX(P, viewEnd().x1), r.x, r.x + r.w);
+  ctx.fillStyle = "rgba(255,201,52,0.28)"; ctx.fillRect(xa, r.y - 2, Math.max(xb - xa, 3), r.h + 4);
+  ctx.strokeStyle = THEME.gold; ctx.lineWidth = 1.5; ctx.strokeRect(xa, r.y - 2, Math.max(xb - xa, 3), r.h + 4);
 }
 function drawAxes(P) {
   const e = viewEnd();
@@ -557,7 +660,7 @@ function drawAxes(P) {
   ctx.textAlign = "left";
   if (S.xTime && ps.length) ctx.fillText(isoOf(ps[0].a).slice(0, 10) + " UTC", P.x, P.y + P.h + 24);
   ctx.textAlign = "right";
-  ctx.fillText(S.x + (S.xTime ? " (UTC)" : S.xUnits ? ` (${S.xUnits})` : ""), P.x + P.w, P.y + P.h + 24);
+  ctx.fillText(S.x + (!S.xTime && S.xUnits ? ` (${S.xUnits})` : ""), P.x + P.w, P.y + P.h + 24);
   const ys = niceNumber(S.view.ypp * 50);
   ctx.textBaseline = "middle";
   for (let d = Math.ceil(S.view.y0 / ys) * ys; d < e.y1; d += ys) {
@@ -631,11 +734,11 @@ function docFromFeats(set) {
   return { dims: set.dims, acquisition_key: set.acquisition_key || "", base_revision: set.revision, annotations, features };
 }
 async function loadSets() {
-  let listing;
-  try { listing = await api("/annotations"); } catch (e) { listing = null; }
-  S.annotations = !!listing; S.me = listing ? listing.owner : null;
-  $("annBox").style.display = S.annotations ? "" : "none";
-  $("who").textContent = S.me ? `as ${S.me}` : "";
+  let listing = null;
+  S.annError = null;
+  try { listing = await api("/annotations"); } catch (e) { if (e.status !== 404) S.annError = e.message; }  // 404: this server keeps none
+  S.annotations = !!listing || !!S.annError; S.me = listing ? listing.owner : null;
+  $("annBox").hidden = !S.annotations;
   const dims = new Set([S.x, S.y]), old = new Map(S.sets.map((s) => [setKey(s), s]));
   S.sets = (listing ? listing.sets : []).filter((s) => s.dims.length === 2 && s.dims.every((d) => dims.has(d)) &&
     (!s.acquisition_key || s.acquisition_key === S.group));
@@ -666,15 +769,31 @@ async function loadSet(s) {
 }
 function renderSets() {
   $("sets").innerHTML = S.sets.map((s) => {
-    const k = setKey(s);
-    return `<div class="set ${k === S.active ? "active" : ""}"><input type="checkbox" data-show="${esc(k)}" ${s.visible ? "checked" : ""}>` +
+    const k = setKey(s), state = s.failed ? "could not be read" : k === S.active ? "being edited" : s.editable ? "click to edit" : "read only: copy from it into your own set";
+    return `<div class="set ${k === S.active ? "active" : ""} ${s.editable ? "" : "locked"}"><input type="checkbox" data-show="${esc(k)}" ${s.visible ? "checked" : ""} title="show">` +
       `<span class="swatch" style="background:${s.color}"></span>` +
-      `<span class="name" data-edit="${esc(k)}" title="${s.editable ? "click to edit this set" : "read only: copy features into your own set"}">${esc(k)}</span>` +
-      `<span class="tag">${s.failed ? "unread" : k === S.active ? "editing" : s.editable ? "" : "read only"}</span></div>`;
-  }).join("") || '<div class="hint">No annotation sets yet.</div>';
-  $("annNote").textContent = S.me ? "" : "Read only: this server gives visitors no name to save under.";
-  $("btnNewSet").disabled = !S.me; $("btnLoadSet").disabled = !S.me;
+      `<span class="name" data-edit="${esc(k)}" title="${state}">${esc(k)}</span>` +
+      `<span class="tag">${s.failed ? "unread" : s.editable ? "" : "\u{1F512}"}</span></div>`;
+  }).join("");
+  $("annNote").textContent = S.annError ? `Could not list the sets: ${S.annError}` : S.me ? "" : "Read only here: visitors have no name to save under.";
+  const can = !!S.me;
+  $("btnNewSet").disabled = !can; $("btnLoadSet").disabled = !can;
   $("btnDeleteSet").disabled = !activeSet(); $("btnSaveSet").disabled = !activeSet();
+  for (const b of $("tools").children) {  // with nowhere to save, the drawing tools are off, and say why
+    if (b.dataset.mode === "select") continue;
+    b.disabled = !can; if (!can) b.title = `${b.getAttribute("aria-label")}: annotations can't be saved here`;
+  }
+  renderChip();
+}
+// The top bar's chip: the set being edited, and a dot which is hollow while edits are unsaved,
+// filled once they are, and red while a save is failing.
+function renderChip() {
+  const s = activeSet(), busy = S.sets.some((x) => x.dirty || x.saving);
+  $("setChip").hidden = !S.annotations;
+  $("chipSwatch").style.background = s ? s.color : "transparent";
+  $("chipName").textContent = s ? setKey(s) : "no set";
+  $("chipDot").className = "dot " + (S.saveError ? "bad" : busy ? "busy" : "ok");
+  $("setChip").title = S.saveError ? `not saved: ${S.saveError}` : busy ? "saving" : s ? "everything is saved" : "no annotation set is being edited";
 }
 
 // ------------------------------------------------------------------ editing and saving
@@ -686,64 +805,101 @@ function change(fn) {
   S.redo = [];
   fn(s); touch();
 }
-function touch() { const s = activeSet(); s.dirty = true; setSave("unsaved"); clearTimeout(touch.timer); touch.timer = setTimeout(save, 600); renderSelected(); redraw(); }
+function touch() { const s = activeSet(); s.dirty = true; renderChip(); clearTimeout(touch.timer); touch.timer = setTimeout(save, 600); renderSelected(); redraw(); }
 function restore(from, to) {
   const s = activeSet(); if (!s || !from.length) return;
   to.push(snapshot()); s.feats = JSON.parse(from.pop()); touch();
 }
-function setSave(text, bad) { const el = $("saveStatus"); el.textContent = text; el.classList.toggle("bad", !!bad); }
 // Saves every set with unsaved edits, whichever is being edited now, so an edit made just
 // before switching set or recording is not lost with the switch.
 async function save() {
   clearTimeout(touch.timer);
   await Promise.all(S.sets.filter((s) => s.dirty && s.feats).map(saveSet));
 }
+// The times and name the server stamped, written onto the annotations in place: the objects
+// on screen (one may be mid-drag, or have a field being typed in) are never swapped.
+function mergeStamps(s, doc) {
+  const by = new Map(doc.features.map((r) => [r.id, r]));
+  for (const f of s.feats) {
+    const r = by.get(f.id); if (!r) continue;
+    for (const k of ["created_time", "modified_time", "modified_by"]) if (r[k] !== null && r[k] !== undefined) f.cols[k] = r[k];
+  }
+}
 async function saveSet(s) {
   if (s.saving) { await s.saving; if (!s.dirty) return; }
-  s.dirty = false; setSave("saving...");
+  s.dirty = false; renderChip();
   s.saving = (async () => {
     try {
       const out = await api(`/annotations/${s.owner}/${s.name}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(docFromFeats(s)) });
-      s.revision = out.revision; setSave("saved");
-      if (!s.dirty) {  // read back the times the server stamped
+      s.revision = out.revision; S.saveError = null;
+      if (!s.dirty) {
         const doc = await api(`/annotations/${s.owner}/${s.name}`);
-        if (!s.dirty && doc.revision === s.revision) s.feats = featsFromDoc(doc);
+        if (!s.dirty && doc.revision === s.revision) mergeStamps(s, doc);
       }
     } catch (e) {
-      if (e.status === 409) {
-        toast(`${setKey(s)} changed elsewhere (another tab?). It was reloaded and your last edit dropped.`, 8000);
-        S.undo = []; S.redo = []; await loadSet(s); setSave("reloaded", true);
-      } else { s.dirty = true; setSave(`not saved: ${e.message}`, true); touch.timer = setTimeout(save, 5000); }
+      if (e.status === 409) {  // changed elsewhere: what is stored wins, and the plot says so until dismissed
+        S.conflict = setKey(s); S.saveError = null; S.undo = []; S.redo = []; await loadSet(s);
+      } else { s.dirty = true; S.saveError = e.message; touch.timer = setTimeout(save, 5000); }
     }
   })();
   await s.saving; s.saving = null;
   renderSets(); renderSelected(); redraw();
 }
-async function newSet() {
-  const name = (prompt("Name of the new annotation set (letters, digits, _ . -):", "annotations") || "").trim();
-  if (!name) return;
+// A new, empty set of the caller's on this recording. Returns its key, or null if it exists.
+async function createSet(name) {
   const first = groupProducts()[0];
   try {
     await api(`/annotations/${S.me}/${name}`, { method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dims: first.dims, acquisition_key: S.group, base_revision: 0, annotations: [], features: [] }) });
-  } catch (e) { toast(e.status === 409 ? "A set of that name exists." : e.message, 4000); return; }
-  S.active = `${S.me}/${name}`; S.undo = []; S.redo = [];
+  } catch (e) { if (e.status === 409) return null; throw e; }
+  return `${S.me}/${name}`;
+}
+// "new set": with a name it is made; without, the name field opens for one.
+async function newSet(name) {
+  const row = $("newSetRow"), box = $("inpNewSet");
+  if (!name) { row.hidden = false; box.value = ""; box.focus(); return; }
+  let key;
+  try { key = await createSet(name); } catch (e) { toast(e.message); return; }
+  if (!key) { toast(`${S.me}/${name} exists already`); return; }
+  row.hidden = true;
+  await save();
+  S.active = key; S.undo = []; S.redo = [];
   await loadSets();
+}
+// Something to draw into: the set being edited, else a new one made without asking.
+async function ensureSet() {
+  if (activeSet()) return true;
+  if (!S.me) { toast("Annotations can't be saved here."); return false; }
+  try {
+    for (let n = 1; n < 50; n++) {
+      const key = await createSet(n === 1 ? "annotations" : `annotations_${n}`);
+      if (!key) continue;
+      S.active = key; S.undo = []; S.redo = [];
+      await loadSets();
+      toast(`new set: ${key}`);
+      return !!activeSet();
+    }
+  } catch (e) { toast(`no set to draw into: ${e.message}`); }
+  return false;
 }
 // A set from a file on this computer: a zip of a DASCore set's folder, or one bare table.
 async function loadSetFile(file) {
-  const stem = file.name.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^[_.-]+/, "") || "annotations";
-  const name = (prompt("Name for the loaded annotation set:", stem) || "").trim();
-  if (!name) return;
+  const stem = file.name.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^[_.-]+/, "").slice(0, 56) || "annotations";
   const first = groupProducts()[0];
   const q = query({ filename: file.name, dims: first.dims.join(","), acquisition_key: S.group });
-  try {
-    await api(`/annotations/${S.me}/${name}/import?${q}`, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file });
-  } catch (e) { toast(e.status === 409 ? "A set of that name exists." : `not loaded: ${e.message}`, 6000); return; }
+  let name = null;
+  for (let n = 1; n < 50 && !name; n++) {  // named after the file; numbered if that name is taken
+    const tryName = n === 1 ? stem : `${stem}_${n}`;
+    try {
+      await api(`/annotations/${S.me}/${tryName}/import?${q}`, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file });
+      name = tryName;
+    } catch (e) { if (e.status !== 409) { toast(`not loaded: ${e.message}`); return; } }
+  }
+  if (!name) return;
   await save();
   S.active = `${S.me}/${name}`; S.undo = []; S.redo = [];
   await loadSets();
-  if (!findSet(S.active)) toast("Loaded, but it is on other dims or another recording, so it is not shown here.", 6000);
+  toast(findSet(S.active) ? `loaded as ${S.me}/${name}` : `loaded as ${S.me}/${name}, but it is on other dims or another recording, so it is not shown here`);
 }
 // The set being edited, to a file: its DASCore folder, zipped.
 async function saveSetFile() {
@@ -753,27 +909,56 @@ async function saveSetFile() {
   link.href = `${API}/annotations/${s.owner}/${s.name}/export`; link.download = `${s.name}.zip`;
   document.body.appendChild(link); link.click(); link.remove();
 }
+// "delete set" asks once more on the button itself, for a few seconds.
 async function deleteSet() {
-  const s = activeSet();
-  if (!s || !confirm(`Delete the annotation set ${setKey(s)} and everything in it?`)) return;
-  try { await api(`/annotations/${s.owner}/${s.name}`, { method: "DELETE" }); } catch (e) { toast(e.message, 4000); return; }
-  S.active = null; S.sel = null; await loadSets();
+  const s = activeSet(), b = $("btnDeleteSet"); if (!s) return;
+  if (b.dataset.sure !== setKey(s)) {
+    b.dataset.sure = setKey(s); b.textContent = `delete ${s.name}?`; b.classList.add("danger");
+    clearTimeout(deleteSet.timer);
+    deleteSet.timer = setTimeout(() => { delete b.dataset.sure; b.textContent = "delete set"; b.classList.remove("danger"); }, 4000);
+    return;
+  }
+  clearTimeout(deleteSet.timer); delete b.dataset.sure; b.textContent = "delete set"; b.classList.remove("danger");
+  try { await api(`/annotations/${s.owner}/${s.name}`, { method: "DELETE" }); } catch (e) { toast(e.message); return; }
+  S.active = null; S.sel = null; S.many = []; await loadSets();
 }
-function needActive() {
-  if (activeSet()) return true;
-  toast(S.me ? 'Make an annotation set first ("new set").' : "Annotations can't be saved here.", 3500);
-  return false;
+// A new annotation: drawn ones (`ask`) open the label box where they are.
+function addFeature(f, ask) {
+  change((s) => s.feats.push(f)); S.sel = { set: S.active, id: f.id }; S.many = []; renderSelected();
+  if (ask) openLabel(f);
 }
-function addFeature(f) { change((s) => s.feats.push(f)); S.sel = { set: S.active, id: f.id }; S.many = []; renderSelected(); }
-function copySelected() {
-  const cur = selected(); if (!cur || !needActive()) return;
-  const f = JSON.parse(JSON.stringify(cur.f));
-  for (const k of STAMPS) delete f.cols[k];
-  f.cols.derived_from = `${setKey(cur.set)}/${cur.f.id}`; f.cols.derived_revision = cur.set.revision;
-  f.id = newId();
-  if (f.rows) f.rows.forEach((r) => (r.feature_id = f.id));
-  addFeature(f);
-  toast(`copied into ${S.active}`);
+// The label of a new annotation is typed where it was drawn. The last label is offered, so
+// repeating it is one key (Enter) or none (draw the next): typing replaces it, Esc leaves none.
+function openLabel(f) {
+  const box = $("labelBox"), at = labelAnchor(f, plotRect()), s = activeSet(); if (!at || !s) return;
+  $("labelList").innerHTML = [...new Set(s.feats.map((x) => x.cols.label).filter(Boolean))].slice(0, 50).map((v) => `<option value="${esc(v)}">`).join("");
+  box.dataset.id = f.id; box.value = f.cols.label ?? S.lastLabel;
+  box.style.left = `${clamp(at[0] + 8, 4, cv.clientWidth - 190)}px`; box.style.top = `${clamp(at[1] - 34, 4, cv.clientHeight - 34)}px`;
+  box.hidden = false; box.focus(); box.select();
+}
+function closeLabel(commit) {
+  const box = $("labelBox"); if (box.hidden) return;
+  box.hidden = true;
+  const s = activeSet(), f = s && s.feats.find((x) => x.id === box.dataset.id), v = box.value.trim();
+  if (commit && v) S.lastLabel = v;
+  if (commit && f && (f.cols.label ?? "") !== v) change(() => { if (v) f.cols.label = v; else delete f.cols.label; });
+}
+function cloneInto(set, f) {  // a copy for the set being edited, which says where it came from
+  const c = JSON.parse(JSON.stringify(f));
+  for (const k of STAMPS) delete c.cols[k];
+  c.cols.derived_from = `${setKey(set)}/${f.id}`; c.cols.derived_revision = set.revision;
+  c.id = newId();
+  if (c.rows) c.rows.forEach((r) => (r.feature_id = c.id));
+  return c;
+}
+// Copies what is selected in other sets into the set being edited, as one step to undo.
+async function copySelected() {
+  const from = picked().filter((x) => setKey(x.set) !== S.active);
+  if (!from.length || !(await ensureSet())) return;
+  const copies = from.map((x) => cloneInto(x.set, x.f));
+  change((s) => s.feats.push(...copies));
+  setPicked(copies.map((c) => ({ set: S.active, id: c.id })));
+  toast(`${copies.length === 1 ? "copied" : `${copies.length} copied`} into ${S.active}`);
 }
 // Every picked annotation: the one being edited, or those a selection window caught.
 function picked() {
@@ -792,13 +977,13 @@ function setPicked(refs) {
 function deleteSelected() {
   const all = picked(), ids = new Set(all.filter((x) => setKey(x.set) === S.active).map((x) => x.f.id));
   if (ids.size) change((s) => (s.feats = s.feats.filter((x) => !ids.has(x.id))));
-  if (all.length > ids.size) toast(`${all.length - ids.size} in sets you can't edit were kept`, 4000);
+  if (all.length > ids.size) toast(`${all.length - ids.size} in sets you can't edit were kept`);
   if (ids.size) setPicked([]);
 }
 function minPoints(kind) { return kind === "polygon" ? 3 : kind === "path" ? 2 : 1; }
 function finishDraft() {
   const d = S.draft; S.draft = null;
-  if (d && d.pts.length >= minPoints(d.kind)) addFeature({ id: newId(), kind: d.kind, cols: {}, pts: d.pts });
+  if (d && d.pts.length >= minPoints(d.kind)) addFeature({ id: newId(), kind: d.kind, cols: {}, pts: d.pts }, true);
   redraw();
 }
 
@@ -832,12 +1017,15 @@ function strokePts(pts, close) {
   if (close) ctx.closePath();
 }
 function dot(p, r) { ctx.beginPath(); ctx.arc(x2px(p[0]), y2px(p[1]), r, 0, 6.2832); ctx.fill(); ctx.stroke(); }
-function drawFeature(f, color, sel, P) {
+// `sel`: 1 the one being edited (with handles), 2 one of several selected. `own`: of the set
+// being edited; the others are dashed, so what can be changed is told apart without colour.
+function drawFeature(f, color, sel, P, own) {
+  const dash = own ? [] : [6, 4];
   ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = sel ? 2.5 : 1.5; ctx.setLineDash([]);
   const fill = () => { ctx.globalAlpha = sel ? 0.3 : 0.12; ctx.fill(); ctx.globalAlpha = 1; };
   // each line over a wider one, so it reads on any colour of the image: dark, or gold when picked
   const edge = sel ? THEME.gold : "rgba(0,0,0,0.75)";
-  const line = () => { const w = ctx.lineWidth; ctx.strokeStyle = edge; ctx.lineWidth = w + (sel ? 4 : 2.5); ctx.stroke(); ctx.strokeStyle = color; ctx.lineWidth = w; ctx.stroke(); };
+  const line = () => { const w = ctx.lineWidth; ctx.strokeStyle = edge; ctx.lineWidth = w + (sel ? 4 : 2.5); ctx.stroke(); ctx.strokeStyle = color; ctx.lineWidth = w; ctx.setLineDash(dash); ctx.stroke(); ctx.setLineDash([]); };
   if (f.kind === "path") { strokePts(f.pts); line(); }
   else if (f.kind === "polygon") { strokePts(f.pts, true); fill(); line(); }
   else if (f.kind === "box") { const r = boxPx(f.box, P); ctx.beginPath(); ctx.rect(...r); fill(); line(); }
@@ -851,8 +1039,9 @@ function drawFeature(f, color, sel, P) {
   const label = f.cols.label, at = labelAnchor(f, P);
   if (label && at) {
     ctx.font = "13px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "bottom";
-    ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,0.8)"; ctx.strokeText(label, at[0] + 5, at[1] - 4);
-    ctx.fillStyle = color; ctx.fillText(label, at[0] + 5, at[1] - 4);
+    const w = ctx.measureText(label).width, x = clamp(at[0] + 5, P.x + 3, P.x + P.w - w - 3), y = clamp(at[1] - 4, P.y + 16, P.y + P.h - 3);  // kept inside the plot
+    ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,0.8)"; ctx.strokeText(label, x, y);
+    ctx.fillStyle = color; ctx.fillText(label, x, y);
   }
 }
 function labelAnchor(f, P) {
@@ -899,11 +1088,11 @@ function drawAnnotations(P) {
       near.feats.push(...c.feats);
     }
     for (const c of crowds) { c.r = 9 + Math.min(8, Math.log2(c.feats.length) * 1.5); S.clusters.push(c); }
-    for (const [f, picked] of plain) drawFeature(f, s.color, picked, P);
+    for (const [f, picked] of plain) drawFeature(f, s.color, picked, P, key === S.active);
   }
   for (const c of S.clusters) {
-    ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, 6.2832);
-    ctx.fillStyle = c.color; ctx.globalAlpha = 0.85; ctx.fill(); ctx.globalAlpha = 1;
+    ctx.beginPath(); ctx.roundRect(c.x - c.r, c.y - c.r * 0.8, c.r * 2, c.r * 1.6, 5);  // a tag, not a point
+    ctx.fillStyle = c.color; ctx.globalAlpha = 0.9; ctx.fill(); ctx.globalAlpha = 1;
     ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.setLineDash([]); ctx.stroke();
     ctx.fillStyle = "#000"; ctx.font = "bold 13px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.fillText(c.feats.length > 999 ? "999+" : String(c.feats.length), c.x, c.y + 0.5);
@@ -915,11 +1104,18 @@ function drawAnnotations(P) {
     ctx.strokeStyle = "#000"; for (const p of S.draft.pts) dot(p, 3.5);
   }
   const rubber = S.drag && (S.drag.kind === "rect" || S.drag.kind === "band") ? S.drag.box : null;
-  for (const [b, color] of [[S.area, THEME.blue], [rubber, "#fff"]]) {
+  // the download area and the selection window: light dashes over a dark line, so they read on any colour
+  for (const [b, color, tag] of [[S.area, "#ffffff", "download"], [rubber, "#cfe0ff", ""]]) {
     if (!b) continue;
     const r = boxPx(b, P);
-    ctx.setLineDash([6, 4]); ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.strokeRect(...r); ctx.setLineDash([]);
-    ctx.fillStyle = color; ctx.globalAlpha = 0.08; ctx.fillRect(...r); ctx.globalAlpha = 1;
+    ctx.fillStyle = color; ctx.globalAlpha = 0.1; ctx.fillRect(...r); ctx.globalAlpha = 1;
+    ctx.setLineDash([]); ctx.strokeStyle = "rgba(0,0,0,0.8)"; ctx.lineWidth = 4; ctx.strokeRect(...r);
+    ctx.setLineDash([7, 5]); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.strokeRect(...r); ctx.setLineDash([]);
+    if (tag && r[2] > 70) {
+      ctx.font = "12px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "top";
+      ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,0.8)"; ctx.strokeText(tag, r[0] + 5, r[1] + 4);
+      ctx.fillStyle = color; ctx.fillText(tag, r[0] + 5, r[1] + 4);
+    }
   }
 }
 function distToSegment(px, py, ax, ay, bx, by) {
@@ -948,7 +1144,8 @@ function hitFeature(px, py) {
   const P = plotRect(); let best = null;
   for (const s of S.sets) {
     if (!s.visible || !s.feats) continue;
-    for (const f of s.feats) { const d = featureDistance(f, px, py, P); if (d < 7 && (!best || d < best.d)) best = { d, set: setKey(s), id: f.id }; }
+    const own = setKey(s) === S.active ? 1 : 0;  // a copy lies on its original: the one that can be edited wins
+    for (const f of s.feats) { const d = featureDistance(f, px, py, P) - own; if (d < 7 && (!best || d < best.d)) best = { d, set: setKey(s), id: f.id }; }
   }
   return best;
 }
@@ -972,9 +1169,10 @@ function clusterText(c) {
   const counts = new Map();
   for (const f of c.feats) { const k = f.cols.label || f.kind; counts.set(k, (counts.get(k) || 0) + 1); }
   const parts = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, n]) => `${n} ${k}`);
-  return `${c.feats.length} features in ${c.set}: ${parts.join(", ")}${counts.size > 4 ? ", ..." : ""}`;
+  return `${c.feats.length} annotations in ${c.set}: ${parts.join(", ")}${counts.size > 4 ? ", ..." : ""}`;
 }
 function zoomToCluster(c) {
+  pushView();
   const P = plotRect(); let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   for (const f of c.feats) { const b = featureBounds(f, P); x0 = Math.min(x0, b.x0); x1 = Math.max(x1, b.x1); y0 = Math.min(y0, b.y0); y1 = Math.max(y1, b.y1); }
   const fx = Math.max((x1 - x0) * 1.6, 12) / P.w, fy = Math.max((y1 - y0) * 1.6, 12) / P.h;
@@ -996,28 +1194,50 @@ function moveVertex(f, i, x, y) {
 }
 
 // ------------------------------------------------------------------ side panels
+// The Selected section. It is rebuilt only when what it shows changes shape (another
+// annotation, a new column); otherwise its fields are updated in place, so a field being
+// typed in keeps its text and the focus stays where the user put it.
+const HIDDEN_COLS = new Set([...STAMPS]);
+function shortTime(v) { return typeof v === "string" ? v.slice(0, 16).replace("T", " ") : ""; }
+function metaLine(f) {
+  const parts = [];
+  if (f.cols.modified_time) parts.push(`edited ${shortTime(f.cols.modified_time)}${f.cols.modified_by ? ` by ${f.cols.modified_by}` : ""}`);
+  if (f.cols.derived_from) parts.push(`copied from ${f.cols.derived_from}`);
+  return parts.join(" · ");
+}
 function renderSelected() {
   const cur = selected(), el = $("selected"), all = picked();
   $("selBox").hidden = !all.length;  // shown only while there is something to show
-  if ($("btnAreaOf")) $("btnAreaOf").disabled = !all.length;  // the Download section's "selected"
+  if ($("btnAreaOf")) $("btnAreaOf").disabled = !all.length;  // the Download section's "selection"
   if (all.length > 1) {
-    const mine = all.filter((x) => setKey(x.set) === S.active).length;
-    el.innerHTML = `<div class="hint">${all.length} annotations picked${mine < all.length ? `, ${mine} in the set being edited` : ""}</div>` +
-      (mine ? `<div class="row"><button class="small" id="btnDelete">delete ${mine}</button></div>` : "");
+    const mine = all.filter((x) => setKey(x.set) === S.active).length, others = all.length - mine;
+    el.dataset.sig = "";
+    el.innerHTML = `<div class="hint">${all.length} annotations${others && mine ? ` (${mine} in the set being edited)` : ""}</div>` +
+      (mine ? '<div class="row"><input type="text" id="inpBulkLabel" placeholder="label for all" list="labelList"></div>' : "") +
+      '<div class="row">' +
+      (others && S.me ? `<button class="small" id="btnCopy" title="copy into the set being edited (c)">copy ${others}</button>` : "") +
+      (mine ? `<button class="small" id="btnDelete" title="Delete">delete ${mine}</button>` : "") + "</div>";
     return;
   }
-  if (!cur) { el.textContent = ""; return; }
+  if (!cur) { el.textContent = ""; el.dataset.sig = ""; return; }
   const { set, f } = cur, mine = setKey(set) === S.active;
-  const names = ["label", "note", ...Object.keys(f.cols).filter((k) => k !== "label" && k !== "note")];
+  const names = ["label", "note", ...Object.keys(f.cols).filter((k) => k !== "label" && k !== "note" && !HIDDEN_COLS.has(k))];
+  const sig = `${setKey(set)}|${f.id}|${mine}|${names.join(",")}`;
+  if (el.dataset.sig === sig) {  // the same fields: only their values may have changed
+    for (const box of el.querySelectorAll("input[data-col]")) if (box !== document.activeElement) box.value = f.cols[box.dataset.col] ?? "";
+    for (const cell of el.querySelectorAll("td[data-col]")) cell.textContent = f.cols[cell.dataset.col] ?? "";
+    el.querySelector(".meta").textContent = metaLine(f);
+    return;
+  }
   const rows = names.map((k) => {
-    let v = f.cols[k] ?? ""; const fixed = !mine || STAMPS.includes(k);
-    if (k.endsWith("_time") && typeof v === "string") v = v.slice(0, 19).replace("T", " ");
-    return `<tr><td>${esc(k)}</td><td>${fixed ? esc(v) : `<input type="text" data-col="${esc(k)}" value="${esc(v)}">`}</td></tr>`;
-  }).join("");
-  el.className = "";
-  el.innerHTML = `<div class="hint">${esc(f.kind)} in ${esc(setKey(set))}</div><table class="cols">${rows}</table><div class="row">` +
-    (mine ? '<button class="small" id="btnAddCol">add column</button><button class="small" id="btnDelete">delete</button>' : "") +
-    (!mine && S.me ? `<button class="small" id="btnCopy">copy to ${esc(S.active || "my set")}</button>` : "") +
+    const v = f.cols[k] ?? "";
+    return `<tr><td>${esc(k)}</td>${mine ? `<td><input type="text" data-col="${esc(k)}" value="${esc(v)}"${k === "label" ? ' list="labelList"' : ""}></td>` : `<td data-col="${esc(k)}">${esc(v)}</td>`}</tr>`;
+  }).join("") + (mine ? '<tr><td></td><td><input type="text" data-newcol placeholder="add a column"></td></tr>' : "");
+  el.dataset.sig = sig;
+  el.innerHTML = `<div class="hint">${esc(f.kind)} · ${esc(setKey(set))}</div><table class="cols">${rows}</table>` +
+    `<div class="hint meta">${esc(metaLine(f))}</div><div class="row">` +
+    (mine ? '<button class="small" id="btnDelete" title="Delete">delete</button>' : "") +
+    (!mine && S.me ? '<button class="small" id="btnCopy" title="copy into the set being edited (c)">copy to my set</button>' : "") +
     "</div>";
 }
 function areaQuery(level) {
@@ -1035,30 +1255,50 @@ function windowBounds() {
   const P = plotRect(), e = viewEnd();
   return { x0: Math.max(px2x(P.x), S.ext.x0), x1: Math.min(px2x(P.x + P.w), S.ext.x1), y0: Math.max(S.view.y0, S.ext.y0), y1: Math.min(e.y1, S.ext.y1) };
 }
+function fmtDuration(s) {
+  if (s < 60) return `${+s.toPrecision(3)} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
+  return `${Math.floor(s / 86400)} d ${Math.round((s % 86400) / 3600)} h`;
+}
+// The two ranges of an area, said once each: the date is not repeated, and each has its size.
+function areaText(a) {
+  const open = (lo, hi, f) => `${lo === null ? "start" : f(lo)} – ${hi === null ? "end" : f(hi)}`;
+  let x;
+  if (S.xTime && a.x0 !== null && a.x1 !== null) {
+    const day = (v) => isoOf(v).slice(0, 10), clock = (v) => isoOf(v).slice(11, 21);
+    x = `${day(a.x0)} ${clock(a.x0)} – ${day(a.x1) === day(a.x0) ? "" : day(a.x1) + " "}${clock(a.x1)} (${fmtDuration(a.x1 - a.x0)})`;
+  } else x = `${S.x} ${open(a.x0, a.x1, fmtX)}`;
+  const num = (v) => fmtNum(+v.toPrecision(4)), unit = S.yUnits || S.y;
+  const y = `${open(a.y0, a.y1, num)} ${unit}` + (a.y0 !== null && a.y1 !== null ? ` (${num(a.y1 - a.y0)})` : "");
+  return `${esc(x)}<br>${esc(y)}`;
+}
+const BIG_DOWNLOAD = 2 * 2 ** 30;  // past this the button warns by its colour
 async function renderArea() {
   const el = $("area"), a = S.area;
   const stamp = (renderArea.stamp = (renderArea.stamp || 0) + 1);
-  const pick = '<div class="row">' +
-    `<button class="small" id="btnAreaOf" ${picked().length ? "" : "disabled"} title="the box around the selected annotations">selected</button>` +
+  const pick = '<div class="row"><span class="hint">area from</span>' +
+    `<button class="small" id="btnAreaOf" ${picked().length ? "" : "disabled"} title="the box around what is selected">selection</button>` +
     '<button class="small" id="btnAreaWindow" title="what is on screen now">window</button>' +
-    `<button class="small ${S.mode === "area" ? "on" : ""}" id="btnAreaDraw" title="drag a box over the data (d)">draw</button>` +
-    (a ? '<button class="small" id="btnAreaClear">clear</button>' : "") + "</div>";
+    `<button class="small ${S.mode === "area" ? "on" : ""}" id="btnAreaDraw" title="drag a box over the data (d)">a drawn box</button></div>`;
   if (!a || !S.levels.length) { el.innerHTML = pick; return; }
   const was = $("selAreaLevel"), id = was ? was.value : S.levels[S.levels.length - 1].p.id;
   const level = S.levels.find((l) => l.p.id === id) || S.levels[S.levels.length - 1];
-  const span = (lo, hi, f) => `${lo === null ? "start" : f(lo)} – ${hi === null ? "end" : f(hi)}`;
   const syncTip = S.sync ? "copy this area into the local data directory" : "start the viewer with a local data directory to sync into it";
-  el.innerHTML = pick +
-    `<div class="hint">${esc(S.x)}: ${span(a.x0, a.x1, fmtX)}<br>${esc(S.y)}: ${span(a.y0, a.y1, (v) => fmtNum(+v.toPrecision(5)))} ${esc(S.yUnits)}</div>` +
-    `<div class="row"><label>product <select id="selAreaLevel">${S.levels.map((l) => `<option value="${l.p.id}" ${l === level ? "selected" : ""}>${esc(levelName(l.p))} (${fmtStep(l.sx, S.xTime)})</option>`).join("")}</select></label></div>` +
-    `<div class="row"><span id="areaSize">estimating...</span><button id="btnSync" ${S.sync ? "" : "disabled"} title="${syncTip}">Sync</button></div>`;
+  el.innerHTML = pick + `<div class="hint">${areaText(a)}</div>` +
+    `<div class="row"><select id="selAreaLevel" title="the product to download" aria-label="product">${S.levels.map((l) => `<option value="${l.p.id}" ${l === level ? "selected" : ""}>${esc(levelName(l.p))} (${fmtStep(l.sx, S.xTime)})</option>`).join("")}</select>` +
+    '<button class="small" id="btnAreaClear" title="forget this area">clear</button></div>' +
+    `<div class="row"><span id="areaSize">…</span><button id="btnSync" ${S.sync ? "" : "disabled"} title="${syncTip}">Sync</button></div>`;
   redraw();
   const q = areaQuery(level);
   try {
     const sum = await api("/summary?" + query(q));
     if (stamp !== renderArea.stamp) return;
+    const start = a.x0 === null ? "" : `_${S.xTime ? isoOf(a.x0).slice(0, 19) : fmtNum(a.x0)}`;
+    const file = `${S.group || "data"}_${levelName(level.p)}${start}`.replace(/[^A-Za-z0-9_.-]+/g, "_");
+    const big = sum.bytes > BIG_DOWNLOAD;
     $("areaSize").innerHTML = sum.patches
-      ? `<a id="lnkArea" class="btn" href="${API}/data?${query({ ...q, format: "dasdae" })}" download="${esc(levelName(level.p).replace(/[^A-Za-z0-9_.-]+/g, "_"))}.h5">Download ${fmtBytes(sum.bytes)}</a>`
+      ? `<a id="lnkArea" class="btn ${big ? "big" : ""}" href="${API}/data?${query({ ...q, format: "dasdae" })}" download="${esc(file)}.h5" title="${big ? "a large download" : "as a DASDAE file"}">Download ${fmtBytes(sum.bytes)}</a>`
       : "no data in this area";
   } catch (e) { if (stamp === renderArea.stamp) $("areaSize").textContent = e.message; }
 }
@@ -1066,25 +1306,36 @@ async function renderArea() {
 // ------------------------------------------------------------------ mouse and keyboard
 function evPos(ev) { const r = cv.getBoundingClientRect(); return { x: ev.clientX - r.left, y: ev.clientY - r.top }; }
 function inPlot(p) { const P = plotRect(); return p.x >= P.x && p.x <= P.x + P.w && p.y >= P.y && p.y <= P.y + P.h; }
-function setMode(mode) {
-  if (mode !== "select" && mode !== "area" && !needActive()) mode = "select";
+function toolCursor() { return S.mode === "select" ? "default" : "crosshair"; }
+async function setMode(mode) {
+  if (mode !== "select" && mode !== "area" && !(await ensureSet())) mode = "select";  // drawing needs a set; one is made
+  closeLabel(true);
   S.mode = mode; S.draft = null;
-  cv.style.cursor = mode === "select" ? "default" : "crosshair";
-  for (const b of $("tools").children) b.classList.toggle("on", b.dataset.mode === mode);
+  cv.style.cursor = toolCursor();
+  for (const b of $("tools").children) { const on = b.dataset.mode === mode; b.classList.toggle("on", on); b.setAttribute("aria-pressed", String(on)); }
   renderArea();
   redraw();
 }
 // The mouse. The middle button (or Space with the left) drags the view, in every tool. The
-// left button belongs to the tool: select picks a feature and drags it or one of its
+// left button belongs to the tool: select picks an annotation and drags it or one of its
 // vertices; the drawing tools place points and drag boxes.
 function shiftFeature(f, dx, dy) {
   if (f.pts) for (const p of f.pts) { p[0] += dx; p[1] += dy; }
   else if (f.box) { const b = f.box; if (b.x0 !== null) { b.x0 += dx; b.x1 += dx; } if (b.y0 !== null) { b.y0 += dy; b.y1 += dy; } }
 }
+function within(p, r, pad = 0) { return p.x >= r.x - pad && p.x <= r.x + r.w + pad && p.y >= r.y - pad && p.y <= r.y + r.h + pad; }
+function stripTo(px) {  // the window centred where the strip was pressed
+  const P = plotRect(), u = tau(S.ext.x0) + ((px - P.x) / P.w) * displaySpan();
+  moved(); S.view.x0 = u - (P.w * S.view.spp) / 2; clampPos(); redraw();
+}
 cv.addEventListener("mousedown", (ev) => {
+  if (S.listError) { location.reload(); return; }
   if (!S.levels.length) return;
-  const p = evPos(ev); if (!inPlot(p)) return;
+  const p = evPos(ev), P = plotRect();
   cv.focus();
+  if (ev.button === 0 && within(p, barRect(P), 4)) { S.manual = false; autoContrast(); return; }  // the colour bar: limits from the screen
+  if (ev.button === 0 && within(p, stripRect(P), 5)) { pushView(); S.drag = { kind: "strip" }; stripTo(p.x); return; }
+  if (!inPlot(p)) return;
   if (ev.button === 1 || (ev.button === 0 && S.space)) {
     ev.preventDefault();  // no autoscroll
     S.drag = { kind: "pan", p, x0: S.view.x0, y0: S.view.y0 }; cv.style.cursor = "grabbing";
@@ -1100,28 +1351,40 @@ cv.addEventListener("mousedown", (ev) => {
   if (f && (f.pts || f.box)) {  // one of the set being edited: selected now, moved if dragged
     if (!ev.shiftKey) {
       S.sel = { set: hit.set, id: hit.id }; S.many = []; renderSelected();
-      S.drag = { kind: "move", p, f, at: [px2x(p.x), px2y(p.y)], before: snapshot(), moved: false };
+      S.drag = { kind: "move", p, id: f.id, at: [px2x(p.x), px2y(p.y)], before: snapshot(), moved: false };
     }
-  } else if (!hit && !hitCluster(p.x, p.y)) {  // on nothing: a window which picks what it catches
+  } else if (!hit && !hitCluster(p.x, p.y)) {  // on nothing: a window which selects what it catches
     S.drag = { kind: "band", p, from: [px2x(p.x), px2y(p.y)], box: null, moved: false, shift: ev.shiftKey };
   }
 });
 cv.addEventListener("auxclick", (ev) => ev.preventDefault());
 cv.addEventListener("contextmenu", (ev) => { if (S.draft) { ev.preventDefault(); finishDraft(); } });  // right-click ends a shape
+const MOVE_SLOP = 8;  // a press which wobbles less than this selects; it does not nudge the annotation
+// What a press would take hold of, shown by the cursor before it is made.
+function hoverCursor(p) {
+  if (S.mode !== "select" || S.space) return S.space ? "grab" : toolCursor();
+  if (hitVertex(p.x, p.y) >= 0) return "grab";
+  if (hitCluster(p.x, p.y)) return "zoom-in";
+  const hit = hitFeature(p.x, p.y);
+  return hit ? (hit.set === S.active ? "move" : "pointer") : "default";
+}
 window.addEventListener("mousemove", (ev) => {
-  const p = evPos(ev); S.mouse = inPlot(p) ? p : null;
-  const d = S.drag, far = d && d.p && Math.hypot(p.x - d.p.x, p.y - d.p.y) > 4;
+  const p = evPos(ev), P = plotRect(); S.mouse = inPlot(p) ? p : null;
+  const d = S.drag, off = d && d.p ? Math.hypot(p.x - d.p.x, p.y - d.p.y) : 0;
   if (d && d.kind === "pan") {
     moved(); S.view.x0 = d.x0 - (p.x - d.p.x) * S.view.spp; S.view.y0 = d.y0 + (p.y - d.p.y) * S.view.ypp;
+  } else if (d && d.kind === "strip") {
+    stripTo(p.x);
   } else if (d && d.kind === "click") {
-    if (far) d.moved = true;
+    if (off > 4) d.moved = true;
   } else if (d && d.kind === "band") {
-    if (far) d.moved = true;
+    if (off > 4) d.moved = true;
     const x = px2x(p.x), y = px2y(p.y);
     if (d.moved) d.box = { x0: Math.min(d.from[0], x), x1: Math.max(d.from[0], x), y0: Math.min(d.from[1], y), y1: Math.max(d.from[1], y) };
   } else if (d && d.kind === "move") {
-    if (far) d.moved = true;
-    if (d.moved) { const x = px2x(p.x), y = px2y(p.y); shiftFeature(d.f, x - d.at[0], y - d.at[1]); d.at = [x, y]; }
+    if (off > MOVE_SLOP) d.moved = true;
+    const s = activeSet(), f = s && s.feats.find((x) => x.id === d.id);  // by id: the list may have been replaced
+    if (d.moved && f) { const x = px2x(p.x), y = px2y(p.y); shiftFeature(f, x - d.at[0], y - d.at[1]); d.at = [x, y]; }
   } else if (d && d.kind === "vertex") {
     const cur = selected();
     if (cur) { d.moved = true; moveVertex(cur.f, d.i, px2x(p.x), px2y(p.y)); }
@@ -1129,9 +1392,15 @@ window.addEventListener("mousemove", (ev) => {
     const x = px2x(p.x), y = px2y(p.y);
     d.box = { x0: Math.min(d.from[0], x), x1: Math.max(d.from[0], x), y0: Math.min(d.from[1], y), y1: Math.max(d.from[1], y) };
   }
-  if (S.mouse && S.levels.length) {
-    const x = px2x(p.x), y = px2y(p.y), v = valueAt(x, y);
-    $("stPos").textContent = `${S.x} ${fmtX(x)}   ${S.y} ${fmtNum(+y.toPrecision(7))} ${S.yUnits}` + (v === null ? "" : `   value ${fmtNum(v)}`);
+  if (S.mouse && S.levels.length) {  // as fine as the level drawn, and no finer
+    const x = px2x(p.x), y = px2y(p.y), v = valueAt(x, y), l = activeLevel();
+    const when = S.xTime ? isoOf(x).replace("T", " ").slice(0, l.sx >= 1 ? 19 : 23) : fmtNum(+x.toPrecision(6));
+    $("stPos").textContent = `${when}   ${fmtNum(+y.toPrecision(5))} ${S.yUnits || S.y}` + (v === null ? "" : `   ${fmtNum(+v.toPrecision(4))}`);
+  } else if (!d) $("stPos").textContent = "";
+  if (!d && S.levels.length) {
+    const onBar = within(p, barRect(P), 4), onStrip = within(p, stripRect(P), 5);
+    cv.style.cursor = onBar || onStrip ? "pointer" : S.mouse ? hoverCursor(p) : "default";
+    cv.title = onBar ? "click: set the colour limits from what is on screen (a)" : onStrip ? "the whole recording: click or drag to move the window" : "";
   }
   const crowd = S.mouse && !d ? hitCluster(p.x, p.y) : null, tip = $("tip");
   tip.style.display = crowd ? "block" : "none";
@@ -1142,14 +1411,14 @@ window.addEventListener("mouseup", (ev) => {
   const d = S.drag; if (!d) return;
   S.drag = null;
   const p = evPos(ev);
-  if (d.kind === "pan") cv.style.cursor = S.mode === "select" ? "default" : "crosshair";
+  if (d.kind === "pan") cv.style.cursor = toolCursor();
   else if (d.kind === "vertex" || d.kind === "move") {
     if (d.moved) { S.undo.push(d.before); S.redo = []; touch(); }
   } else if (d.kind === "rect") {
     const b = d.box;
     if (b && x2px(b.x1) - x2px(b.x0) > 3 && y2px(b.y0) - y2px(b.y1) > 3) {
-      if (S.mode === "area") { S.area = b; renderArea(); }
-      else addFeature({ id: newId(), kind: "box", cols: {}, box: b });
+      if (S.mode === "area") { S.area = b; setMode("select"); }  // one area, then back to selecting
+      else addFeature({ id: newId(), kind: "box", cols: {}, box: b }, true);
     }
   } else if (d.kind === "band" && d.moved) {
     const caught = inWindow(d.box);
@@ -1180,7 +1449,7 @@ function mergePicked(refs) {
 }
 function click(p, shift) {
   const pt = [px2x(p.x), px2y(p.y)];
-  if (S.mode === "point") { addFeature({ id: newId(), kind: "point", cols: {}, pts: [pt] }); return; }
+  if (S.mode === "point") { addFeature({ id: newId(), kind: "point", cols: {}, pts: [pt] }, true); return; }
   if (S.mode === "path" || S.mode === "polygon") {
     if (!S.draft) S.draft = { kind: S.mode, pts: [] };
     S.draft.pts.push(pt); return;
@@ -1216,36 +1485,50 @@ cv.addEventListener("dblclick", (ev) => {
 cv.addEventListener("wheel", (ev) => {
   ev.preventDefault();
   if (!S.levels.length) return;
-  const p = evPos(ev), f = Math.exp(clamp(ev.deltaY, -300, 300) * 0.0015);
+  const p = evPos(ev), f = Math.exp(clamp(ev.deltaY || ev.deltaX, -300, 300) * 0.0015);  // Shift can turn the wheel sideways
   zoomAt(p.x, p.y, ev.ctrlKey ? 1 : f, ev.shiftKey ? 1 : f);
 }, { passive: false });
 const PAGE_OVERLAP = 0.03;  // of a screen, shared by the view before and after Tab
 window.addEventListener("keyup", (ev) => {
-  if (ev.key === " ") { S.space = false; if (!S.drag) cv.style.cursor = S.mode === "select" ? "default" : "crosshair"; }
+  if (ev.key === " ") { S.space = false; if (!S.drag) cv.style.cursor = toolCursor(); }
 });
+// Keys act wherever the focus is, except while text is being typed, while the help is open,
+// and Space or Enter on a control, which press it.
 window.addEventListener("keydown", (ev) => {
-  if (/^(INPUT|SELECT|TEXTAREA)$/.test(ev.target.tagName)) return;
-  const k = ev.key;
+  const t = ev.target, k = ev.key;
+  if (t.matches && t.matches("input:not([type=checkbox]), select, textarea")) return;
+  if ($("help").open) { if (k === "?") { $("help").close(); ev.preventDefault(); } return; }
+  if ((k === " " || k === "Enter") && t.closest && t.closest("button, summary, a")) return;
   if ((ev.ctrlKey || ev.metaKey) && k.toLowerCase() === "z") { ev.preventDefault(); if (ev.shiftKey) restore(S.redo, S.undo); else restore(S.undo, S.redo); return; }
   if ((ev.ctrlKey || ev.metaKey) && k.toLowerCase() === "y") { ev.preventDefault(); restore(S.redo, S.undo); return; }
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  const cur = S.many.length ? null : selected(), mine = cur && setKey(cur.set) === S.active;
   if (k === " ") { S.space = true; cv.style.cursor = "grab"; }  // hold to drag the view with the left button
   else if (k === "Tab") {  // a screen on in x, or back with Shift, keeping a little in common
-    if (document.activeElement !== cv) return;
-    moved(); S.view.x0 += (ev.shiftKey ? -1 : 1) * plotRect().w * S.view.spp * (1 - PAGE_OVERLAP); redraw();
+    moved(); S.view.x0 += (ev.shiftKey ? -1 : 1) * plotRect().w * S.view.spp * (1 - PAGE_OVERLAP);
+    if (clampPos()) toast(ev.shiftKey ? "the start of the recording" : "the end of the recording");
+    redraw();
   }
-  else if (k === "Escape") { if (S.draft) { S.draft = null; redraw(); } else { if (S.mode === "select") setPicked([]); setMode("select"); } }
-  else if (k === "Enter") finishDraft();
+  else if (k === "Escape") {
+    if (S.draft) S.draft = null;
+    else if (S.conflict) S.conflict = null;
+    else { if (S.mode === "select") setPicked([]); setMode("select"); }
+    redraw();
+  }
+  else if (k === "Enter") { if (S.draft) finishDraft(); else if (mine) openLabel(cur.f); else return; }
   else if (k === "Delete" || k === "Backspace") {
-    const cur = S.many.length ? null : selected(), i = S.mouse ? hitVertex(S.mouse.x, S.mouse.y) : -1;
+    const i = S.mouse ? hitVertex(S.mouse.x, S.mouse.y) : -1;
     if (cur && i >= 0 && cur.f.pts && cur.f.pts.length > minPoints(cur.f.kind)) change(() => cur.f.pts.splice(i, 1));
-    else deleteSelected();
+    else if (picked().length) deleteSelected();
+    else if (k === "Backspace") backView();
   }
   else if (k >= "1" && k <= "4") setMode(["point", "path", "polygon", "box"][+k - 1]);
   else if (k === "d") setMode("area");
+  else if (k === "c") copySelected();
+  else if (k === "b") backView();
   else if (k === "?") $("help").showModal();
   else if (k === "p") showSide($("side").hidden);
-  else if (k === "w") wholeView();
+  else if (k === "w") { pushView(); wholeView(); }
   else if (k === "a") { S.manual = false; autoContrast(); }
   else if (k.startsWith("Arrow")) {  // a tenth of the view; half with Shift
     const P = plotRect(), f = ev.shiftKey ? 0.5 : 0.1;
@@ -1265,11 +1548,13 @@ window.addEventListener("keydown", (ev) => {
 });
 
 // ------------------------------------------------------------------ controls
+// Folding the panel gives its width to the plot: the same span of the recording, drawn wider.
 function showSide(show) {
-  const handle = $("sideHandle"), what = `${show ? "Hide" : "Show"} the side panel (p)`;
+  const handle = $("sideHandle"), what = `${show ? "Hide" : "Show"} the side panel (p)`, was = plotRect().w;
   $("side").hidden = !show; handle.textContent = show ? "\u203a" : "\u2039"; handle.title = what; handle.setAttribute("aria-label", what);
   try { localStorage.setItem("dastor.side", show ? "shown" : "hidden"); } catch (e) { /* private mode */ }
   resize();
+  if (S.levels.length && was > 10) { S.view.spp *= was / plotRect().w; clampView(); }
 }
 function saveDisp() { try { localStorage.setItem("dastor.display", JSON.stringify(S.disp)); } catch (e) { /* private mode */ } }
 function initControls() {
@@ -1277,8 +1562,9 @@ function initControls() {
   for (const name of Object.keys(CMAPS)) $("selCmap").add(new Option(name, name));
   $("selCmap").value = S.disp.cmap; $("selStat").value = S.disp.stat; $("selScale").value = S.disp.scale; $("chkSmooth").checked = S.disp.smooth;
   $("selGroup").onchange = (ev) => setGroup(ev.target.value);
-  $("btnWhole").onclick = wholeView;
+  $("btnWhole").onclick = () => { pushView(); wholeView(); };
   $("tools").onclick = (ev) => { const b = ev.target.closest("button"); if (b && b.dataset.mode) setMode(b.dataset.mode); };
+  $("setChip").onclick = () => showSide(true);
   $("selStat").onchange = (ev) => { S.disp.stat = ev.target.value; S.autoPending = true; saveDisp(); redraw(); };
   $("selScale").onchange = (ev) => { S.disp.scale = ev.target.value; S.autoPending = true; saveDisp(); redraw(); };
   $("selCmap").onchange = (ev) => { S.disp.cmap = ev.target.value; buildLut(); saveDisp(); redraw(); };
@@ -1287,18 +1573,13 @@ function initControls() {
     $(id).onchange = (ev) => { const v = parseFloat(ev.target.value); if (Number.isFinite(v)) { S.disp[key] = v; S.autoPending = false; S.manual = true; S.lutVer++; redraw(); } };
   }
   $("btnAuto").onclick = () => { S.manual = false; autoContrast(); };
-  $("btnAutoLevel").onclick = () => { S.pin = null; S.autoPending = true; renderLevels(); redraw(); };
-  $("levels").onclick = (ev) => {
-    const t = ev.target;
-    if (t.dataset.pin) {
-      if (!S.levels.some((l) => l.p.id === t.dataset.pin)) return;
-      S.pin = S.pin === t.dataset.pin ? null : t.dataset.pin; S.autoPending = true; renderLevels(); redraw();
-    } else if (t.dataset.id) {
-      const ids = [...$("levels").querySelectorAll("input:checked")].map((x) => x.dataset.id);
-      if (!ids.length) { t.checked = true; return; }  // a ladder has at least one level
-      try { localStorage.setItem(ladderKey(), JSON.stringify(ids)); } catch (e) { /* private mode */ }
-      buildLadder(); clampView(); redraw();
-    }
+  $("levelBar").onclick = (ev) => { const b = ev.target.closest("button"); if (b) { pushView(); setPin(b.dataset.level || null); } };
+  $("levels").onchange = (ev) => {
+    const t = ev.target; if (!t.dataset.id) return;
+    const ids = [...$("levels").querySelectorAll("input:checked")].map((x) => x.dataset.id);
+    if (!ids.length) { t.checked = true; return; }  // a ladder has at least one level
+    try { localStorage.setItem(ladderKey(), JSON.stringify(ids)); } catch (e) { /* private mode */ }
+    buildLadder(); clampView(); redraw();
   };
   $("sets").onclick = async (ev) => {
     const t = ev.target;
@@ -1308,9 +1589,9 @@ function initControls() {
       redraw();
     } else if (t.dataset.edit) {
       const s = findSet(t.dataset.edit);
-      if (!s.editable) { toast("That set is read only. Select a feature in it and copy it into your own set."); return; }
+      if (!s.editable) { toast("That set is read only. Select annotations in it and copy them into your own (c)."); return; }
       await save();
-      S.active = setKey(s); S.undo = []; S.redo = []; renderSets(); renderSelected();
+      S.active = setKey(s); S.undo = []; S.redo = []; renderSets(); renderSelected(); redraw();
     }
   };
   $("btnHelp").onclick = () => $("help").showModal();
@@ -1318,36 +1599,67 @@ function initControls() {
   $("help").onclick = (ev) => { if (ev.target === $("help")) $("help").close(); };  // a click outside it
   $("sideHandle").onclick = () => showSide($("side").hidden);
   try { showSide(localStorage.getItem("dastor.side") !== "hidden"); } catch (e) { /* private mode */ }
-  $("btnNewSet").onclick = newSet; $("btnDeleteSet").onclick = deleteSet;
+  $("btnNewSet").onclick = () => newSet(); $("btnDeleteSet").onclick = deleteSet;
+  $("inpNewSet").onkeydown = (ev) => {
+    if (ev.key === "Enter" && ev.target.value.trim()) newSet(ev.target.value.trim());
+    else if (ev.key === "Escape") { $("newSetRow").hidden = true; cv.focus(); }
+  };
   $("btnSaveSet").onclick = saveSetFile;
   $("btnLoadSet").onclick = () => $("fileSet").click();
   $("fileSet").onchange = async (ev) => { const file = ev.target.files[0]; ev.target.value = ""; if (file) await loadSetFile(file); };
+  // the label box at a new annotation
+  const label = $("labelBox");
+  label.onkeydown = (ev) => {
+    ev.stopPropagation();
+    if (ev.key === "Enter") { closeLabel(true); cv.focus(); }
+    else if (ev.key === "Escape") { closeLabel(false); cv.focus(); }
+    else if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "z") { ev.preventDefault(); closeLabel(false); cv.focus(); restore(S.undo, S.redo); }
+  };
+  label.onblur = () => closeLabel(true);
   $("selected").addEventListener("change", (ev) => {
-    const col = ev.target.dataset.col, cur = selected(); if (!col || !cur) return;
-    change(() => { if (ev.target.value === "") delete cur.f.cols[col]; else cur.f.cols[col] = ev.target.value; });
+    const t = ev.target, cur = selected();
+    if (t.id === "inpBulkLabel") {  // one label for everything selected in the set being edited
+      const ids = new Set(picked().filter((x) => setKey(x.set) === S.active).map((x) => x.f.id)), v = t.value.trim();
+      if (ids.size) change((s) => { for (const f of s.feats) if (ids.has(f.id)) { if (v) f.cols.label = v; else delete f.cols.label; } });
+      if (v) S.lastLabel = v;
+      return;
+    }
+    if (!cur) return;
+    if (t.dataset.newcol !== undefined) {
+      const name = t.value.trim();
+      if (!name) return;
+      if (["id", "geometry", ...STAMPS].includes(name) || name in cur.f.cols) { toast(`"${name}" is taken; choose another name`); return; }
+      change(() => { cur.f.cols[name] = ""; });
+      const box = $("selected").querySelector(`input[data-col="${CSS.escape(name)}"]`); if (box) box.focus();
+    } else if (t.dataset.col) {
+      const col = t.dataset.col, keep = col === "label" || col === "note";
+      if (col === "label" && t.value.trim()) S.lastLabel = t.value.trim();
+      change(() => { if (t.value === "" && keep) delete cur.f.cols[col]; else cur.f.cols[col] = t.value; });
+    }
   });
   $("selected").addEventListener("click", (ev) => {
-    if (ev.target.id === "btnDelete") { deleteSelected(); return; }
-    const cur = selected(); if (!cur) return;
+    if (ev.target.id === "btnDelete") deleteSelected();
     else if (ev.target.id === "btnCopy") copySelected();
-    else if (ev.target.id === "btnAddCol") {
-      const name = (prompt("Column name:") || "").trim();
-      if (!name || ["id", "geometry", ...STAMPS].includes(name)) return;
-      change(() => { cur.f.cols[name] = cur.f.cols[name] ?? ""; });
-    }
   });
   $("area").addEventListener("change", (ev) => { if (ev.target.id === "selAreaLevel") renderArea(); });
   $("area").addEventListener("click", (ev) => {
     const all = picked();
-    if (ev.target.id === "btnAreaOf" && all.length) {  // one box round everything picked
+    if (ev.target.id === "btnAreaOf" && all.length) {  // one box round everything selected
       const lo = (a, b) => (a === null || b === null ? null : Math.min(a, b)), hi = (a, b) => (a === null || b === null ? null : Math.max(a, b));
       S.area = all.map((x) => worldBounds(x.f)).reduce((a, b) => ({ x0: lo(a.x0, b.x0), x1: hi(a.x1, b.x1), y0: lo(a.y0, b.y0), y1: hi(a.y1, b.y1) }));
       renderArea(); redraw();
     }
     else if (ev.target.id === "btnAreaWindow") { S.area = windowBounds(); renderArea(); redraw(); }
     else if (ev.target.id === "btnAreaDraw") setMode(S.mode === "area" ? "select" : "area");
-    if (ev.target.id === "btnAreaClear") { S.area = null; renderArea(); redraw(); }
+    else if (ev.target.id === "btnAreaClear") { S.area = null; renderArea(); redraw(); }
   });
+  // a press on a button or tick box hands the keys back to the plot (a text field keeps them)
+  for (const el of [$("top"), $("side"), $("status")]) {
+    el.addEventListener("click", (ev) => {
+      const text = document.activeElement && document.activeElement.matches("input:not([type=checkbox]), select");
+      if (!text && ev.target.closest("button, input[type=checkbox], label")) cv.focus({ preventScroll: true });
+    });
+  }
   window.addEventListener("resize", resize);
   window.addEventListener("beforeunload", (ev) => { if (S.sets.some((s) => s.dirty || s.saving)) ev.preventDefault(); });
 }
@@ -1370,10 +1682,10 @@ async function init() {
   try {
     const listing = await api("/viewer/products");
     S.products = listing.products; S.limits = listing.limits; S.sync = !!listing.sync;
-  } catch (e) { toast(`could not list products: ${e.message}`, 8000); }
+  } catch (e) { S.listError = e.message; }
   S.ready = true;
   buildGroups();
-  if (!S.groups.size) { redraw(); return; }
+  if (!S.groups.size) { window.dastorReady = true; redraw(); return; }
   const hash = readHash(), key = S.groups.has(hash.g) ? hash.g : S.groups.keys().next().value;
   await setGroup(key);
   const v = (hash.v || "").split(",").map(Number);
