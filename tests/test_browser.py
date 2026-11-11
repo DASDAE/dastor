@@ -320,6 +320,21 @@ class TestViewing:
         page.key("ArrowLeft", 37)
         assert page.js("[S.view.x0, S.view.y0]") == pytest.approx(before[:2])
 
+    def test_side_panel_folds_and_help_opens(self, page):
+        """The side panel gives its width to the plot; "?" opens the keys."""
+        wide = page.js("plotRect().w")
+        page.js("document.getElementById('btnSide').click()")
+        assert page.js("document.getElementById('side').hidden") is True
+        assert page.js("plotRect().w") == pytest.approx(wide + 300, abs=20)
+        page.js("document.getElementById('btnSide').click()")
+        assert page.js("plotRect().w") == pytest.approx(wide)
+        assert page.js("document.getElementById('help').open") is False
+        page.js("document.getElementById('btnHelp').click()")
+        assert page.js("document.getElementById('help').open") is True
+        assert "Middle drag" in page.js("document.getElementById('help').textContent")
+        page.js("document.getElementById('btnHelpClose').click()")
+        assert page.js("document.getElementById('help').open") is False
+
     def test_middle_button_drags_the_view(self, page):
         """The middle button pans in any tool; the left button never does."""
         start = _pixel(page, "2024-05-01T00:00:20", 60)
@@ -445,6 +460,39 @@ class TestAnnotating:
         page.settle()
         times = _saved(viewer_settings).annotations["time"]
         assert [x.round("s").second for x in times] == [10, 30]
+
+    def test_window_picks_several_and_delete_removes_them(self, page, viewer_settings):
+        """A drag on empty space picks what it catches; Delete removes them."""
+        _new_set(page)
+        page.js("setMode('point')")
+        for when in ("00:00:40", "00:00:44", "00:00:55"):
+            page.click(*_pixel(page, f"2024-05-01T{when}", 100))
+        page.settle()
+        assert len(_saved(viewer_settings).features) == 3
+        page.js("setMode('select')")
+        page.drag(
+            _pixel(page, "2024-05-01T00:00:37", 115),
+            _pixel(page, "2024-05-01T00:00:47", 85),
+        )
+        assert page.js("S.many.length") == 2 and page.js("S.sel") is None
+        panel = page.js("document.getElementById('selected').textContent")
+        assert "2 annotations picked" in panel
+        assert page.js("document.getElementById('btnAreaOf').disabled") is False
+        page.key("Delete", 46)
+        page.settle()
+        left = _saved(viewer_settings).annotations["time"]
+        assert [x.round("s").second for x in left] == [55]
+        assert page.js("S.many.length") == 0
+
+        # a window over another user's annotation picks it but can't delete it
+        page.drag(
+            _pixel(page, "2024-05-01T00:00:02", 40),
+            _pixel(page, "2024-05-01T00:00:08", 20),
+        )
+        assert page.js("S.sel.set") == "detector/auto"
+        page.key("Delete", 46)
+        page.settle()
+        assert page.js("findSet('detector/auto').feats.length") == 1
 
     def test_copy_from_another_set(self, page, viewer_settings):
         """A feature of a read-only set is copied, recording where it came from."""

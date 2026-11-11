@@ -6,12 +6,16 @@
   --gold: #ffc934; --red: #ff5a6e; --red-deep: #d0002a;
 }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px system-ui, sans-serif; }
-#top { position: fixed; top: 0; left: 0; right: 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-  padding: 5px 8px; background: var(--panel); border-bottom: 2px solid var(--blue); z-index: 5; }
-.brand { display: flex; align-items: center; gap: 6px; font-weight: 700; letter-spacing: 0.04em; margin-right: 6px; }
-.brand img { height: 20px; }
+#top { position: fixed; top: 0; left: 0; right: 0; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  padding: 8px 12px; background: var(--panel); border-bottom: 2px solid var(--blue); z-index: 5; font-size: 14px; }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; letter-spacing: 0.04em; margin-right: 8px; }
+.brand img { height: 28px; }
+.tools { display: flex; gap: 4px; padding-left: 10px; border-left: 1px solid var(--line); }
+button.tool { width: 36px; height: 36px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+button.tool svg { pointer-events: none; }
+#top select { padding: 5px 8px; }
 .spacer { flex: 1; }
-#main { position: fixed; top: 36px; bottom: 22px; left: 0; right: 0; display: flex; }
+#main { position: fixed; top: 56px; bottom: 22px; left: 0; right: 0; display: flex; }
 #view { position: relative; flex: 1; min-width: 0; }
 #cv { width: 100%; height: 100%; display: block; cursor: default; }
 #cv:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
@@ -57,6 +61,11 @@ table.keys td:last-child { color: var(--muted); }
 #toast, #tip { position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; display: none; z-index: 4; }
 #toast { left: 50%; top: 12px; transform: translateX(-50%); padding: 5px 10px; border-left: 3px solid var(--gold); }
 #tip { pointer-events: none; padding: 3px 8px; font-size: 12px; white-space: nowrap; }
+#side[hidden] { display: none; }
+dialog#help { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-top: 3px solid var(--gold);
+  border-radius: 6px; padding: 12px 16px; width: min(560px, 90vw); max-height: 85vh; overflow-y: auto; }
+dialog#help::backdrop { background: rgba(0, 0, 0, 0.55); }
+dialog#help table.keys { font-size: 13px; margin-top: 8px; }
 a { color: var(--blue-soft); }
 a.btn { display: inline-block; background: var(--blue); color: #fff; border: 1px solid var(--blue-soft); border-radius: 3px;
   padding: 3px 12px; font-weight: 600; text-decoration: none; }

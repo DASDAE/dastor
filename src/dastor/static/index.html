@@ -12,17 +12,19 @@
 <div id="top">
   <span class="brand"><img src="favicon.svg" alt="">DAS Tor</span>
   <label>Recording <select id="selGroup" title="products are grouped by acquisition_key"></select></label>
-  <button id="btnWhole" title="show everything (w)">whole</button>
+  <button id="btnWhole" class="tool" title="Whole view (w)" aria-label="whole view"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><ellipse cx="10" cy="10" rx="3.2" ry="7.5"/><path d="M2.5 10h15M4 6h12M4 14h12"/></svg></button>
   <span class="tools" id="tools">
-    <button data-mode="select" title="select annotations; drag one, or a vertex, to move it (Esc)">select</button>
-    <button data-mode="point" title="place points (1)">point</button>
-    <button data-mode="path" title="click to add points; Enter, double-click or right-click ends the path (2)">path</button>
-    <button data-mode="polygon" title="click to add corners; Enter, double-click or right-click closes the polygon (3)">polygon</button>
-    <button data-mode="box" title="drag a box (4)">box</button>
+    <button class="tool" data-mode="select" title="Select: click an annotation, or drag a window round several; drag one, or a vertex, to move it (Esc)" aria-label="select"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 2.5v13l3.4-3.2 2.3 5 2-.9-2.3-5H15z" fill="currentColor" stroke-width="1"/></svg></button>
+    <button class="tool" data-mode="point" title="Point: click to place points (1)" aria-label="point"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="3.5" fill="currentColor"/></svg></button>
+    <button class="tool" data-mode="path" title="Path: click to add points; Enter, double-click or right-click ends it (2)" aria-label="path"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 15.5 8 6.5l4.5 6 4-8"/><circle cx="3.5" cy="15.5" r="1.6" fill="currentColor"/><circle cx="8" cy="6.5" r="1.6" fill="currentColor"/><circle cx="12.5" cy="12.5" r="1.6" fill="currentColor"/><circle cx="16.5" cy="4.5" r="1.6" fill="currentColor"/></svg></button>
+    <button class="tool" data-mode="polygon" title="Polygon: click to add corners; Enter, double-click or right-click closes it (3)" aria-label="polygon"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3 17 8.5 14.5 16.5h-9L3 8.5z"/><circle cx="10" cy="3" r="1.5" fill="currentColor"/><circle cx="17" cy="8.5" r="1.5" fill="currentColor"/><circle cx="14.5" cy="16.5" r="1.5" fill="currentColor"/><circle cx="5.5" cy="16.5" r="1.5" fill="currentColor"/><circle cx="3" cy="8.5" r="1.5" fill="currentColor"/></svg></button>
+    <button class="tool" data-mode="box" title="Box: drag a box (4)" aria-label="box"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="13" height="10" rx="1"/></svg></button>
   </span>
   <span class="spacer"></span>
   <span id="saveStatus" class="save"></span>
   <span id="who"></span>
+  <button id="btnHelp" class="tool" title="Help: keys and mouse (?)" aria-label="help"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M7.6 7.8a2.5 2.5 0 1 1 3.6 2.3c-.8.5-1.2 1-1.2 2"/><circle cx="10" cy="14.6" r=".6" fill="currentColor"/></svg></button>
+  <button id="btnSide" class="tool" title="Show or hide the side panel (p)" aria-label="side panel" aria-pressed="true"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="15" height="12" rx="1.5"/><path d="M12.5 4v12"/></svg></button>
 </div>
 <div id="main">
   <div id="view"><canvas id="cv" tabindex="0"></canvas><div id="toast"></div><div id="tip"></div></div>
@@ -64,7 +66,10 @@
     <details id="areaBox" open><summary>Download</summary>
       <div id="area"></div>
     </details>
-    <details><summary>Keys</summary>
+  </div>
+</div>
+<dialog id="help">
+  <div class="row"><b>Keys and mouse</b><span class="spacer"></span><button id="btnHelpClose" class="small">close</button></div>
       <table class="keys">
         <tr><td><b>Wheel</b></td><td>zoom both axes</td></tr>
         <tr><td><b>Shift + wheel</b></td><td>zoom the x axis</td></tr>
@@ -72,22 +77,23 @@
         <tr><td><b>Middle drag</b></td><td>pan (or hold Space and drag)</td></tr>
         <tr><td><b>Arrows</b></td><td>pan a tenth of the view; half with Shift</td></tr>
         <tr><td><b>Tab</b></td><td>next screen in time; Shift + Tab goes back</td></tr>
-        <tr><td><b>Drag</b></td><td>move the annotation, or the vertex, under the cursor</td></tr>
+        <tr><td><b>Drag</b></td><td>move the annotation, or the vertex, under the cursor; on empty space, pick everything in a window</td></tr>
+        <tr><td><b>Shift + click</b></td><td>add to, or take from, what is picked</td></tr>
         <tr><td><b>Double-click</b></td><td>add a vertex on a side of the selected path or polygon</td></tr>
         <tr><td><b>+ -</b></td><td>zoom in, out</td></tr>
         <tr><td><b>w</b></td><td>whole view</td></tr>
+        <tr><td><b>p</b></td><td>show or hide the side panel</td></tr>
+        <tr><td><b>?</b></td><td>this help</td></tr>
         <tr><td><b>a</b></td><td>auto contrast</td></tr>
         <tr><td><b>Esc</b></td><td>select tool; cancel a shape being drawn</td></tr>
         <tr><td><b>1 2 3 4</b></td><td>point, path, polygon, box</td></tr>
         <tr><td><b>d</b></td><td>select an area to download</td></tr>
         <tr><td><b>Enter</b></td><td>finish a path or polygon (also double-click or right-click)</td></tr>
-        <tr><td><b>Delete</b></td><td>remove the vertex under the cursor, else the selected annotation</td></tr>
+        <tr><td><b>Delete</b></td><td>remove the vertex under the cursor, else everything picked</td></tr>
         <tr><td><b>Ctrl + Z</b></td><td>undo</td></tr>
         <tr><td><b>Ctrl + Y</b></td><td>redo</td></tr>
       </table>
-    </details>
-  </div>
-</div>
+</dialog>
 <div id="status"><span id="stPos"></span><span id="stLevel"></span></div>
 <script src="app.js"></script>
 </body>

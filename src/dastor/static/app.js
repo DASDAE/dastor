@@ -34,7 +34,8 @@ const S = {
   disp: { stat: "max", scale: "linear", vmin: 0, vmax: 1, cmap: "viridis", smooth: false },
   lut: null, lutVer: 0, autoPending: true, autoFor: null, manual: false,
   me: null, annotations: false, sets: [], active: null,
-  sel: null,                      // {set, id}
+  sel: null,                      // {set, id}: the one annotation being edited
+  many: [],                       // [{set, id}]: several picked together, by a selection window
   mode: "select", draft: null, area: null, space: false,
   undo: [], redo: [],
   mouse: null, drag: null, blocked: null,
@@ -188,7 +189,7 @@ async function setGroup(key) {
   S.x = all[0].x; S.y = all[0].y;
   S.xTime = all[0].coords[S.x].timelike;
   S.xUnits = all[0].coords[S.x].units; S.yUnits = all[0].coords[S.y].units;
-  S.pin = null; S.sel = null; S.area = null; S.draft = null;
+  S.pin = null; S.sel = null; S.many = []; S.area = null; S.draft = null;
   buildLadder();
   wholeView();
   await loadSets();
@@ -642,8 +643,9 @@ async function loadSets() {
   S.sets.forEach((s) => {
     const was = old.get(setKey(s));
     if (was === s) return;
-    let h = 0; for (const c of setKey(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0;  // the same colour every visit
-    s.color = PALETTE[h % PALETTE.length];
+    let h = 0; for (const c of setKey(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0;  // the same colour every visit,
+    const used = new Set(S.sets.filter((o) => o !== s && o.color).map((o) => o.color));  // unless a set shown has it
+    for (let i = 0; i < PALETTE.length; i++) { s.color = PALETTE[(h + i) % PALETTE.length]; if (!used.has(s.color)) break; }
     s.visible = was ? was.visible : true;
     if (was && was.revision === s.revision && was.feats) s.feats = was.feats;
   });
@@ -762,7 +764,7 @@ function needActive() {
   toast(S.me ? 'Make an annotation set first ("new set").' : "Annotations can't be saved here.", 3500);
   return false;
 }
-function addFeature(f) { change((s) => s.feats.push(f)); S.sel = { set: S.active, id: f.id }; renderSelected(); }
+function addFeature(f) { change((s) => s.feats.push(f)); S.sel = { set: S.active, id: f.id }; S.many = []; renderSelected(); }
 function copySelected() {
   const cur = selected(); if (!cur || !needActive()) return;
   const f = JSON.parse(JSON.stringify(cur.f));
@@ -773,10 +775,25 @@ function copySelected() {
   addFeature(f);
   toast(`copied into ${S.active}`);
 }
+// Every picked annotation: the one being edited, or those a selection window caught.
+function picked() {
+  const refs = S.many.length ? S.many : S.sel ? [S.sel] : [], out = [];
+  for (const r of refs) {
+    const set = findSet(r.set), f = set && set.feats && set.feats.find((x) => x.id === r.id);
+    if (f) out.push({ set, f });
+  }
+  return out;
+}
+function setPicked(refs) {
+  S.sel = refs.length === 1 ? refs[0] : null; S.many = refs.length > 1 ? refs : [];
+  renderSelected(); redraw();
+}
+// Removes what is picked from the set being edited; other sets are not this user's to change.
 function deleteSelected() {
-  const cur = selected(); if (!cur || setKey(cur.set) !== S.active) return;
-  change((s) => (s.feats = s.feats.filter((x) => x.id !== cur.f.id)));
-  S.sel = null; renderSelected();
+  const all = picked(), ids = new Set(all.filter((x) => setKey(x.set) === S.active).map((x) => x.f.id));
+  if (ids.size) change((s) => (s.feats = s.feats.filter((x) => !ids.has(x.id))));
+  if (all.length > ids.size) toast(`${all.length - ids.size} in sets you can't edit were kept`, 4000);
+  if (ids.size) setPicked([]);
 }
 function minPoints(kind) { return kind === "polygon" ? 3 : kind === "path" ? 2 : 1; }
 function finishDraft() {
@@ -817,9 +834,10 @@ function strokePts(pts, close) {
 function dot(p, r) { ctx.beginPath(); ctx.arc(x2px(p[0]), y2px(p[1]), r, 0, 6.2832); ctx.fill(); ctx.stroke(); }
 function drawFeature(f, color, sel, P) {
   ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = sel ? 2.5 : 1.5; ctx.setLineDash([]);
-  const fill = () => { ctx.globalAlpha = sel ? 0.25 : 0.12; ctx.fill(); ctx.globalAlpha = 1; };
-  // each line over a wider dark one, so it reads on any colour of the image
-  const line = () => { const w = ctx.lineWidth; ctx.strokeStyle = "rgba(0,0,0,0.75)"; ctx.lineWidth = w + 2.5; ctx.stroke(); ctx.strokeStyle = color; ctx.lineWidth = w; ctx.stroke(); };
+  const fill = () => { ctx.globalAlpha = sel ? 0.3 : 0.12; ctx.fill(); ctx.globalAlpha = 1; };
+  // each line over a wider one, so it reads on any colour of the image: dark, or gold when picked
+  const edge = sel ? THEME.gold : "rgba(0,0,0,0.75)";
+  const line = () => { const w = ctx.lineWidth; ctx.strokeStyle = edge; ctx.lineWidth = w + (sel ? 4 : 2.5); ctx.stroke(); ctx.strokeStyle = color; ctx.lineWidth = w; ctx.stroke(); };
   if (f.kind === "path") { strokePts(f.pts); line(); }
   else if (f.kind === "polygon") { strokePts(f.pts, true); fill(); line(); }
   else if (f.kind === "box") { const r = boxPx(f.box, P); ctx.beginPath(); ctx.rect(...r); fill(); line(); }
@@ -828,8 +846,8 @@ function drawFeature(f, color, sel, P) {
     for (const b of sh.boxes) { const r = boxPx(b, P); ctx.beginPath(); ctx.rect(r[0], r[1], Math.max(r[2], 1), Math.max(r[3], 1)); fill(); line(); }
     ctx.strokeStyle = "#000"; ctx.lineWidth = 1; for (const p of sh.pts) dot(p, 4);
   }
-  if (f.kind === "point" || f.kind === "group") { ctx.strokeStyle = "#000"; ctx.lineWidth = 1; for (const p of f.pts) dot(p, sel ? 6 : 4.5); }
-  if (sel && f.kind !== "point" && f.kind !== "group") { ctx.fillStyle = "#fff"; ctx.strokeStyle = "#000"; ctx.lineWidth = 1; for (const p of vertices(f)) dot(p, 3.5); }
+  if (f.kind === "point" || f.kind === "group") { ctx.strokeStyle = sel ? THEME.gold : "#000"; ctx.lineWidth = sel ? 2.5 : 1; for (const p of f.pts) dot(p, sel ? 6 : 4.5); }
+  if (sel === 1 && f.kind !== "point" && f.kind !== "group") { ctx.fillStyle = "#fff"; ctx.strokeStyle = "#000"; ctx.lineWidth = 1; for (const p of vertices(f)) dot(p, 3.5); }
   const label = f.cols.label, at = labelAnchor(f, P);
   if (label && at) {
     ctx.font = "11px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "bottom";
@@ -856,12 +874,13 @@ function featureBounds(f, P) {
 // of screen, with their number; hovering it says what it holds and clicking it zooms to them.
 const CROWD_SIZE = 14, CROWD_CELL = 30;
 function drawAnnotations(P) {
+  const many = new Set(S.many.map((r) => `${r.set}|${r.id}`));
   S.clusters = [];
   for (const s of S.sets) {
     if (!s.visible || !s.feats) continue;
     const key = setKey(s), cells = new Map(), plain = [];
     for (const f of s.feats) {
-      const b = featureBounds(f, P), picked = !!S.sel && S.sel.set === key && S.sel.id === f.id;
+      const b = featureBounds(f, P), picked = S.sel && S.sel.set === key && S.sel.id === f.id ? 1 : many.has(`${key}|${f.id}`) ? 2 : 0;
       if (!b || b.x1 < P.x || b.x0 > P.x + P.w || b.y1 < P.y || b.y0 > P.y + P.h) continue;
       if (picked || Math.max(b.x1 - b.x0, b.y1 - b.y0) > CROWD_SIZE) { plain.push([f, picked]); continue; }
       const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2, cell = `${Math.floor(cx / CROWD_CELL)},${Math.floor(cy / CROWD_CELL)}`;
@@ -870,7 +889,7 @@ function drawAnnotations(P) {
     }
     const crowds = [];
     for (const c of cells.values()) {
-      if (c.feats.length === 1) { plain.push([c.feats[0], false]); continue; }
+      if (c.feats.length === 1) { plain.push([c.feats[0], 0]); continue; }
       c.x /= c.feats.length; c.y /= c.feats.length;
       // a crowd split by the grid is one crowd
       const near = crowds.find((o) => Math.hypot(o.x - c.x, o.y - c.y) < CROWD_CELL);
@@ -895,7 +914,7 @@ function drawAnnotations(P) {
     strokePts(pts, S.draft.kind === "polygon"); ctx.stroke(); ctx.setLineDash([]);
     ctx.strokeStyle = "#000"; for (const p of S.draft.pts) dot(p, 3.5);
   }
-  const rubber = S.drag && S.drag.kind === "rect" ? S.drag.box : null;
+  const rubber = S.drag && (S.drag.kind === "rect" || S.drag.kind === "band") ? S.drag.box : null;
   for (const [b, color] of [[S.area, THEME.blue], [rubber, "#fff"]]) {
     if (!b) continue;
     const r = boxPx(b, P);
@@ -978,9 +997,15 @@ function moveVertex(f, i, x, y) {
 
 // ------------------------------------------------------------------ side panels
 function renderSelected() {
-  const cur = selected(), el = $("selected");
-  $("selBox").hidden = !cur;  // shown only while there is something to show
-  if ($("btnAreaOf")) $("btnAreaOf").disabled = !cur;  // the Download section's "selected"
+  const cur = selected(), el = $("selected"), all = picked();
+  $("selBox").hidden = !all.length;  // shown only while there is something to show
+  if ($("btnAreaOf")) $("btnAreaOf").disabled = !all.length;  // the Download section's "selected"
+  if (all.length > 1) {
+    const mine = all.filter((x) => setKey(x.set) === S.active).length;
+    el.innerHTML = `<div class="hint">${all.length} annotations picked${mine < all.length ? `, ${mine} in the set being edited` : ""}</div>` +
+      (mine ? `<div class="row"><button class="small" id="btnDelete">delete ${mine}</button></div>` : "");
+    return;
+  }
   if (!cur) { el.textContent = ""; return; }
   const { set, f } = cur, mine = setKey(set) === S.active;
   const names = ["label", "note", ...Object.keys(f.cols).filter((k) => k !== "label" && k !== "note")];
@@ -1011,10 +1036,10 @@ function windowBounds() {
   return { x0: Math.max(px2x(P.x), S.ext.x0), x1: Math.min(px2x(P.x + P.w), S.ext.x1), y0: Math.max(S.view.y0, S.ext.y0), y1: Math.min(e.y1, S.ext.y1) };
 }
 async function renderArea() {
-  const el = $("area"), a = S.area, cur = selected();
+  const el = $("area"), a = S.area;
   const stamp = (renderArea.stamp = (renderArea.stamp || 0) + 1);
   const pick = '<div class="row">' +
-    `<button class="small" id="btnAreaOf" ${cur ? "" : "disabled"} title="the box around the selected annotation">selected</button>` +
+    `<button class="small" id="btnAreaOf" ${picked().length ? "" : "disabled"} title="the box around the selected annotations">selected</button>` +
     '<button class="small" id="btnAreaWindow" title="what is on screen now">window</button>' +
     `<button class="small ${S.mode === "area" ? "on" : ""}" id="btnAreaDraw" title="drag a box over the data (d)">draw</button>` +
     (a ? '<button class="small" id="btnAreaClear">clear</button>' : "") + "</div>";
@@ -1067,14 +1092,18 @@ cv.addEventListener("mousedown", (ev) => {
   }
   if (ev.button !== 0) return;
   if (S.mode === "box" || S.mode === "area") { S.drag = { kind: "rect", from: [px2x(p.x), px2y(p.y)], box: null }; return; }
-  S.drag = { kind: "click", p, moved: false };
+  S.drag = { kind: "click", p, moved: false, shift: ev.shiftKey };
   if (S.mode !== "select") return;
   const i = hitVertex(p.x, p.y);
   if (i >= 0) { S.drag = { kind: "vertex", i, before: snapshot(), moved: false }; return; }
   const hit = hitCluster(p.x, p.y) ? null : hitFeature(p.x, p.y), f = hit && hit.set === S.active && findSet(hit.set).feats.find((x) => x.id === hit.id);
   if (f && (f.pts || f.box)) {  // one of the set being edited: selected now, moved if dragged
-    S.sel = { set: hit.set, id: hit.id }; renderSelected();
-    S.drag = { kind: "move", p, f, at: [px2x(p.x), px2y(p.y)], before: snapshot(), moved: false };
+    if (!ev.shiftKey) {
+      S.sel = { set: hit.set, id: hit.id }; S.many = []; renderSelected();
+      S.drag = { kind: "move", p, f, at: [px2x(p.x), px2y(p.y)], before: snapshot(), moved: false };
+    }
+  } else if (!hit && !hitCluster(p.x, p.y)) {  // on nothing: a window which picks what it catches
+    S.drag = { kind: "band", p, from: [px2x(p.x), px2y(p.y)], box: null, moved: false, shift: ev.shiftKey };
   }
 });
 cv.addEventListener("auxclick", (ev) => ev.preventDefault());
@@ -1086,6 +1115,10 @@ window.addEventListener("mousemove", (ev) => {
     moved(); S.view.x0 = d.x0 - (p.x - d.p.x) * S.view.spp; S.view.y0 = d.y0 + (p.y - d.p.y) * S.view.ypp;
   } else if (d && d.kind === "click") {
     if (far) d.moved = true;
+  } else if (d && d.kind === "band") {
+    if (far) d.moved = true;
+    const x = px2x(p.x), y = px2y(p.y);
+    if (d.moved) d.box = { x0: Math.min(d.from[0], x), x1: Math.max(d.from[0], x), y0: Math.min(d.from[1], y), y1: Math.max(d.from[1], y) };
   } else if (d && d.kind === "move") {
     if (far) d.moved = true;
     if (d.moved) { const x = px2x(p.x), y = px2y(p.y); shiftFeature(d.f, x - d.at[0], y - d.at[1]); d.at = [x, y]; }
@@ -1118,10 +1151,34 @@ window.addEventListener("mouseup", (ev) => {
       if (S.mode === "area") { S.area = b; renderArea(); }
       else addFeature({ id: newId(), kind: "box", cols: {}, box: b });
     }
-  } else if (d.kind === "click" && !d.moved) click(p);
+  } else if (d.kind === "band" && d.moved) {
+    const caught = inWindow(d.box);
+    setPicked(d.shift ? mergePicked(caught) : caught);
+  } else if ((d.kind === "click" || d.kind === "band") && !d.moved) click(p, d.shift);
   redraw();
 });
-function click(p) {
+// The annotations of the visible sets a window catches: any vertex inside it, or a box overlapping it.
+function inWindow(b) {
+  const P = plotRect(), r = boxPx(b, P), x0 = r[0], x1 = r[0] + r[2], y0 = r[1], y1 = r[1] + r[3], out = [];
+  for (const s of S.sets) {
+    if (!s.visible || !s.feats) continue;
+    for (const f of s.feats) {
+      const fb = featureBounds(f, P);
+      if (!fb || fb.x1 < x0 || fb.x0 > x1 || fb.y1 < y0 || fb.y0 > y1) continue;
+      const pts = f.pts || (f.kind === "raw" ? rawShapes(f).pts : null);
+      const inside = pts && pts.length ? pts.some((q) => { const x = x2px(q[0]), y = y2px(q[1]); return x >= x0 && x <= x1 && y >= y0 && y <= y1; }) : true;
+      if (inside) out.push({ set: setKey(s), id: f.id });
+    }
+  }
+  return out;
+}
+// What is picked with `refs` added; one already picked is dropped instead (Shift toggles).
+function mergePicked(refs) {
+  const key = (r) => `${r.set}|${r.id}`, now = new Map(picked().map((x) => [`${setKey(x.set)}|${x.f.id}`, { set: setKey(x.set), id: x.f.id }]));
+  for (const r of refs) { if (now.has(key(r))) now.delete(key(r)); else now.set(key(r), r); }
+  return [...now.values()];
+}
+function click(p, shift) {
   const pt = [px2x(p.x), px2y(p.y)];
   if (S.mode === "point") { addFeature({ id: newId(), kind: "point", cols: {}, pts: [pt] }); return; }
   if (S.mode === "path" || S.mode === "polygon") {
@@ -1130,9 +1187,9 @@ function click(p) {
   }
   const crowd = hitCluster(p.x, p.y);
   if (crowd) { $("tip").style.display = "none"; zoomToCluster(crowd); return; }
-  const hit = hitFeature(p.x, p.y);
-  S.sel = hit ? { set: hit.set, id: hit.id } : null;
-  renderSelected();
+  const hit = hitFeature(p.x, p.y), ref = hit && { set: hit.set, id: hit.id };
+  if (shift) { if (ref) setPicked(mergePicked([ref])); }
+  else setPicked(ref ? [ref] : []);
 }
 // The side of the selected path or polygon under a point, as the index a new vertex takes.
 function hitSide(px, py) {
@@ -1177,15 +1234,17 @@ window.addEventListener("keydown", (ev) => {
     if (document.activeElement !== cv) return;
     moved(); S.view.x0 += (ev.shiftKey ? -1 : 1) * plotRect().w * S.view.spp * (1 - PAGE_OVERLAP); redraw();
   }
-  else if (k === "Escape") { if (S.draft) { S.draft = null; redraw(); } else setMode("select"); }
+  else if (k === "Escape") { if (S.draft) { S.draft = null; redraw(); } else { if (S.mode === "select") setPicked([]); setMode("select"); } }
   else if (k === "Enter") finishDraft();
   else if (k === "Delete" || k === "Backspace") {
-    const cur = selected(), i = S.mouse ? hitVertex(S.mouse.x, S.mouse.y) : -1;
+    const cur = S.many.length ? null : selected(), i = S.mouse ? hitVertex(S.mouse.x, S.mouse.y) : -1;
     if (cur && i >= 0 && cur.f.pts && cur.f.pts.length > minPoints(cur.f.kind)) change(() => cur.f.pts.splice(i, 1));
     else deleteSelected();
   }
   else if (k >= "1" && k <= "4") setMode(["point", "path", "polygon", "box"][+k - 1]);
   else if (k === "d") setMode("area");
+  else if (k === "?") $("help").showModal();
+  else if (k === "p") showSide($("side").hidden);
   else if (k === "w") wholeView();
   else if (k === "a") { S.manual = false; autoContrast(); }
   else if (k.startsWith("Arrow")) {  // a tenth of the view; half with Shift
@@ -1206,6 +1265,11 @@ window.addEventListener("keydown", (ev) => {
 });
 
 // ------------------------------------------------------------------ controls
+function showSide(show) {
+  $("side").hidden = !show; $("btnSide").classList.toggle("on", show); $("btnSide").setAttribute("aria-pressed", String(show));
+  try { localStorage.setItem("dastor.side", show ? "shown" : "hidden"); } catch (e) { /* private mode */ }
+  resize();
+}
 function saveDisp() { try { localStorage.setItem("dastor.display", JSON.stringify(S.disp)); } catch (e) { /* private mode */ } }
 function initControls() {
   try { Object.assign(S.disp, JSON.parse(localStorage.getItem("dastor.display")) || {}); } catch (e) { /* defaults */ }
@@ -1213,7 +1277,7 @@ function initControls() {
   $("selCmap").value = S.disp.cmap; $("selStat").value = S.disp.stat; $("selScale").value = S.disp.scale; $("chkSmooth").checked = S.disp.smooth;
   $("selGroup").onchange = (ev) => setGroup(ev.target.value);
   $("btnWhole").onclick = wholeView;
-  $("tools").onclick = (ev) => { if (ev.target.dataset.mode) setMode(ev.target.dataset.mode); };
+  $("tools").onclick = (ev) => { const b = ev.target.closest("button"); if (b && b.dataset.mode) setMode(b.dataset.mode); };
   $("selStat").onchange = (ev) => { S.disp.stat = ev.target.value; S.autoPending = true; saveDisp(); redraw(); };
   $("selScale").onchange = (ev) => { S.disp.scale = ev.target.value; S.autoPending = true; saveDisp(); redraw(); };
   $("selCmap").onchange = (ev) => { S.disp.cmap = ev.target.value; buildLut(); saveDisp(); redraw(); };
@@ -1248,6 +1312,11 @@ function initControls() {
       S.active = setKey(s); S.undo = []; S.redo = []; renderSets(); renderSelected();
     }
   };
+  $("btnHelp").onclick = () => $("help").showModal();
+  $("btnHelpClose").onclick = () => $("help").close();
+  $("help").onclick = (ev) => { if (ev.target === $("help")) $("help").close(); };  // a click outside it
+  $("btnSide").onclick = () => showSide($("side").hidden);
+  try { showSide(localStorage.getItem("dastor.side") !== "hidden"); } catch (e) { /* private mode */ }
   $("btnNewSet").onclick = newSet; $("btnDeleteSet").onclick = deleteSet;
   $("btnSaveSet").onclick = saveSetFile;
   $("btnLoadSet").onclick = () => $("fileSet").click();
@@ -1257,8 +1326,8 @@ function initControls() {
     change(() => { if (ev.target.value === "") delete cur.f.cols[col]; else cur.f.cols[col] = ev.target.value; });
   });
   $("selected").addEventListener("click", (ev) => {
+    if (ev.target.id === "btnDelete") { deleteSelected(); return; }
     const cur = selected(); if (!cur) return;
-    if (ev.target.id === "btnDelete") deleteSelected();
     else if (ev.target.id === "btnCopy") copySelected();
     else if (ev.target.id === "btnAddCol") {
       const name = (prompt("Column name:") || "").trim();
@@ -1268,8 +1337,12 @@ function initControls() {
   });
   $("area").addEventListener("change", (ev) => { if (ev.target.id === "selAreaLevel") renderArea(); });
   $("area").addEventListener("click", (ev) => {
-    const cur = selected();
-    if (ev.target.id === "btnAreaOf" && cur) { S.area = worldBounds(cur.f); renderArea(); redraw(); }
+    const all = picked();
+    if (ev.target.id === "btnAreaOf" && all.length) {  // one box round everything picked
+      const lo = (a, b) => (a === null || b === null ? null : Math.min(a, b)), hi = (a, b) => (a === null || b === null ? null : Math.max(a, b));
+      S.area = all.map((x) => worldBounds(x.f)).reduce((a, b) => ({ x0: lo(a.x0, b.x0), x1: hi(a.x1, b.x1), y0: lo(a.y0, b.y0), y1: hi(a.y1, b.y1) }));
+      renderArea(); redraw();
+    }
     else if (ev.target.id === "btnAreaWindow") { S.area = windowBounds(); renderArea(); redraw(); }
     else if (ev.target.id === "btnAreaDraw") setMode(S.mode === "area" ? "select" : "area");
     if (ev.target.id === "btnAreaClear") { S.area = null; renderArea(); redraw(); }
