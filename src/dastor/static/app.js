@@ -790,11 +790,18 @@ function drawAnnotations(P) {
       if (!cells.has(cell)) cells.set(cell, { set: key, color: s.color, feats: [], x: 0, y: 0 });
       const c = cells.get(cell); c.feats.push(f); c.x += cx; c.y += cy;
     }
+    const crowds = [];
     for (const c of cells.values()) {
       if (c.feats.length === 1) { plain.push([c.feats[0], false]); continue; }
-      c.x /= c.feats.length; c.y /= c.feats.length; c.r = 9 + Math.min(8, Math.log2(c.feats.length) * 1.5);
-      S.clusters.push(c);
+      c.x /= c.feats.length; c.y /= c.feats.length;
+      // a crowd split by the grid is one crowd
+      const near = crowds.find((o) => Math.hypot(o.x - c.x, o.y - c.y) < CROWD_CELL);
+      if (!near) { crowds.push(c); continue; }
+      const n = near.feats.length, m = c.feats.length;
+      near.x = (near.x * n + c.x * m) / (n + m); near.y = (near.y * n + c.y * m) / (n + m);
+      near.feats.push(...c.feats);
     }
+    for (const c of crowds) { c.r = 9 + Math.min(8, Math.log2(c.feats.length) * 1.5); S.clusters.push(c); }
     for (const [f, picked] of plain) drawFeature(f, s.color, picked, P);
   }
   for (const c of S.clusters) {
