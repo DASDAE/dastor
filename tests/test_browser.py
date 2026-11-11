@@ -541,6 +541,30 @@ class TestAnnotating:
         assert moved.iloc[0] > 25  # carried up the plot
         assert page.js("S.sel.id") == saved.features["id"].iloc[0]
 
+    def test_drawing_snaps_to_vertices(self, page, viewer_settings):
+        """A click near the first corner closes a polygon; near a vertex, joins it."""
+        _new_set(page)
+        page.js("setMode('polygon')")
+        corners = (("00:00:10", 20), ("00:00:20", 20), ("00:00:20", 60))
+        for when, distance in corners:
+            page.click(*_pixel(page, f"2024-05-01T{when}", distance))
+        x, y = _pixel(page, "2024-05-01T00:00:10", 20)
+        page.click(x + 4, y - 4)  # close to where it began
+        assert page.js("S.draft") is None
+        page.settle()
+        saved = _saved(viewer_settings)
+        assert saved.features["geometry"].tolist() == ["polygon"]
+        assert saved.annotations["distance"].round().tolist() == [20, 20, 60]
+
+        page.js("setMode('path')")
+        x, y = _pixel(page, "2024-05-01T00:00:20", 60)
+        page.click(x + 5, y + 3)  # near a corner of the polygon
+        corner = page.js("activeSet().feats[0].pts[2].slice(0, 2)")
+        assert page.js("S.draft.pts[0].slice(0, 2)") == corner
+        page.click(x + 60, y + 30)  # near nothing: where it was clicked
+        assert page.js("S.draft.pts.length") == 2
+        assert page.js("S.draft.pts[1][1]") < corner[1]  # lower on the page
+
     def test_vertices_are_added_and_removed(self, page, viewer_settings):
         """A double-click on a side adds a vertex; Delete over one removes it."""
         _new_set(page)

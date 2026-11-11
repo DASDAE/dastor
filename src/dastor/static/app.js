@@ -988,6 +988,20 @@ function deleteSelected() {
   if (ids.size) setPicked([]);
 }
 function minPoints(kind) { return kind === "polygon" ? 3 : kind === "path" ? 2 : 1; }
+// Where the next point of the shape being drawn would snap to: a vertex within reach, of the
+// shape itself or of an annotation on show. The first corner of a polygon closes it.
+const SNAP = 9;
+function snapTarget(p) {
+  const d = S.draft; if (!d || !p) return null;
+  const near = (q) => Math.hypot(p.x - x2px(q[0]), p.y - y2px(q[1]));
+  if (d.kind === "polygon" && d.pts.length >= 3 && near(d.pts[0]) < SNAP) return { pt: d.pts[0], close: true };
+  let best = null, reach = SNAP;
+  for (const s of S.sets) {
+    if (!s.visible || !s.feats) continue;
+    for (const f of s.feats) for (const q of f.pts || []) { const r = near(q); if (r < reach) { reach = r; best = q; } }
+  }
+  return best && { pt: [best[0], best[1]], close: false };
+}
 function finishDraft() {
   const d = S.draft; S.draft = null;
   if (d && d.pts.length >= minPoints(d.kind)) addFeature({ id: newId(), kind: d.kind, cols: {}, pts: d.pts }, true);
@@ -1106,9 +1120,14 @@ function drawAnnotations(P) {
   }
   if (S.draft) {
     ctx.strokeStyle = "#fff"; ctx.fillStyle = "#fff"; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
-    const pts = S.mouse ? [...S.draft.pts, [px2x(S.mouse.x), px2y(S.mouse.y)]] : S.draft.pts;
+    const snap = snapTarget(S.mouse);
+    const pts = S.mouse ? [...S.draft.pts, snap ? snap.pt : [px2x(S.mouse.x), px2y(S.mouse.y)]] : S.draft.pts;
     strokePts(pts, S.draft.kind === "polygon"); ctx.stroke(); ctx.setLineDash([]);
     ctx.strokeStyle = "#000"; for (const p of S.draft.pts) dot(p, 3.5);
+    if (snap) {  // a ring round the vertex the next click lands on
+      ctx.strokeStyle = THEME.gold; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(x2px(snap.pt[0]), y2px(snap.pt[1]), 8, 0, 2 * Math.PI); ctx.stroke();
+    }
   }
   const rubber = S.drag && (S.drag.kind === "rect" || S.drag.kind === "band") ? S.drag.box : null;
   // the download area and the selection window: light dashes over a dark line, so they read on any colour
@@ -1492,7 +1511,10 @@ function click(p, shift) {
   if (S.mode === "point") { addFeature({ id: newId(), kind: "point", cols: {}, pts: [pt] }, true); return; }
   if (S.mode === "path" || S.mode === "polygon") {
     if (!S.draft) S.draft = { kind: S.mode, pts: [] };
-    S.draft.pts.push(pt); return;
+    const snap = snapTarget(p);
+    if (snap && snap.close) finishDraft();
+    else S.draft.pts.push(snap ? snap.pt : pt);
+    return;
   }
   const crowd = hitCluster(p.x, p.y);
   if (crowd) { $("tip").style.display = "none"; zoomToCluster(crowd); return; }
@@ -1514,7 +1536,7 @@ function hitSide(px, py) {
 cv.addEventListener("dblclick", (ev) => {
   ev.preventDefault();
   if (S.draft) {
-    S.draft.pts.pop();  // the second click of the pair added the same point twice
+    if (S.draft.pts.length > 1) S.draft.pts.pop();  // the second click of the pair added the same point twice
     finishDraft();
     return;
   }
