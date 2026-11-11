@@ -459,7 +459,8 @@ class TestViewing:
         assert page.js("S.manual") is True
         raised = page.js("S.disp.vmax")
         assert raised > high and page.js("S.disp.vmin") == low
-        assert page.js("+document.getElementById('inpVmax').value") == raised
+        shown = page.js("+document.getElementById('inpVmax').value")
+        assert shown == pytest.approx(raised, rel=1e-5)
         page.drag((left, top), (left, top - 0.1 * height))
         shifted = page.js("[S.disp.vmin, S.disp.vmax]")
         assert shifted[0] < low and shifted[1] < raised

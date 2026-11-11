@@ -781,7 +781,7 @@ function renderSets() {
   $("btnNewSet").disabled = !can; $("btnLoadSet").disabled = !can;
   $("btnDeleteSet").disabled = !activeSet(); $("btnSaveSet").disabled = !activeSet(); $("btnDownloadSet").disabled = !activeSet();
   for (const b of $("tools").children) {  // with nowhere to save, the drawing tools are off, and say why
-    if (b.dataset.mode === "select") continue;
+    if (b.dataset.mode === "select" || b.dataset.mode === "pan") continue;
     b.disabled = !can; if (!can) b.title = `${b.getAttribute("aria-label")}: annotations can't be saved here`;
   }
   renderChip();
@@ -819,6 +819,7 @@ async function save() {
 }
 async function saveNow() {
   const s = activeSet(); if (!s) return;
+  await s.saving;  // one under way counts: its edits are no longer marked unsaved
   await save();
   toast(S.saveError ? `not saved: ${S.saveError}` : `saved ${setKey(s)}`);
 }
@@ -1461,8 +1462,8 @@ function dragBar(d, p) {
   else if (d.part === "min") vmin = vmax - (vmax - v) / (1 - clamp(f, 0, 0.95));
   else { vmin -= (f - d.f) * span; vmax -= (f - d.f) * span; }
   if (!(vmax > vmin)) return;
-  S.disp.vmin = +vmin.toPrecision(6); S.disp.vmax = +vmax.toPrecision(6);
-  $("inpVmin").value = S.disp.vmin; $("inpVmax").value = S.disp.vmax;
+  S.disp.vmin = vmin; S.disp.vmax = vmax;
+  $("inpVmin").value = +vmin.toPrecision(6); $("inpVmax").value = +vmax.toPrecision(6);
   S.autoPending = false; S.manual = true; S.lutVer++;
 }
 // The annotations of the visible sets a window catches: any vertex inside it, or a box overlapping it.
