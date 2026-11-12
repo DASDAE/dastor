@@ -106,6 +106,34 @@ def create_proxy(
                     return unreachable(exc)
             return {"name": out["name"], "bytes": out["bytes"]}
 
+    @app.get("/v1/session")
+    async def session():
+        """
+        Say who the server takes this app's key for.
+
+        The page does not sign in here (`sign_in` is false): the key is the
+        one this app was started with.
+        """
+        try:
+            remote = await anyio.to_thread.run_sync(
+                open_remote, "GET", "v1/session", ""
+            )
+        except OSError as exc:
+            return unreachable(exc)
+        with remote:
+            body = await anyio.to_thread.run_sync(remote.read)
+        if remote.status == 404:  # a server from before sign-in
+            return {"user": None, "sign_in": False}
+        if remote.status != 200:
+            return _relay(remote, body)
+        return {**json.loads(body), "sign_in": False}
+
+    @app.api_route("/v1/session", methods=["POST", "DELETE"])
+    def no_sign_in():
+        """Refuse to sign in: the key is the one this app was started with."""
+        detail = "dastor browse reads the server with the key in DASTOR_KEY"
+        return JSONResponse({"detail": detail}, 400)
+
     @app.get("/health")
     @app.api_route("/v1/{rest:path}", methods=["GET", "PUT", "POST", "DELETE"])
     async def passed(request: Request):

@@ -17,11 +17,12 @@ from pathlib import Path
 
 import dascore as dc
 import pytest
-from conftest import VIEW_KEY, free_port, live
+from conftest import ALICE_KEY, VIEW_KEY, free_port, live
 
 from dastor.annotations import AnnotationStore
 from dastor.app import create_app
-from dastor.config import Limits
+from dastor.auth import hash_key
+from dastor.config import Limits, Settings
 from dastor.notebook import Viewer
 
 websocket = pytest.importorskip("websocket")
@@ -271,6 +272,56 @@ def test_a_notebook_viewer_loads_with_its_token(viewer_dir, tmp_path):
         browser.close()
         viewer.close()
     assert not browser.errors
+
+
+class TestSigningIn:
+    """A server with users offers its pages a sign-in; others don't."""
+
+    def test_a_local_viewer_offers_none(self, page):
+        assert page.js("$('btnAccount').hidden")
+        assert page.js("S.session.sign_in") is False
+
+    def test_signing_in_shows_what_the_key_may_read(self, viewer_settings):
+        """Visitors see nothing, so the page asks for a key; tabs share it."""
+        if not _BROWSER:
+            pytest.skip("no Chromium or Chrome on the path")
+        config = viewer_settings.model_dump(mode="json")
+        config["annotations"]["anonymous_owner"] = None
+        config["spool"]["rules"] = [
+            {"column": "tag", "pattern": ".*", "allow": ["user:alice"]}
+        ]
+        config["users"] = [{"name": "alice", "key_sha256": hash_key(ALICE_KEY)}]
+        with live(create_app(Settings.model_validate(config))) as address:
+            browser = Browser(f"{address}/viewer/")
+            try:
+                browser.wait("window.dastorReady === true")
+                assert browser.js("S.levels.length") == 0
+                assert browser.js("$('signIn').open")
+                assert browser.js("$('btnAccount').textContent") == "Sign in"
+                submit = "$('signInForm').requestSubmit()"
+                browser.js(f"$('inpKey').value = 'wrong'; {submit}")
+                browser.wait("$('signInError').textContent.includes('unknown')")
+                browser.js(f"$('inpKey').value = '{ALICE_KEY}'; {submit}")
+                browser.wait("window.dastorReady === true && S.levels.length === 2")
+                browser.settle()
+                assert browser.js("$('btnAccount').textContent") == "alice"
+                assert browser.js("S.me") == "alice"
+                # the key is not where the page's scripts can read it
+                assert ALICE_KEY not in browser.js(
+                    "document.cookie + JSON.stringify(localStorage)"
+                )
+                states = browser.js("[...tiles.values()].map(t => t.st)")
+                assert states and set(states) == {"ok"}
+                # any page of the server reads as the same user
+                other = "fetch('../v1/session').then(r => r.json()).then(j => j.user)"
+                assert browser.js(other) == "alice"
+                browser.js("$('btnAccount').click()")
+                browser.wait("window.dastorReady === true && S.levels.length === 0")
+                assert browser.js(other) is None
+                assert browser.js("$('signIn').open")
+            finally:
+                browser.close()
+        assert not [x for x in browser.errors if "401" not in x]
 
 
 def _pixel(page, time: str, distance: float) -> tuple[float, float]:

@@ -37,7 +37,16 @@ from dastor.annotations import (
     MissingSetError,
     RevisionConflictError,
 )
-from dastor.auth import Authenticator, InvalidKeyError, Principal, TokenGate
+from dastor.auth import (
+    ANONYMOUS,
+    SECURE_SESSION_COOKIE,
+    SESSION_COOKIE,
+    Authenticator,
+    InvalidKeyError,
+    Principal,
+    Sessions,
+    TokenGate,
+)
 from dastor.catalog import Catalog, ChangedFileError, View
 from dastor.config import Settings
 from dastor.query import QueryError, selection
@@ -235,6 +244,7 @@ def create_app(
     """
     catalog = Catalog(settings, spool)
     authenticate = Authenticator(settings.users)
+    sessions = Sessions()
     loads = threading.BoundedSemaphore(settings.limits.max_concurrent_loads)
 
     @contextlib.asynccontextmanager
@@ -255,13 +265,26 @@ def create_app(
         app.add_middleware(TokenGate, token=token)
 
     def principal(
-        authorization: Annotated[str | None, Header()] = None,
+        request: Request, authorization: Annotated[str | None, Header()] = None
     ) -> Principal:
-        try:
-            return authenticate(authorization)
-        except InvalidKeyError as exc:
-            headers = {"WWW-Authenticate": "Bearer"}
-            raise HTTPException(401, str(exc), headers=headers) from None
+        """
+        Return who a request acts for: its key's user, else anonymous.
+
+        The key is in the `Authorization` header or, on a server with users,
+        it was presented once to sign a page in, and the request carries
+        that session's cookie. The header wins.
+        """
+        session_id = _session_id(request)
+        if authorization or not (session_id and settings.users):
+            try:
+                return authenticate(authorization)
+            except InvalidKeyError as exc:
+                headers = {"WWW-Authenticate": "Bearer"}
+                raise HTTPException(401, str(exc), headers=headers) from None
+        who = sessions.get(session_id)
+        if who is None:
+            raise HTTPException(401, "your sign-in has ended: sign in again")
+        return who
 
     Who = Annotated[Principal, Depends(principal)]
     TableFormat = Annotated[Literal["json", "arrow"], Query()]
@@ -315,6 +338,70 @@ def create_app(
     def health() -> dict:
         """Report that the server is up."""
         return {"status": "ok", "version": __version__}
+
+    @app.get("/v1/session")
+    def session(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> dict:
+        """
+        Say who the caller is, and whether its pages can sign in here.
+
+        `sign_in` is true on a server with users, and only there. An ended
+        sign-in is cleared rather than refused.
+        """
+        try:
+            who = principal(request, authorization)
+        except HTTPException:
+            if authorization:
+                raise
+            _forget_session(request, response)
+            who = ANONYMOUS
+        return _session(who, settings)
+
+    @app.post("/v1/session")
+    def sign_in(
+        request: Request,
+        response: Response,
+        key: Annotated[str, Body(embed=True, min_length=1)],
+    ) -> dict:
+        """
+        Sign the browser in with an API key, for every page of this server.
+
+        The key is checked and not kept: the cookie names a session of the
+        server's, so it can't be read for the key and ends on sign-out. It
+        is `HttpOnly` (the pages' scripts don't see it) and `SameSite=Strict`
+        (other websites' pages don't send it); over HTTPS it is also
+        `Secure` and `__Host-`. Only on a server with users.
+        """
+        if not settings.users:
+            raise HTTPException(404, "this server has no users to sign in as")
+        try:
+            who = authenticate(f"Bearer {key.strip()}")
+        except InvalidKeyError:
+            raise HTTPException(401, "unknown API key") from None
+        if old := _session_id(request):
+            sessions.end(old)
+        secure = request.url.scheme == "https"
+        response.set_cookie(
+            SECURE_SESSION_COOKIE if secure else SESSION_COOKIE,
+            sessions.start(who),
+            max_age=int(sessions.lifetime),
+            httponly=True,
+            samesite="strict",
+            secure=secure,
+            # `__Host-` cookies must cover the whole host.
+            path="/" if secure else _api_path(request),
+        )
+        return _session(who, settings)
+
+    @app.delete("/v1/session", status_code=204)
+    def sign_out(request: Request, response: Response) -> None:
+        """End the browser's sign-in, for every page of this server."""
+        if session_id := _session_id(request):
+            sessions.end(session_id)
+        _forget_session(request, response)
 
     @app.get("/v1/summary")
     def summary(request: Request, who: Who) -> dict:
@@ -682,6 +769,33 @@ def create_app(
 
     app.mount("/viewer", StaticFiles(directory=_STATIC, html=True), name="viewer")
     return app
+
+
+def _session(who: Principal, settings: Settings) -> dict:
+    """Return who a caller is, as `/v1/session` gives it."""
+    return {
+        "user": who.name if who.authenticated else None,
+        "sign_in": bool(settings.users),
+    }
+
+
+def _session_id(request: Request) -> str | None:
+    """Return the session id a request's cookie names, if any."""
+    cookies = request.cookies
+    return cookies.get(SECURE_SESSION_COOKIE) or cookies.get(SESSION_COOKIE)
+
+
+def _api_path(request: Request) -> str:
+    """Return the path of the API, under which a plain session cookie is sent."""
+    # The API is `<root>/v1/...` however the server is mounted.
+    path = request.url.path
+    return path[: path.rindex("/v1/") + len("/v1")]
+
+
+def _forget_session(request: Request, response: Response) -> None:
+    """Tell the browser to drop its session cookie."""
+    response.delete_cookie(SESSION_COOKIE, path=_api_path(request))
+    response.delete_cookie(SECURE_SESSION_COOKIE, path="/", secure=True)
 
 
 @contextlib.contextmanager

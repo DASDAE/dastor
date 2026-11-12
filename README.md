@@ -60,7 +60,7 @@ dastor includes a viewer for looking at data in the browser, annotating it and c
 $ dastor browse /data/das
 ```
 
-This serves the directory on `127.0.0.1`, opens the viewer, and keeps annotations beside the data in `/data/das_annotations` (`--annotations` puts them elsewhere). A server started with `dastor serve` has the same viewer at `/viewer/`. The viewer has no sign-in yet, so on a server with users it shows only what anonymous requests may read, and saves annotations only if the config names an `anonymous_owner`; use it on a trusted network.
+This serves the directory on `127.0.0.1`, opens the viewer, and keeps annotations beside the data in `/data/das_annotations` (`--annotations` puts them elsewhere). A server started with `dastor serve` has the same viewer at `/viewer/`. On a server with users the viewer offers a sign-in (and asks for one when visitors may read nothing): the API key is checked once and not kept, and the browser holds a session for the server's pages instead, until it signs out, for 12 hours, or until the server restarts. Without users there is nothing to sign in as, so `dastor browse` and `dastor.view` show no sign-in.
 
 The same command opens the viewer on another dastor server, and `--data-dir` names a local data directory to copy selected data into:
 
@@ -98,12 +98,16 @@ It serves the spool from a thread of the notebook's process on `127.0.0.1`. As w
 
 ## Access control
 
-Access is per file. A file is visible to a user only when every patch in it matches a rule granting that user; a file is never partly served. With no rules, nothing is visible. Requests authenticate with `Authorization: Bearer <key>`; requests without the header are anonymous.
+Access is per file. A file is visible to a user only when every patch in it matches a rule granting that user; a file is never partly served. With no rules, nothing is visible. Requests authenticate with `Authorization: Bearer <key>`, or, from the server's pages, with the session cookie that signing in sets; requests with neither are anonymous.
+
+The session cookie is `HttpOnly` and `SameSite=Strict`, and over HTTPS also `Secure` with the `__Host-` prefix. A browser keeps cookies apart by host, not by port, so over plain HTTP a session is also sent to any other server on the same host; serve a server with users over HTTPS, on a host name of its own.
 
 ## API
 
 | Endpoint | Returns |
 |---|---|
+| `GET /v1/session` | Who the caller is (`user`, null for visitors) and whether its pages can sign in here (`sign_in`: on a server with users). |
+| `POST`, `DELETE /v1/session` | Sign the browser in with `{"key": <key>}`, setting a session cookie for the server's pages, and out again. |
 | `GET /v1/summary` | Patch and file counts, an estimate of the array bytes, the contents columns, the dims and each dim's extent. |
 | `GET /v1/contents` | Patch metadata (JSON, or `format=arrow`). |
 | `GET /v1/coverage?dim=time` | The spans of a dimension the patches cover. |
