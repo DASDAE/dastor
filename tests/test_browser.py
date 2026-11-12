@@ -9,18 +9,15 @@ import base64
 import json
 import os
 import shutil
-import socket
 import subprocess
 import tempfile
-import threading
 import time
 import urllib.request
 from pathlib import Path
 
 import dascore as dc
 import pytest
-import uvicorn
-from conftest import VIEW_KEY
+from conftest import VIEW_KEY, free_port, live
 
 from dastor.annotations import AnnotationStore
 from dastor.app import create_app
@@ -33,13 +30,6 @@ pytestmark = pytest.mark.browser
 _BROWSER = shutil.which("chromium") or shutil.which("google-chrome")
 
 
-def _free_port() -> int:
-    """Return a port nothing is listening on."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
 class Browser:
     """One headless page, with the mouse, the keyboard and a JS console."""
 
@@ -48,7 +38,7 @@ class Browser:
         snap = "snap" in os.path.realpath(_BROWSER)
         base = Path.home() / "snap/chromium/common" if snap else None
         self.profile = tempfile.mkdtemp(prefix="dastor-test-", dir=base)
-        port = _free_port()
+        port = free_port()
         command = [
             _BROWSER,
             "--headless=new",
@@ -221,18 +211,8 @@ class Browser:
 @pytest.fixture
 def served(viewer_settings):
     """The address of a real server on the viewer's directory."""
-    port = _free_port()
-    config = uvicorn.Config(create_app(viewer_settings), port=port, log_level="error")
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    end = time.time() + 60
-    while not server.started:
-        assert thread.is_alive() and time.time() < end, "the server did not start"
-        time.sleep(0.05)
-    yield f"http://127.0.0.1:{port}"
-    server.should_exit = True
-    thread.join(timeout=10)
+    with live(create_app(viewer_settings)) as address:
+        yield address
 
 
 @pytest.fixture
@@ -898,3 +878,26 @@ class TestCrowding:
         page.js("document.getElementById('btnAreaClear').click()")
         assert page.js("S.area") is None
         assert page.js("document.getElementById('lnkArea')") is None
+
+
+class TestSync:
+    """With a local data directory, Sync copies the chosen area into it."""
+
+    @pytest.fixture
+    def served(self, viewer_settings, tmp_path):
+        """A server which syncs into a data directory, as `--data-dir` gives."""
+        with live(create_app(viewer_settings, tmp_path / "mine")) as address:
+            yield address
+
+    def test_sync_writes_the_area(self, page, tmp_path):
+        """The button is live, and its file is the area of the ticked product."""
+        page.js("document.getElementById('btnAreaWindow').click()")
+        page.wait("document.getElementById('lnkArea') !== null")
+        assert page.js("document.getElementById('btnSync').disabled") is False
+        page.js("document.getElementById('btnSync').click()")
+        page.wait("document.getElementById('toast').textContent.startsWith('synced')")
+        (path,) = (tmp_path / "mine").iterdir()
+        assert path.name in page.js("document.getElementById('toast').textContent")
+        tags = {patch.attrs.tag for patch in dc.spool(path)}
+        assert tags == {"raw"}
+        assert page.js("document.getElementById('btnSync').textContent") == "Sync"

@@ -41,6 +41,7 @@ from dastor.auth import Authenticator, InvalidKeyError, Principal
 from dastor.catalog import Catalog, ChangedFileError, View
 from dastor.config import Settings
 from dastor.query import QueryError, selection
+from dastor.sync import SyncNameError, check_name, synced_file
 from dastor.tiles import (
     Stat,
     decode_product,
@@ -215,8 +216,14 @@ async def _refresh_forever(catalog: Catalog, seconds: float) -> None:
             log.exception("refreshing failed; still serving the last index")
 
 
-def create_app(settings: Settings) -> FastAPI:
-    """Return the dastor app for a configuration."""
+def create_app(settings: Settings, sync_dir: FilePath | None = None) -> FastAPI:
+    """
+    Return the dastor app for a configuration.
+
+    `sync_dir` is a local data directory which `/v1/sync` copies selected
+    data into. It is for `dastor browse`, where the server and its one user
+    share a machine: no configuration file can set it.
+    """
     catalog = Catalog(settings)
     authenticate = Authenticator(settings.users)
     loads = threading.BoundedSemaphore(settings.limits.max_concurrent_loads)
@@ -366,6 +373,35 @@ def create_app(settings: Settings) -> FastAPI:
         with _load_errors():
             return _dasdae_response(list(patches), loads)
 
+    if sync_dir is not None:
+
+        @app.post("/v1/sync")
+        def sync(request: Request, who: Who, name: str | None = None) -> dict:
+            """
+            Write the matching patches into the local data directory.
+
+            They are trimmed to the query and written as one DASDAE file.
+            The query is that of `/v1/data`; `name` names the file (less its
+            suffix), with a number added if the name is taken. Returns the
+            file's `name` and `bytes` (`name` is null if nothing matched).
+            """
+            try:
+                name = check_name(name)
+            except SyncNameError as exc:
+                raise QueryError(str(exc)) from exc
+            reserved = _RESERVED | {"name"}
+            view, spool = selected_with_view(request, who, reserved)
+            if not len(spool):
+                return {"name": None, "bytes": 0}
+            limit = settings.limits.max_request_bytes
+            if (size := estimated_bytes(spool.get_contents())) > limit:
+                msg = f"request would copy about {size} bytes; the limit is {limit}"
+                raise HTTPException(413, msg)
+            with _load_errors(), loads, synced_file(sync_dir, name) as out:
+                patches = list(_checked_patches(view, spool, limit))
+                dc.write(dc.spool(patches), out["path"], "DASDAE")
+            return {"name": out["name"], "bytes": out["bytes"]}
+
     @app.get("/v1/index")
     def index(who: Who):
         """
@@ -426,7 +462,7 @@ def create_app(settings: Settings) -> FastAPI:
         limits = settings.limits
         return {
             "products": list_products(contents),
-            "sync": False,
+            "sync": sync_dir is not None,
             "limits": {
                 "max_tile_bytes": limits.max_tile_bytes,
                 "max_view_bytes": limits.max_view_bytes,
