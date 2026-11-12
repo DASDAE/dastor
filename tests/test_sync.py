@@ -118,6 +118,18 @@ class TestLocalSync:
             (tmp_path / "mine").iterdir()
         )
 
+    def test_another_website_cannot_sync(self, local, proxied, tmp_path):
+        """A post a page elsewhere made the browser send is refused."""
+        for client in (local, proxied):
+            elsewhere = {"Origin": "https://evil.example"}
+            assert client.post("/v1/sync", headers=elsewhere).status_code == 403
+            own = {"Origin": "http://testserver"}
+            params = {"time_min": "2030-01-01T00:00:00"}
+            assert (
+                client.post("/v1/sync", headers=own, params=params).status_code == 200
+            )
+        assert not (tmp_path / "mine").exists()
+
     def test_data_dir_may_not_be_inside_the_data(self, tmp_path):
         with pytest.raises(SystemExit, match="inside"):
             sync_directory(str(tmp_path / "sub"), tmp_path)

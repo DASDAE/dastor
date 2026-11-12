@@ -41,7 +41,7 @@ from dastor.auth import Authenticator, InvalidKeyError, Principal
 from dastor.catalog import Catalog, ChangedFileError, View
 from dastor.config import Settings
 from dastor.query import QueryError, selection
-from dastor.sync import SyncNameError, check_name, synced_file
+from dastor.sync import SyncNameError, check_name, from_elsewhere, synced_file
 from dastor.tiles import (
     Stat,
     decode_product,
@@ -385,6 +385,8 @@ def create_app(settings: Settings, sync_dir: FilePath | None = None) -> FastAPI:
             suffix), with a number added if the name is taken. Returns the
             file's `name` and `bytes` (`name` is null if nothing matched).
             """
+            if from_elsewhere(request.headers):
+                raise HTTPException(403, "sync is for the viewer's own page")
             try:
                 name = check_name(name)
             except SyncNameError as exc:

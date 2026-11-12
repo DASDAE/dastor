@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import urllib.parse
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -25,6 +26,20 @@ def check_name(name: str | None) -> str:
         msg = f"{name!r} is not a file name: use letters, digits and _ . -"
         raise SyncNameError(msg)
     return name
+
+
+def from_elsewhere(headers) -> bool:
+    """
+    Return True for a request another website made the browser send.
+
+    A page anywhere can make a browser post to a local port. One which says
+    where it came from (`Origin`) and is not the viewer's own page is
+    refused, so only the viewer and programs (which send no `Origin`) sync.
+    """
+    origin = headers.get("origin")
+    if origin is None:
+        return False
+    return urllib.parse.urlsplit(origin).netloc != headers.get("host")
 
 
 @contextlib.contextmanager

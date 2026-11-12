@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from dastor import __version__
-from dastor.sync import SyncNameError, check_name, synced_file
+from dastor.sync import SyncNameError, check_name, from_elsewhere, synced_file
 
 _STATIC = FilePath(__file__).parent / "static"
 # Headers of the server's answer which are passed on to the page.
@@ -66,6 +66,9 @@ def create_proxy(
             It is one DASDAE file, as the server's `/v1/data` gives. Returns
             the file's `name` and `bytes` (`name` is null if nothing matched).
             """
+            if from_elsewhere(request.headers):
+                detail = {"detail": "sync is for the viewer's own page"}
+                return JSONResponse(detail, 403)
             try:
                 name = check_name(name)
             except SyncNameError as exc:
