@@ -6,6 +6,11 @@
 
 // ------------------------------------------------------------------ constants
 const API = "../v1";
+// A viewer served from a notebook has a token in its address, which every
+// request must carry: as a header, or in the address of a link.
+const TOKEN = new URLSearchParams(location.search).get("token");
+const AUTH = TOKEN ? { Authorization: `token ${TOKEN}` } : {};
+function withToken(url) { return TOKEN ? `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(TOKEN)}` : url; }
 const TILE = 256;
 const M = { l: 80, r: 78, t: 8, b: 66 };  // plot margins (CSS px): the colour bar on the right, the overview strip below
 const BAR = { gap: 12, w: 14 };            // the colour bar, right of the plot
@@ -89,7 +94,7 @@ function toast(msg, ms = Math.max(2500, 60 * String(msg).length)) {  // long eno
 // a list as a value repeats its key
 function query(o) { return Object.entries(o).flatMap(([k, v]) => [].concat(v).map((x) => `${encodeURIComponent(k)}=${encodeURIComponent(x)}`)).join("&"); }
 async function api(path, opt) {
-  const r = await fetch(API + path, opt);
+  const r = await fetch(API + path, { ...opt, headers: { ...AUTH, ...(opt && opt.headers) } });
   if (r.status === 204) return null;
   const j = await r.json().catch(() => ({}));
   if (!r.ok) { const e = new Error(typeof j.detail === "string" ? j.detail : `HTTP ${r.status}`); e.status = r.status; e.body = j; throw e; }
@@ -393,7 +398,7 @@ function pump() {
       [`${S.y}_min`]: r.iy * ty, [`${S.y}_max`]: (r.iy + 1) * ty,
     });
     tile.ctrl = new AbortController();
-    fetch(url, { signal: tile.ctrl.signal }).then(async (resp) => {
+    fetch(url, { signal: tile.ctrl.signal, headers: AUTH }).then(async (resp) => {
       if (resp.status === 204) { tile.st = "empty"; return; }
       if (resp.status === 413) { tile.st = "empty"; S.refused = tile.pid; return; }  // more than the estimate
       if (!resp.ok) { tile.st = "error"; tile.err = await resp.text(); return; }
@@ -948,7 +953,7 @@ async function saveSetFile() {
   const s = activeSet(); if (!s) return;
   await save();  // what is on disk is what is on screen
   const link = document.createElement("a");
-  link.href = `${API}/annotations/${s.owner}/${s.name}/export`; link.download = `${s.name}.zip`;
+  link.href = withToken(`${API}/annotations/${s.owner}/${s.name}/export`); link.download = `${s.name}.zip`;
   document.body.appendChild(link); link.click(); link.remove();
 }
 // "delete set" asks once more on the button itself, for a few seconds.
@@ -1371,7 +1376,7 @@ async function renderArea() {
     const big = sum.bytes > BIG_DOWNLOAD;
     renderArea.sync = sum.patches ? { q, file } : null;  // what Sync would copy
     $("areaSize").innerHTML = sum.patches
-      ? `<a id="lnkArea" class="btn ${big ? "big" : ""}" href="${API}/data?${query({ ...q, format: "dasdae" })}" download="${esc(file)}.h5" title="${big ? "a large download" : "as a DASDAE file"}">Download ${fmtBytes(sum.bytes)}</a>`
+      ? `<a id="lnkArea" class="btn ${big ? "big" : ""}" href="${withToken(`${API}/data?${query({ ...q, format: "dasdae" })}`)}" download="${esc(file)}.h5" title="${big ? "a large download" : "as a DASDAE file"}">Download ${fmtBytes(sum.bytes)}</a>`
       : "no data in this area";
   } catch (e) { if (stamp === renderArea.stamp) $("areaSize").textContent = e.message; }
 }

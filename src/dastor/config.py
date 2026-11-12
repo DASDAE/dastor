@@ -79,7 +79,8 @@ class SpoolConfig(_Model):
     Parameters
     ----------
     path
-        The data directory, indexed recursively.
+        The data directory, indexed recursively. None only when the app is
+        handed a spool instead (see `dastor.view`).
     index
         Where the directory's DASCore index lives, when not in the
         directory itself (e.g. a read-only data mount).
@@ -90,7 +91,7 @@ class SpoolConfig(_Model):
         How often to re-index the directory; None to index only at start.
     """
 
-    path: Path
+    path: Path | None = None
     index: Path | None = None
     rules: list[Rule] = []
     refresh_seconds: float | None = Field(default=None, gt=0)

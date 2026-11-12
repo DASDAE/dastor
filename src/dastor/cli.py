@@ -15,6 +15,15 @@ from pathlib import Path
 
 from dastor.auth import hash_key, new_key
 
+# The rule under which everything in the spool is readable.
+OPEN_RULE = {"column": "source_path", "pattern": "", "allow": ["*"]}
+
+
+def local_owner() -> str:
+    """Return the system user's name as the owner of annotation sets."""
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", getpass.getuser()).lstrip("_.-")
+    return name[:64] or "me"
+
 
 def browse_settings(path: str, annotations: str | None = None) -> dict:
     """
@@ -29,14 +38,13 @@ def browse_settings(path: str, annotations: str | None = None) -> dict:
         raise SystemExit(f"{data} is not a directory")
     # A drive's root has no name to put a folder beside.
     store = annotations or data.parent / f"{data.name or 'das'}_annotations"
-    owner = re.sub(r"[^A-Za-z0-9_.-]", "_", getpass.getuser()).lstrip("_.-") or "me"
     return {
         "spool": {
             "path": str(data),
-            "rules": [{"column": "source_path", "pattern": "", "allow": ["*"]}],
+            "rules": [OPEN_RULE],
             "refresh_seconds": 300,
         },
-        "annotations": {"path": str(store), "anonymous_owner": owner},
+        "annotations": {"path": str(store), "anonymous_owner": local_owner()},
     }
 
 
@@ -131,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
             config = browse_settings(args.path, args.annotations)
             source = Path(config["spool"]["path"])
             sync_dir = sync_directory(args.data_dir, source)
-            app = create_app(Settings.model_validate(config), sync_dir)
+            app = create_app(Settings.model_validate(config), sync_dir=sync_dir)
         if args.command == "browse":
             url = f"http://{args.host}:{args.port}/viewer/"
             print(f"viewer: {url}")

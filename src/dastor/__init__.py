@@ -4,4 +4,13 @@ __version__ = "0.0.1"
 
 from dastor.client import Client
 
-__all__ = ["Client"]
+
+def view(*args, **kwargs):
+    """Show a spool, patch or directory in the viewer; see `dastor.notebook.view`."""
+    # Imported here: the client alone needs none of the server.
+    from dastor.notebook import view  # noqa: PLC0415
+
+    return view(*args, **kwargs)
+
+
+__all__ = ["Client", "view"]

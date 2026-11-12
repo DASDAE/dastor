@@ -37,7 +37,7 @@ from dastor.annotations import (
     MissingSetError,
     RevisionConflictError,
 )
-from dastor.auth import Authenticator, InvalidKeyError, Principal
+from dastor.auth import Authenticator, InvalidKeyError, Principal, TokenGate
 from dastor.catalog import Catalog, ChangedFileError, View
 from dastor.config import Settings
 from dastor.query import QueryError, selection
@@ -216,15 +216,24 @@ async def _refresh_forever(catalog: Catalog, seconds: float) -> None:
             log.exception("refreshing failed; still serving the last index")
 
 
-def create_app(settings: Settings, sync_dir: FilePath | None = None) -> FastAPI:
+def create_app(
+    settings: Settings,
+    *,
+    spool: dc.BaseSpool | None = None,
+    token: str | None = None,
+    sync_dir: FilePath | None = None,
+) -> FastAPI:
     """
     Return the dastor app for a configuration.
 
-    `sync_dir` is a local data directory which `/v1/sync` copies selected
-    data into. It is for `dastor browse`, where the server and its one user
-    share a machine: no configuration file can set it.
+    `spool` is served in place of the configured directory's, and with a
+    `token` the API answers only requests which carry it (see `TokenGate`).
+    Both are for `dastor.view`. `sync_dir` is a local data directory which
+    `/v1/sync` copies selected data into; it is for `dastor browse`, where the
+    server and its one user share a machine. No configuration file can set
+    any of them.
     """
-    catalog = Catalog(settings)
+    catalog = Catalog(settings, spool)
     authenticate = Authenticator(settings.users)
     loads = threading.BoundedSemaphore(settings.limits.max_concurrent_loads)
 
@@ -242,6 +251,8 @@ def create_app(settings: Settings, sync_dir: FilePath | None = None) -> FastAPI:
     # A request with a key can't be forged by a page elsewhere, but one acting
     # for `anonymous_owner`, or syncing, can: those from other pages are refused.
     app.middleware("http")(refuse_elsewhere)
+    if token:
+        app.add_middleware(TokenGate, token=token)
 
     def principal(
         authorization: Annotated[str | None, Header()] = None,

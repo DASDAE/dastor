@@ -78,10 +78,18 @@ class View:
 
 
 class Catalog:
-    """Open the configured spool and hand out access-controlled views."""
+    """
+    Open the served spool and hand out access-controlled views.
 
-    def __init__(self, settings: Settings):
+    The spool is the configured directory's unless one is given, as
+    `dastor.view` does with a spool which may hold patches in memory.
+    """
+
+    def __init__(self, settings: Settings, spool: dc.BaseSpool | None = None):
         self.config = settings.spool
+        if spool is None and self.config.path is None:
+            raise ValueError("the config names no spool path")
+        self._source = spool
         self._rules = tuple(self.config.rules)
         self._spool: dc.BaseSpool | None = None
         self._seen: dict[Principal, tuple[frozenset[str], frozenset[str]]] = {}
@@ -89,12 +97,16 @@ class Catalog:
 
     def refresh(self) -> None:
         """
-        Index the spool's directory and forget what it last made visible.
+        Index the directory again, if one is served, and forget what was visible.
 
         Refuses rules naming columns the contents lack.
         """
         cfg = self.config
-        spool = dc.spool(cfg.path, index=cfg.index).update()
+        # A spool handed in is served as it is: it may be a selection or
+        # another server's, which can't be indexed again.
+        spool = self._source
+        if spool is None:
+            spool = dc.spool(cfg.path, index=cfg.index).update()
         contents = spool.get_contents()
         if len(contents) and (missing := missing_columns(contents, self._rules)):
             raise ValueError(f"rules name columns the contents lack: {missing}")

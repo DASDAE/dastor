@@ -29,7 +29,7 @@ def _products(client) -> dict:
 @pytest.fixture
 def local(viewer_settings, tmp_path):
     """A client on the viewer's directory which syncs into a data directory."""
-    with TestClient(create_app(viewer_settings, tmp_path / "mine")) as out:
+    with TestClient(create_app(viewer_settings, sync_dir=tmp_path / "mine")) as out:
         yield out
 
 
