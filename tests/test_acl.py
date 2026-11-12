@@ -1,7 +1,13 @@
 import dascore as dc
 import pandas as pd
 
-from dastor.acl import matching_rows, missing_columns, patch_matches, visible_files
+from dastor.acl import (
+    matching_rows,
+    missing_columns,
+    patch_matches,
+    visible_files,
+    whole_acquisitions,
+)
 from dastor.auth import ANONYMOUS, Principal
 from dastor.config import Rule
 
@@ -58,3 +64,21 @@ def test_patch_attrs_override_indexed_row():
     patch = dc.get_example_patch()
     assert patch_matches(patch.update_attrs(tag="public"), row, RULES, ANONYMOUS)
     assert not patch_matches(patch.update_attrs(tag="secret"), row, RULES, ANONYMOUS)
+
+
+def test_whole_acquisitions():
+    """An acquisition counts only when every file of it is visible."""
+    contents = pd.DataFrame(
+        {
+            "source_path": ["a.h5", "b.h5", "c.h5", "d.h5"],
+            "acquisition_key": ["N.ONE..A", "N.ONE..A", "N.TWO..A", None],
+        }
+    )
+    seen = frozenset({"a.h5", "c.h5", "d.h5"})
+    assert whole_acquisitions(contents, seen) == {"N.TWO..A", ""}
+    assert whole_acquisitions(contents, frozenset()) == frozenset()
+    assert whole_acquisitions(contents.iloc[:0], seen) == frozenset()
+    # files naming no acquisition share the key ""
+    keyless = contents.drop(columns="acquisition_key")
+    assert whole_acquisitions(keyless, seen) == frozenset()
+    assert whole_acquisitions(keyless, seen | {"b.h5"}) == {""}

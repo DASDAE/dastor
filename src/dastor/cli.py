@@ -3,9 +3,57 @@
 from __future__ import annotations
 
 import argparse
+import getpass
+import re
+import socket
 import sys
+import threading
+import time
+import webbrowser
+from pathlib import Path
 
 from dastor.auth import hash_key, new_key
+
+
+def browse_settings(path: str, annotations: str | None = None) -> dict:
+    """
+    Return the configuration `dastor browse` serves a directory with.
+
+    Everything in the directory is readable, and annotation sets are kept
+    beside it (in `<directory>_annotations` unless a place is given) under
+    the system user's name.
+    """
+    data = Path(path).expanduser().resolve()
+    if not data.is_dir():
+        raise SystemExit(f"{data} is not a directory")
+    # A drive's root has no name to put a folder beside.
+    store = annotations or data.parent / f"{data.name or 'das'}_annotations"
+    owner = re.sub(r"[^A-Za-z0-9_.-]", "_", getpass.getuser()).lstrip("_.-") or "me"
+    return {
+        "spool": {
+            "path": str(data),
+            "rules": [{"column": "source_path", "pattern": "", "allow": ["*"]}],
+            "refresh_seconds": 300,
+        },
+        "annotations": {"path": str(store), "anonymous_owner": owner},
+    }
+
+
+def _open_when_up(host: str, port: int, url: str) -> None:
+    """
+    Open a browser at `url` once the server answers on its port.
+
+    The server listens only after it has indexed the directory, which can
+    take minutes the first time, so a fixed delay would open a dead page.
+    """
+    while True:
+        try:
+            socket.create_connection((host, port), timeout=1).close()
+        except OSError:
+            time.sleep(0.3)
+        else:
+            webbrowser.open(url)
+            return
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -16,6 +64,14 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("config", help="path to the YAML config")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
+    browse = commands.add_parser(
+        "browse", help="open the viewer on a directory of DAS files"
+    )
+    browse.add_argument("path", help="the directory of DAS files")
+    browse.add_argument("--annotations", help="where annotation sets are kept")
+    browse.add_argument("--host", default="127.0.0.1")
+    browse.add_argument("--port", type=int, default=8000)
+    browse.add_argument("--no-open", action="store_true", help="don't open a browser")
     commands.add_parser("new-key", help="print a new API key and its digest")
     commands.add_parser("hash-key", help="print the digest of a key read from stdin")
     args = parser.parse_args(argv)
@@ -31,9 +87,19 @@ def main(argv: list[str] | None = None) -> int:
         from dastor.app import create_app  # noqa: PLC0415
         from dastor.config import Settings  # noqa: PLC0415
 
+        if args.command == "browse":
+            config = browse_settings(args.path, args.annotations)
+            settings = Settings.model_validate(config)
+            url = f"http://{args.host}:{args.port}/viewer/"
+            print(f"viewer: {url}")
+            if not args.no_open:
+                # A daemon: it ends with the command if the server never starts.
+                waiter = (args.host, args.port, url)
+                threading.Thread(target=_open_when_up, args=waiter, daemon=True).start()
+        else:
+            settings = Settings.from_yaml(args.config)
         # One process: each would otherwise index and refresh the spool itself.
-        app = create_app(Settings.from_yaml(args.config))
-        uvicorn.run(app, host=args.host, port=args.port)
+        uvicorn.run(create_app(settings), host=args.host, port=args.port)
     return 0
 
 

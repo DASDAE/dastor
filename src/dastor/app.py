@@ -2,11 +2,13 @@
 
 import asyncio
 import contextlib
+import gzip
 import logging
 import os
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from pathlib import Path as FilePath
 from typing import Annotated, Literal
 
 import anyio
@@ -15,20 +17,49 @@ import dascore.exceptions as dce
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
+from fastapi import (
+    Body,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+)
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from dastor import __version__
+from dastor.annotations import (
+    AnnotationError,
+    AnnotationStore,
+    MissingSetError,
+    RevisionConflictError,
+)
 from dastor.auth import Authenticator, InvalidKeyError, Principal
 from dastor.catalog import Catalog, ChangedFileError, View
 from dastor.config import Settings
 from dastor.query import QueryError, selection
+from dastor.tiles import (
+    Stat,
+    decode_product,
+    encode_tile,
+    list_products,
+    product_axes,
+    product_rows,
+    render_tile,
+    tile_range,
+)
 from dastor.wire import FRAMED_MEDIA_TYPE, PATCH_MEDIA_TYPE, encode_patch, frame
 
 log = logging.getLogger(__name__)
 
 # Query parameters the endpoints use themselves rather than select on.
-_RESERVED = frozenset({"format", "dim"})
+_RESERVED = frozenset({"format", "dim", "product"})
+
+# The viewer's page, scripts and styles.
+_STATIC = FilePath(__file__).parent / "static"
 
 # DASCore errors that mean the request asked for something invalid.
 _CLIENT_ERRORS = (
@@ -42,6 +73,22 @@ _CLIENT_ERRORS = (
 )
 
 
+def _numbers(column: pd.Series) -> np.ndarray:
+    """Return a contents column as floats (times in ns), NaN where it has none."""
+    if column.dtype.kind in "Mm":
+        return np.where(column.isna(), np.nan, column.astype("int64").astype(float))
+    if column.dtype.kind in "iufb":
+        return column.to_numpy(dtype=float, na_value=np.nan)
+    # Mixed columns (dims which are times in some files, numbers in others)
+    out = np.full(len(column), np.nan)
+    for number, value in enumerate(column):
+        if isinstance(value, pd.Timestamp | pd.Timedelta):
+            out[number] = value.value
+        elif isinstance(value, int | float | np.number) and not pd.isna(value):
+            out[number] = float(value)
+    return out
+
+
 def estimated_bytes(contents: pd.DataFrame) -> int:
     """
     Estimate the array bytes the rows of a selected spool hold.
@@ -51,22 +98,31 @@ def estimated_bytes(contents: pd.DataFrame) -> int:
     trimmed row may lack. The estimate rejects requests before any loading;
     the limit is enforced again on the patches as they load.
     """
-    total = 0
-    for row in contents.to_dict("records"):
-        count = 1
-        for dim in str(row.get("dims", "")).split(","):
-            low, high = row.get(f"{dim}_min"), row.get(f"{dim}_max")
-            step = row.get(f"{dim}_step")
-            try:
-                samples = round((high - low) / step) + 1
-            except TypeError, ValueError, ZeroDivisionError, OverflowError:
-                samples = None
-            if samples is None or samples < 1:
-                count = row.get("data_size") or 0
+    if contents.empty:
+        return 0
+    count = np.ones(len(contents))
+    counted = np.ones(len(contents), dtype=bool)
+    dims = contents["dims"].astype("string").fillna("").astype(str)
+    for names, rows in dims.groupby(dims.to_numpy(), sort=False).indices.items():
+        for dim in names.split(","):
+            columns = [f"{dim}_min", f"{dim}_max", f"{dim}_step"]
+            if not set(columns) <= set(contents.columns):
+                counted[rows] = False
                 break
-            count *= samples
-        total += int(count) * np.dtype(row.get("dtype") or "float64").itemsize
-    return total
+            low, high, step = (_numbers(contents[x].iloc[rows]) for x in columns)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                samples = np.round((high - low) / step) + 1
+            usable = np.isfinite(samples) & (samples >= 1)
+            count[rows] *= np.where(usable, samples, 1)
+            counted[rows] &= usable
+    if not counted.all():
+        stored = contents.get("data_size", pd.Series(0, index=contents.index))
+        stored = pd.to_numeric(stored, errors="coerce").fillna(0).to_numpy(dtype=float)
+        count = np.where(counted, count, stored)
+    kinds = contents.get("dtype", pd.Series("float64", index=contents.index))
+    kinds = kinds.astype("string").fillna("").astype(str)
+    sizes = {x: np.dtype(x or "float64").itemsize for x in kinds.unique()}
+    return int((count * kinds.map(sizes).to_numpy(dtype=float)).sum())
 
 
 def _json_frame(df: pd.DataFrame) -> Response:
@@ -142,6 +198,7 @@ def summarize(df: pd.DataFrame) -> dict:
     return {
         "patches": len(df),
         "files": int(df["source_path"].nunique()) if len(df) else 0,
+        "bytes": estimated_bytes(df),
         "columns": list(df.columns),
         "dims": [x.split(",") for x in dims],
         "extents": extents,
@@ -191,14 +248,36 @@ def create_app(settings: Settings) -> FastAPI:
     def selected_with_view(
         request, who, reserved=_RESERVED, **extra
     ) -> tuple[View, dc.BaseSpool]:
-        """Return a principal's view and its patches matching the query."""
+        """
+        Return a principal's view and its patches matching the query.
+
+        `product=<id>` (from `/v1/viewer/products`) keeps one product, and
+        may be given more than once to keep several. The attributes they
+        share go into the selection, so the index narrows before any rows
+        are read; dims, steps and the other attributes are matched on what
+        is left.
+        """
         kwargs = selection(request.query_params.multi_items(), reserved)
+        wanted = [decode_product(p) for p in request.query_params.getlist("product")]
+        first = wanted[0]["attrs"] if wanted else {}
+        shared = {
+            k: v
+            for k, v in first.items()
+            if all(w["attrs"].get(k) == v for w in wanted)
+        }
+        kwargs.update({k: v for k, v in shared.items() if k not in kwargs})
         view = catalog.view(who)
         try:
-            return view, view.select(**kwargs, **extra)
+            spool = view.select(**kwargs, **extra)
         except (TypeError, ValueError) as exc:
             # e.g. a malformed time, or text bounding a numeric coordinate
             raise QueryError(str(exc)) from exc
+        if wanted and len(contents := spool.get_contents()):
+            keep = np.zeros(len(contents), dtype=bool)
+            for product in wanted:
+                keep |= product_rows(contents, product)
+            spool = spool[keep]
+        return view, spool
 
     def selected(request: Request, who: Principal) -> dc.BaseSpool:
         """Return the visible patches matching the query."""
@@ -221,8 +300,9 @@ def create_app(settings: Settings) -> FastAPI:
         """
         Summarize the patches matching the query.
 
-        With no query, that is all the caller may read. Gives counts, the
-        contents columns, the dims and each dim's extent.
+        With no query, that is all the caller may read. Gives counts, an
+        estimate of the array bytes, the contents columns, the dims and
+        each dim's extent.
         """
         return summarize(selected(request, who).get_contents())
 
@@ -331,6 +411,226 @@ def create_app(settings: Settings) -> FastAPI:
             body = encode_patch(next(_checked_patches(view, spool[:1], limit)))
         return Response(bytes(body), media_type=PATCH_MEDIA_TYPE)
 
+    @app.get("/v1/viewer/products")
+    def products(who: Who) -> dict:
+        """
+        Return the products the caller may read, for the viewer.
+
+        A product is the patches of one kind with the same dims and steps:
+        one layer at one resolution. Each has an `id` for `/v1/viewer/tile`.
+        `limits` are the bytes one tile and one screen of tiles may read,
+        and `sync` says whether areas can be synced into a local data
+        directory (not on a server; see `dastor browse`).
+        """
+        contents = _shown(catalog.view(who).select().get_contents())
+        limits = settings.limits
+        return {
+            "products": list_products(contents),
+            "sync": False,
+            "limits": {
+                "max_tile_bytes": limits.max_tile_bytes,
+                "max_view_bytes": limits.max_view_bytes,
+            },
+        }
+
+    @app.get("/v1/viewer/tile")
+    def tile(
+        request: Request,
+        who: Who,
+        product: str,
+        width: Annotated[int, Query(ge=1, le=1024)] = 256,
+        height: Annotated[int, Query(ge=1, le=1024)] = 256,
+        stat: Annotated[Stat, Query()] = "max",
+    ):
+        """
+        Return one image tile of a product, reduced to `height` x `width`.
+
+        `<x>_min`/`<x>_max` and `<y>_min`/`<y>_max` bound the tile along the
+        product's two dims. The body is little-endian float32 rows, the
+        lowest y first, with NaN where there is no data. A tile with no
+        data is 204, and one needing too many samples is 413 (zoom in, or
+        use a coarser product).
+        """
+        wanted = decode_product(product)
+        x, y = product_axes(wanted["dims"])
+        reserved = _RESERVED | {"width", "height", "stat"}
+        kwargs = selection(request.query_params.multi_items(), reserved)
+        if len(wanted["dims"]) != 2 or not {x, y} <= set(kwargs):
+            raise QueryError("a tile needs a product of two dims and bounds on both")
+        view, spool = selected_with_view(request, who, reserved)
+        contents = spool.get_contents()
+        if not len(contents):
+            return Response(status_code=204)
+        ranges = [
+            tile_range(kwargs[dim], contents[f"{dim}_min"].dtype.kind in "Mm")
+            for dim in (x, y)
+        ]
+        limit = settings.limits.max_tile_bytes
+        if (size := estimated_bytes(contents)) > limit:
+            msg = f"tile would read about {size} bytes; the limit is {limit}"
+            raise HTTPException(413, msg)
+        with _load_errors(), loads:
+            patches = _checked_patches(view, spool, limit)
+            values = render_tile(patches, x, y, *ranges, (height, width), stat)
+        if values is None:
+            return Response(status_code=204)
+        body, headers = encode_tile(values), {"Vary": "Accept-Encoding"}
+        if "gzip" in request.headers.get("accept-encoding", ""):
+            body = gzip.compress(body, compresslevel=1)
+            headers["Content-Encoding"] = "gzip"
+        return Response(body, media_type="application/octet-stream", headers=headers)
+
+    store = settings.annotations and AnnotationStore(settings.annotations.path)
+
+    def annotation_store() -> AnnotationStore:
+        if not store:
+            raise HTTPException(404, "this server keeps no annotations")
+        return store
+
+    Store = Annotated[AnnotationStore, Depends(annotation_store)]
+
+    def owner_name(who: Principal) -> str | None:
+        """Return the name a principal owns annotation sets under, if any."""
+        if who.authenticated:
+            return who.name
+        return settings.annotations and settings.annotations.anonymous_owner
+
+    def readable(who: Principal) -> Callable[[str, str], bool]:
+        """
+        Return a test of whether the caller may read a set.
+
+        A caller reads their own sets, and sets on an acquisition every
+        file of which they may read: annotations describe data, so seeing
+        one file of a recording is no licence to read notes on the rest.
+        A set naming no acquisition counts as on the files which name none.
+        """
+        name, whole = owner_name(who), catalog.view(who).acquisitions
+
+        def check(owner: str, acquisition_key: str) -> bool:
+            return owner == name or acquisition_key in whole
+
+        return check
+
+    def own(who: Principal, owner: str) -> str:
+        """Return the caller's owner name, refusing writes to others' sets."""
+        name = owner_name(who)
+        if name is None or name != owner:
+            raise HTTPException(403, "only a set's owner may change it")
+        return name
+
+    for error, status in ((AnnotationError, 400), (MissingSetError, 404)):
+
+        def _annotation_error(request: Request, exc: Exception, status=status):
+            return JSONResponse({"detail": str(exc)}, status_code=status)
+
+        app.add_exception_handler(error, _annotation_error)
+
+    @app.get("/v1/annotations")
+    def annotation_sets(who: Who, store: Store) -> dict:
+        """
+        List the annotation sets the caller may read.
+
+        Those are the caller's own, and the sets on acquisitions all of
+        whose files the caller may read.
+
+        `owner` is the name the caller's own sets are saved under (null if
+        the caller can't save), and each set says whether it is `editable`.
+        """
+        name, check = owner_name(who), readable(who)
+        sets = [x for x in store.list() if check(x["owner"], x["acquisition_key"])]
+        for entry in sets:
+            entry["editable"] = entry["owner"] == name
+        return {"owner": name, "sets": sets}
+
+    @app.get("/v1/annotations/{owner}/{name}")
+    def annotation_set(owner: str, name: str, who: Who, store: Store) -> dict:
+        """
+        Return one annotation set as its annotations and features tables.
+
+        Both are JSON records of a DASCore annotation set, with times in
+        ISO 8601; `revision` is what a save must be based on.
+        """
+        document = store.document(owner, name)
+        if not readable(who)(owner, document["acquisition_key"]):
+            raise MissingSetError(f"no annotation set {owner}/{name}")
+        return document
+
+    @app.put("/v1/annotations/{owner}/{name}")
+    def save_annotation_set(
+        owner: str,
+        name: str,
+        who: Who,
+        store: Store,
+        document: Annotated[dict, Body()],
+    ):
+        """
+        Save an annotation set as its next revision; only its owner may.
+
+        The body is as `GET` returns, with `base_revision` the revision it
+        was read at (0 for a new set); a save based on an older revision is
+        409. The server sets each feature's `created_time`, `modified_time`
+        and `modified_by`.
+        """
+        user = own(who, owner)
+        try:
+            return store.save(owner, name, document, user)
+        except RevisionConflictError as exc:
+            detail = {"detail": str(exc), "revision": exc.current}
+            return JSONResponse(detail, status_code=409)
+
+    @app.get("/v1/annotations/{owner}/{name}/export")
+    def export_annotation_set(owner: str, name: str, who: Who, store: Store):
+        """
+        Return one annotation set as a zip archive of its directory.
+
+        Unpacked, it is a folder `dascore.annotations` reads.
+        """
+        key = store.document(owner, name)["acquisition_key"]
+        if not readable(who)(owner, key):
+            raise MissingSetError(f"no annotation set {owner}/{name}")
+        headers = {"Content-Disposition": f'attachment; filename="{name}.zip"'}
+        body = store.export_zip(owner, name)
+        return Response(body, media_type="application/zip", headers=headers)
+
+    @app.post("/v1/annotations/{owner}/{name}/import")
+    def import_annotation_set(
+        owner: str,
+        name: str,
+        who: Who,
+        store: Store,
+        filename: str,
+        payload: Annotated[bytes, Body(media_type="application/octet-stream")],
+        dims: str = "",
+        acquisition_key: str = "",
+    ):
+        """
+        Save an uploaded file as a new annotation set; only its owner may.
+
+        The body is the file: a zip of a set's directory (as `export`
+        gives) or a bare annotations table, `.parquet` or `.csv`, named by
+        `filename`. `dims` (comma separated) are for a table stating none,
+        and `acquisition_key` for a set naming none. A set of the name
+        already stored is 409.
+        """
+        user = own(who, owner)
+        if len(payload) > settings.limits.max_upload_bytes:
+            raise HTTPException(413, "the file is larger than is accepted")
+        wanted = tuple(x for x in dims.split(",") if x)
+        try:
+            return store.import_file(
+                owner, name, filename, payload, user, wanted, acquisition_key
+            )
+        except RevisionConflictError as exc:
+            detail = {"detail": f"{owner}/{name} exists", "revision": exc.current}
+            return JSONResponse(detail, status_code=409)
+
+    @app.delete("/v1/annotations/{owner}/{name}", status_code=204)
+    def delete_annotation_set(owner: str, name: str, who: Who, store: Store):
+        """Delete an annotation set; only its owner may."""
+        own(who, owner)
+        store.delete(owner, name)
+
+    app.mount("/viewer", StaticFiles(directory=_STATIC, html=True), name="viewer")
     return app
 
 

@@ -32,7 +32,12 @@ dependencies = [
 dastor = "dastor.cli:main"
 
 [dependency-groups]
-dev = ["httpx2", "pytest>=8", "ruff>=0.15"]
+dev = [
+    "httpx2",
+    "pytest>=8",
+    "ruff>=0.15",
+    "websocket-client>=1.9.2",
+]
 
 [tool.hatch.version]
 path = "src/dastor/__init__.py"
@@ -52,6 +57,9 @@ convention = "numpy"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The browser tests need Chromium; run them with `pytest -m browser`.
+addopts = "-m 'not browser'"
+markers = ["browser: drives the viewer in a headless Chromium"]
 
 # DASCore's dev branch carries the spool index features dastor builds on.
 [tool.uv.sources]

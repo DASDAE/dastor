@@ -52,6 +52,26 @@ def visible_files(
     return frozenset(whole.index[whole.to_numpy()])
 
 
+def whole_acquisitions(contents: pd.DataFrame, files: frozenset[str]) -> frozenset[str]:
+    """
+    Return the acquisition keys all of whose files are among `files`.
+
+    Patches naming no acquisition share the key "". What describes an
+    acquisition, such as an annotation set, may be shown only to those who
+    may read every file of it: seeing one file of a recording says nothing
+    about the rest.
+    """
+    if contents.empty:
+        return frozenset()
+    if "acquisition_key" in contents.columns:
+        keys = contents["acquisition_key"].astype("string").fillna("").astype(str)
+    else:
+        keys = pd.Series("", index=contents.index)
+    seen = contents["source_path"].astype(str).isin(files)
+    whole = seen.groupby(keys.to_numpy(), sort=False).all()
+    return frozenset(whole.index[whole.to_numpy()])
+
+
 def patch_matches(
     patch: dc.Patch, row: Mapping, rules: Sequence[Rule], principal: Principal
 ) -> bool:

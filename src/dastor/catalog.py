@@ -10,7 +10,13 @@ from dataclasses import dataclass
 import dascore as dc
 from dascore.io.index.backend import get_backend
 
-from dastor.acl import matching_rows, missing_columns, patch_matches, visible_files
+from dastor.acl import (
+    matching_rows,
+    missing_columns,
+    patch_matches,
+    visible_files,
+    whole_acquisitions,
+)
 from dastor.auth import Principal
 from dastor.config import Rule, Settings
 
@@ -36,6 +42,8 @@ class View:
     files: frozenset[str]
     rules: tuple[Rule, ...]
     principal: Principal
+    # The acquisition keys ("" for none) all of whose files are visible.
+    acquisitions: frozenset[str] = frozenset()
 
     def select(self, **kwargs) -> dc.BaseSpool:
         """Return the visible patches matching a selection."""
@@ -76,7 +84,7 @@ class Catalog:
         self.config = settings.spool
         self._rules = tuple(self.config.rules)
         self._spool: dc.BaseSpool | None = None
-        self._files: dict[Principal, frozenset[str]] = {}
+        self._seen: dict[Principal, tuple[frozenset[str], frozenset[str]]] = {}
         self._lock = threading.Lock()
 
     def refresh(self) -> None:
@@ -92,7 +100,7 @@ class Catalog:
             raise ValueError(f"rules name columns the contents lack: {missing}")
         with self._lock:
             self._spool = spool
-            self._files = {}
+            self._seen = {}
         log.info("indexed %d patches", len(contents))
 
     def view(self, principal: Principal) -> View:
@@ -105,8 +113,9 @@ class Catalog:
         with self._lock:
             spool = self._spool
             assert spool is not None, "refresh() runs before requests are served"
-            if (files := self._files.get(principal)) is None:
+            if (seen := self._seen.get(principal)) is None:
                 contents = spool.get_contents()
                 files = visible_files(contents, self._rules, principal)
-                self._files[principal] = files
-        return View(spool, files, self._rules, principal)
+                seen = files, whole_acquisitions(contents, files)
+                self._seen[principal] = seen
+        return View(spool, seen[0], self._rules, principal, seen[1])
