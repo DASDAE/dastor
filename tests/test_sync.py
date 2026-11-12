@@ -4,6 +4,7 @@ import dascore as dc
 import numpy as np
 import pytest
 from conftest import ALICE_KEY, free_port, live
+from fastapi import Header
 from fastapi.testclient import TestClient
 
 from dastor.app import create_app
@@ -123,6 +124,14 @@ class TestLocalSync:
         for client in (local, proxied):
             elsewhere = {"Origin": "https://evil.example"}
             assert client.post("/v1/sync", headers=elsewhere).status_code == 403
+            reply = client.post(  # a set made from a form a page elsewhere posts
+                "/v1/annotations/me/injected/import",
+                params={"filename": "picks.csv", "dims": "distance,time"},
+                content=b"feature_id,time,distance\na,2024-05-01T00:00:05,3\n",
+                headers={**elsewhere, "Content-Type": "text/plain"},
+            )
+            assert reply.status_code == 403
+            assert client.get("/v1/summary", headers=elsewhere).status_code == 200
             own = {"Origin": "http://testserver"}
             params = {"time_min": "2030-01-01T00:00:00"}
             assert (
@@ -212,6 +221,58 @@ class TestProxy:
             with TestClient(create_proxy(address, "wrong")) as wrong:
                 assert wrong.get("/v1/summary").status_code == 401
         assert every > few > 0
+
+    def test_redirects_are_not_followed(self, tmp_path):
+        """A redirect would carry the key elsewhere: it is reported instead."""
+        from fastapi import FastAPI  # noqa: PLC0415
+        from fastapi.responses import RedirectResponse  # noqa: PLC0415
+
+        seen = []
+        other = FastAPI()
+
+        @other.get("/{path:path}")
+        def anything(path: str, authorization: str | None = Header(None)):
+            seen.append(authorization)
+            return {}
+
+        with live(other) as elsewhere:
+            mover = FastAPI()
+
+            @mover.get("/{path:path}")
+            def moved(path: str):
+                return RedirectResponse(f"{elsewhere}/{path}")
+
+            with live(mover) as address:
+                with TestClient(create_proxy(address, "secret", tmp_path)) as client:
+                    reply = client.get("/v1/summary")
+                    assert reply.status_code == 502 and elsewhere in reply.text
+                    assert client.post("/v1/sync").status_code == 502
+        assert seen == [] and list(tmp_path.iterdir()) == []
+
+    def test_a_download_cut_short_leaves_nothing(self, tmp_path):
+        """A response shorter than it declared is not kept as a file."""
+        import http.server  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+
+        class Short(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "10000")
+                self.end_headers()
+                self.wfile.write(b"only this much")
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Short)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            address = f"http://127.0.0.1:{server.server_port}"
+            with TestClient(create_proxy(address, sync_dir=tmp_path)) as client:
+                assert client.post("/v1/sync").status_code == 502
+        finally:
+            server.shutdown()
+        assert list(tmp_path.iterdir()) == []
 
     def test_a_server_which_is_down(self, tmp_path):
         address = f"http://127.0.0.1:{free_port()}"

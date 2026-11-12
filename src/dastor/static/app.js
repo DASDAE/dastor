@@ -1367,7 +1367,7 @@ async function renderArea() {
     if (stamp !== renderArea.stamp) return;
     const start = a.x0 === null ? "" : `_${S.xTime ? isoOf(a.x0).slice(0, 19) : fmtNum(a.x0)}`;
     const what = ids.length === 1 ? levelName(all.find((p) => p.id === ids[0])) : `${ids.length}_products`;
-    const file = `${S.group || "data"}_${what}${start}`.replace(/[^A-Za-z0-9_.-]+/g, "_");
+    const file = `${S.group || "data"}_${what}${start}`.replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^[.-]+/, "").slice(0, 120) || "data";
     const big = sum.bytes > BIG_DOWNLOAD;
     renderArea.sync = sum.patches ? { q, file } : null;  // what Sync would copy
     $("areaSize").innerHTML = sum.patches

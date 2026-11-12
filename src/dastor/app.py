@@ -41,7 +41,7 @@ from dastor.auth import Authenticator, InvalidKeyError, Principal
 from dastor.catalog import Catalog, ChangedFileError, View
 from dastor.config import Settings
 from dastor.query import QueryError, selection
-from dastor.sync import SyncNameError, check_name, from_elsewhere, synced_file
+from dastor.sync import SyncNameError, check_name, refuse_elsewhere, synced_file
 from dastor.tiles import (
     Stat,
     decode_product,
@@ -239,6 +239,9 @@ def create_app(settings: Settings, sync_dir: FilePath | None = None) -> FastAPI:
 
     app = FastAPI(title="dastor", version=__version__, lifespan=lifespan)
     app.state.catalog = catalog
+    # A request with a key can't be forged by a page elsewhere, but one acting
+    # for `anonymous_owner`, or syncing, can: those from other pages are refused.
+    app.middleware("http")(refuse_elsewhere)
 
     def principal(
         authorization: Annotated[str | None, Header()] = None,
@@ -385,8 +388,6 @@ def create_app(settings: Settings, sync_dir: FilePath | None = None) -> FastAPI:
             suffix), with a number added if the name is taken. Returns the
             file's `name` and `bytes` (`name` is null if nothing matched).
             """
-            if from_elsewhere(request.headers):
-                raise HTTPException(403, "sync is for the viewer's own page")
             try:
                 name = check_name(name)
             except SyncNameError as exc:

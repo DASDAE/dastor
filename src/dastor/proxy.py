@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from dastor import __version__
-from dastor.sync import SyncNameError, check_name, from_elsewhere, synced_file
+from dastor.sync import SyncNameError, check_name, refuse_elsewhere, synced_file
 
 _STATIC = FilePath(__file__).parent / "static"
 # Headers of the server's answer which are passed on to the page.
@@ -39,6 +39,11 @@ def create_proxy(
     """
     base = url.rstrip("/")
     app = FastAPI(title="dastor browse", version=__version__)
+    # This app adds the key to whatever it passes on, so a change another
+    # website's page makes the browser ask for must stop here.
+    app.middleware("http")(refuse_elsewhere)
+    # Redirects are not followed: the key would go wherever one pointed.
+    opener = urllib.request.build_opener(_NoRedirect)
 
     def open_remote(method: str, path: str, query: str, body=None, headers=None):
         """Open a request to the server, returning its response or its error."""
@@ -49,9 +54,17 @@ def create_proxy(
         if key is not None:
             request.add_header("Authorization", f"Bearer {key}")
         try:
-            return urllib.request.urlopen(request, timeout=timeout)
+            return opener.open(request, timeout=timeout)
         except urllib.error.HTTPError as error:
             return error  # an answer too: its status and body are passed on
+
+    def redirected(remote) -> JSONResponse | None:
+        """Return the answer to give for a redirect, which is not followed."""
+        if not 300 <= remote.status < 400 or remote.status == 304:
+            return None
+        where = remote.headers.get("location", "elsewhere")
+        detail = f"{base} redirects to {where}; browse that address instead"
+        return JSONResponse({"detail": detail}, 502)
 
     def unreachable(exc: Exception) -> JSONResponse:
         return JSONResponse({"detail": f"could not reach {base}: {exc}"}, 502)
@@ -66,9 +79,6 @@ def create_proxy(
             It is one DASDAE file, as the server's `/v1/data` gives. Returns
             the file's `name` and `bytes` (`name` is null if nothing matched).
             """
-            if from_elsewhere(request.headers):
-                detail = {"detail": "sync is for the viewer's own page"}
-                return JSONResponse(detail, 403)
             try:
                 name = check_name(name)
             except SyncNameError as exc:
@@ -83,12 +93,15 @@ def create_proxy(
             with remote:
                 if remote.status == 204:
                     return {"name": None, "bytes": 0}
+                if (moved := redirected(remote)) is not None:
+                    return moved
                 if remote.status != 200:
                     return _relay(remote, remote.read())
                 try:
                     with synced_file(sync_dir, name) as out:
                         with open(out["path"], "wb") as file:
                             shutil.copyfileobj(remote, file, 1 << 20)
+                            _whole(remote, file.tell())
                 except OSError as exc:  # the connection dropped part way
                     return unreachable(exc)
             return {"name": out["name"], "bytes": out["bytes"]}
@@ -116,6 +129,9 @@ def create_proxy(
                 listing = json.loads(await anyio.to_thread.run_sync(remote.read))
             listing["sync"] = sync_dir is not None
             return listing
+        if (moved := redirected(remote)) is not None:
+            remote.close()
+            return moved
         if remote.status in (204, 304):
             remote.close()
             return Response(status_code=remote.status)
@@ -123,6 +139,21 @@ def create_proxy(
 
     app.mount("/viewer", StaticFiles(directory=_STATIC, html=True), name="viewer")
     return app
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Leave a redirect as the answer, where urllib would follow it."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def _whole(remote, received: int) -> None:
+    """Raise if a response ended before the length it declared."""
+    declared = remote.headers.get("content-length")
+    if declared is not None and int(declared) != received:
+        msg = f"the download ended at {received} of {declared} bytes"
+        raise ConnectionError(msg)
 
 
 def _relay(remote, body: bytes | None = None) -> Response:

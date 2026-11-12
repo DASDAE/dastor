@@ -10,6 +10,8 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
+from fastapi.responses import JSONResponse
+
 # A synced file's name, less its suffix: no separators, and not hidden.
 SYNC_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,150}$")
 _DEFAULT_NAME = "dastor"
@@ -28,18 +30,27 @@ def check_name(name: str | None) -> str:
     return name
 
 
-def from_elsewhere(headers) -> bool:
+def from_elsewhere(method: str, headers) -> bool:
     """
-    Return True for a request another website made the browser send.
+    Return True for a change another website made the browser ask for.
 
-    A page anywhere can make a browser post to a local port. One which says
-    where it came from (`Origin`) and is not the viewer's own page is
-    refused, so only the viewer and programs (which send no `Origin`) sync.
+    A page anywhere can make a browser post to a local port, and under
+    `dastor browse` that port acts for its user without a key. A request
+    which changes something and says it came from a page (`Origin`) other
+    than the viewer's own is one to refuse; programs send no `Origin`.
     """
     origin = headers.get("origin")
-    if origin is None:
+    if method in ("GET", "HEAD", "OPTIONS") or origin is None:
         return False
     return urllib.parse.urlsplit(origin).netloc != headers.get("host")
+
+
+async def refuse_elsewhere(request, call_next):
+    """Refuse, as middleware, a change asked for by another website's page."""
+    if from_elsewhere(request.method, request.headers):
+        detail = {"detail": "this request came from another website's page"}
+        return JSONResponse(detail, status_code=403)
+    return await call_next(request)
 
 
 @contextlib.contextmanager
