@@ -409,6 +409,18 @@ class TestViewing:
         assert (
             page.js("document.querySelector('#levelBar .pinned').textContent") == "raw"
         )
+        # held on raw, no other level stands in while its tiles load
+        x, y = _pixel(page, "2024-05-01T00:00:10", 60)
+        page.wheel(x, y, -200)
+        page.js(
+            "S.frames = []; const d0 = drawTile;"
+            " drawTile = (t, off) => { S.frames.push(t.pid); d0(t, off); }; draw()"
+        )
+        assert page.js("S.frames.every(id => id === S.pin)") is True
+        page.settle()
+        page.js("draw()")
+        assert page.js("S.frames.length > 0 && S.frames.every(id => id === S.pin)")
+        page.js("wholeView()")
         page.js("document.getElementById('levelBar').children[0].click()")
         page.settle()
         assert page.js("S.pin") is None

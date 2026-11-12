@@ -456,7 +456,8 @@ function drawTile(tile, off) {
   tile.used = frameNo;
 }
 // Returns the tiles of the level still to come. While any are, cached tiles of other levels and
-// zooms are drawn under them, coarse first, so the view is never blank.
+// zooms are drawn under them, coarse first, so the view is never blank. With the view held on
+// a level, only that level's tiles stand in: what is on screen is the level asked for or nothing.
 function drawTiles(P) {
   const l = activeLevel(), [zx, zy] = zooms(l), ps = pieces();
   let pending = 0, failed = 0;
@@ -464,7 +465,7 @@ function drawTiles(P) {
   let others = [];
   if (missing) {
     const ids = new Set(S.levels.map((x) => x.p.id));
-    others = [...tiles.values()].filter((t) => t.st === "ok" && t.stat === S.disp.stat && ids.has(t.pid) &&
+    others = [...tiles.values()].filter((t) => t.st === "ok" && t.stat === S.disp.stat && ids.has(t.pid) && (!S.pin || t.pid === S.pin) &&
       !(t.pid === l.p.id && t.zx === zx && t.zy === zy) && t.tx / S.view.spp > 6 && t.ty / S.view.ypp > 6)
       .sort((a, b) => b.tx - a.tx);
   }
