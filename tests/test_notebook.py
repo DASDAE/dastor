@@ -100,7 +100,7 @@ class TestSpoolApp:
         """A handed-in spool is read through the same rules as a directory."""
         rule = {"column": "tag", "pattern": "^raw$", "allow": ["*"]}
         settings = Settings.model_validate({"spool": {"rules": [rule]}})
-        with TestClient(create_app(settings, spool)) as client:
+        with TestClient(create_app(settings, spool=spool)) as client:
             tags = {x["tag"] for x in client.get("/v1/contents").json()}
             assert tags == {"raw"}
 

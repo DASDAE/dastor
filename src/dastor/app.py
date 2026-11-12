@@ -41,6 +41,7 @@ from dastor.auth import Authenticator, InvalidKeyError, Principal, TokenGate
 from dastor.catalog import Catalog, ChangedFileError, View
 from dastor.config import Settings
 from dastor.query import QueryError, selection
+from dastor.sync import SyncNameError, check_name, refuse_elsewhere, synced_file
 from dastor.tiles import (
     Stat,
     decode_product,
@@ -216,14 +217,21 @@ async def _refresh_forever(catalog: Catalog, seconds: float) -> None:
 
 
 def create_app(
-    settings: Settings, spool: dc.BaseSpool | None = None, token: str | None = None
+    settings: Settings,
+    *,
+    spool: dc.BaseSpool | None = None,
+    token: str | None = None,
+    sync_dir: FilePath | None = None,
 ) -> FastAPI:
     """
     Return the dastor app for a configuration.
 
     `spool` is served in place of the configured directory's, and with a
     `token` the API answers only requests which carry it (see `TokenGate`).
-    Both are for `dastor.view`: no configuration file can set them.
+    Both are for `dastor.view`. `sync_dir` is a local data directory which
+    `/v1/sync` copies selected data into; it is for `dastor browse`, where the
+    server and its one user share a machine. No configuration file can set
+    any of them.
     """
     catalog = Catalog(settings, spool)
     authenticate = Authenticator(settings.users)
@@ -240,6 +248,9 @@ def create_app(
 
     app = FastAPI(title="dastor", version=__version__, lifespan=lifespan)
     app.state.catalog = catalog
+    # A request with a key can't be forged by a page elsewhere, but one acting
+    # for `anonymous_owner`, or syncing, can: those from other pages are refused.
+    app.middleware("http")(refuse_elsewhere)
     if token:
         app.add_middleware(TokenGate, token=token)
 
@@ -376,6 +387,35 @@ def create_app(
         with _load_errors():
             return _dasdae_response(list(patches), loads)
 
+    if sync_dir is not None:
+
+        @app.post("/v1/sync")
+        def sync(request: Request, who: Who, name: str | None = None) -> dict:
+            """
+            Write the matching patches into the local data directory.
+
+            They are trimmed to the query and written as one DASDAE file.
+            The query is that of `/v1/data`; `name` names the file (less its
+            suffix), with a number added if the name is taken. Returns the
+            file's `name` and `bytes` (`name` is null if nothing matched).
+            """
+            try:
+                name = check_name(name)
+            except SyncNameError as exc:
+                raise QueryError(str(exc)) from exc
+            reserved = _RESERVED | {"name"}
+            view, spool = selected_with_view(request, who, reserved)
+            if not len(spool):
+                return {"name": None, "bytes": 0}
+            limit = settings.limits.max_request_bytes
+            if (size := estimated_bytes(spool.get_contents())) > limit:
+                msg = f"request would copy about {size} bytes; the limit is {limit}"
+                raise HTTPException(413, msg)
+            with _load_errors(), loads, synced_file(sync_dir, name) as out:
+                patches = list(_checked_patches(view, spool, limit))
+                dc.write(dc.spool(patches), out["path"], "DASDAE")
+            return {"name": out["name"], "bytes": out["bytes"]}
+
     @app.get("/v1/index")
     def index(who: Who):
         """
@@ -436,7 +476,7 @@ def create_app(
         limits = settings.limits
         return {
             "products": list_products(contents),
-            "sync": False,
+            "sync": sync_dir is not None,
             "limits": {
                 "max_tile_bytes": limits.max_tile_bytes,
                 "max_view_bytes": limits.max_view_bytes,

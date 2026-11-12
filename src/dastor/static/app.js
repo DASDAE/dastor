@@ -1358,11 +1358,12 @@ async function renderArea() {
   const all = groupProducts().slice().sort((p, q) => p.coords[S.x].step - q.coords[S.x].step || p.coords[S.y].step - q.coords[S.y].step);
   if (!S.areaProducts) S.areaProducts = new Set([S.levels[S.levels.length - 1].p.id]);
   const ids = all.map((p) => p.id).filter((id) => S.areaProducts.has(id));
-  const syncTip = S.sync ? "copy this area into the local data directory" : "start the viewer with a local data directory to sync into it";
+  const syncTip = S.sync ? "copy this area into the local data directory" : "start the viewer with a local data directory to sync into it: dastor browse <directory or URL> --data-dir <directory>";
   el.innerHTML = pick + `<div class="row"><span class="hint">${areaText(a)}</span>` +
     '<button class="small" id="btnAreaClear" title="forget this area">clear</button></div>' +
     `<div id="areaProducts" title="the products to download">${all.map((p) => `<label><input type="checkbox" value="${p.id}" ${S.areaProducts.has(p.id) ? "checked" : ""}> ${esc(levelName(p))} <span class="hint">${fmtStep(p.coords[S.x].step, S.xTime)}</span></label>`).join("")}</div>` +
     `<div class="row"><span id="areaSize">${ids.length ? "…" : "choose a product"}</span><button id="btnSync" ${S.sync && ids.length ? "" : "disabled"} title="${syncTip}">Sync</button></div>`;
+  renderArea.sync = null;
   redraw();
   if (!ids.length) return;
   const q = areaQuery(ids);
@@ -1371,12 +1372,23 @@ async function renderArea() {
     if (stamp !== renderArea.stamp) return;
     const start = a.x0 === null ? "" : `_${S.xTime ? isoOf(a.x0).slice(0, 19) : fmtNum(a.x0)}`;
     const what = ids.length === 1 ? levelName(all.find((p) => p.id === ids[0])) : `${ids.length}_products`;
-    const file = `${S.group || "data"}_${what}${start}`.replace(/[^A-Za-z0-9_.-]+/g, "_");
+    const file = `${S.group || "data"}_${what}${start}`.replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^[.-]+/, "").slice(0, 120) || "data";
     const big = sum.bytes > BIG_DOWNLOAD;
+    renderArea.sync = sum.patches ? { q, file } : null;  // what Sync would copy
     $("areaSize").innerHTML = sum.patches
       ? `<a id="lnkArea" class="btn ${big ? "big" : ""}" href="${withToken(`${API}/data?${query({ ...q, format: "dasdae" })}`)}" download="${esc(file)}.h5" title="${big ? "a large download" : "as a DASDAE file"}">Download ${fmtBytes(sum.bytes)}</a>`
       : "no data in this area";
   } catch (e) { if (stamp === renderArea.stamp) $("areaSize").textContent = e.message; }
+}
+// Copies the area into the local data directory, as the file the download would be.
+async function syncArea() {
+  const what = renderArea.sync, b = $("btnSync"); if (!what || !S.sync || b.disabled) return;
+  b.disabled = true; b.textContent = "Syncing…";
+  try {
+    const out = await api("/sync?" + query({ ...what.q, name: what.file }), { method: "POST" });
+    toast(out.name ? `synced ${out.name} (${fmtBytes(out.bytes)}) into the data directory` : "no data in this area", 6000);
+  } catch (e) { toast(`not synced: ${e.message}`, 6000); }
+  if (b.isConnected) { b.disabled = false; b.textContent = "Sync"; }
 }
 
 // ------------------------------------------------------------------ mouse and keyboard
@@ -1774,6 +1786,7 @@ function initControls() {
     }
     else if (ev.target.id === "btnAreaWindow") { S.area = windowBounds(); renderArea(); redraw(); }
     else if (ev.target.id === "btnAreaDraw") setMode(S.mode === "area" ? "pan" : "area");
+    else if (ev.target.id === "btnSync") syncArea();
     else if (ev.target.id === "btnAreaClear") { S.area = null; renderArea(); redraw(); }
   });
   // a press on a button or tick box hands the keys back to the plot (a text field keeps them)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
 import re
 import socket
 import sys
@@ -47,6 +48,26 @@ def browse_settings(path: str, annotations: str | None = None) -> dict:
     }
 
 
+def remote_key() -> str | None:
+    """Return the API key for a remote server, from `DASTOR_KEY`, if any."""
+    return os.environ.get("DASTOR_KEY") or None
+
+
+def sync_directory(data_dir: str | None, source: Path | None = None) -> Path | None:
+    """
+    Return the local data directory selected data is synced into, if any.
+
+    It may not be the directory being browsed, nor inside it: synced files
+    would then be served as more of the same data.
+    """
+    if data_dir is None:
+        return None
+    out = Path(data_dir).expanduser().resolve()
+    if source is not None and (out == source or source in out.parents):
+        raise SystemExit(f"--data-dir {out} is inside the directory being browsed")
+    return out
+
+
 def _open_when_up(host: str, port: int, url: str) -> None:
     """
     Open a browser at `url` once the server answers on its port.
@@ -73,10 +94,20 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
     browse = commands.add_parser(
-        "browse", help="open the viewer on a directory of DAS files"
+        "browse", help="open the viewer on a directory of DAS files, or on a server"
     )
-    browse.add_argument("path", help="the directory of DAS files")
-    browse.add_argument("--annotations", help="where annotation sets are kept")
+    browse.add_argument(
+        "path",
+        help="the directory of DAS files, or the URL of a dastor server "
+        "(its API key is read from the DASTOR_KEY environment variable)",
+    )
+    browse.add_argument(
+        "--annotations", help="where annotation sets are kept (a directory's only)"
+    )
+    browse.add_argument(
+        "--data-dir",
+        help="a local data directory which the viewer's Sync copies selected data into",
+    )
     browse.add_argument("--host", default="127.0.0.1")
     browse.add_argument("--port", type=int, default=8000)
     browse.add_argument("--no-open", action="store_true", help="don't open a browser")
@@ -95,19 +126,29 @@ def main(argv: list[str] | None = None) -> int:
         from dastor.app import create_app  # noqa: PLC0415
         from dastor.config import Settings  # noqa: PLC0415
 
-        if args.command == "browse":
+        if args.command == "serve":
+            app = create_app(Settings.from_yaml(args.config))
+        elif re.match(r"https?://", args.path):
+            from dastor.proxy import create_proxy  # noqa: PLC0415
+
+            if args.annotations:
+                raise SystemExit("--annotations: a server keeps its own annotations")
+            sync_dir = sync_directory(args.data_dir)
+            app = create_proxy(args.path, remote_key(), sync_dir)
+        else:
             config = browse_settings(args.path, args.annotations)
-            settings = Settings.model_validate(config)
+            source = Path(config["spool"]["path"])
+            sync_dir = sync_directory(args.data_dir, source)
+            app = create_app(Settings.model_validate(config), sync_dir=sync_dir)
+        if args.command == "browse":
             url = f"http://{args.host}:{args.port}/viewer/"
             print(f"viewer: {url}")
             if not args.no_open:
                 # A daemon: it ends with the command if the server never starts.
                 waiter = (args.host, args.port, url)
                 threading.Thread(target=_open_when_up, args=waiter, daemon=True).start()
-        else:
-            settings = Settings.from_yaml(args.config)
         # One process: each would otherwise index and refresh the spool itself.
-        uvicorn.run(create_app(settings), host=args.host, port=args.port)
+        uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
 

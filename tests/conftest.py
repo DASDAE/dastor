@@ -1,10 +1,15 @@
 """Shared fixtures: a small served directory with public and secret files."""
 
+import contextlib
+import socket
+import threading
+import time
 import warnings
 
 import dascore as dc
 import numpy as np
 import pytest
+import uvicorn
 from fastapi.testclient import TestClient
 
 from dastor.app import create_app
@@ -122,6 +127,31 @@ def viewer(viewer_settings):
     """A test client on the viewer's directory."""
     with TestClient(create_app(viewer_settings)) as out:
         yield out
+
+
+def free_port() -> int:
+    """Return a port nothing is listening on."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@contextlib.contextmanager
+def live(app):
+    """Serve an app on a real port for a while, yielding its address."""
+    port = free_port()
+    server = uvicorn.Server(uvicorn.Config(app, port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    end = time.time() + 60
+    while not server.started:
+        assert thread.is_alive() and time.time() < end, "the server did not start"
+        time.sleep(0.05)
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
 
 
 def auth(key):

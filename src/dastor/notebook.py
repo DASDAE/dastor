@@ -136,7 +136,7 @@ class Viewer:
         self.token = secrets.token_urlsafe(32)
         self.address = base.format(port=self.port).rstrip("/")
         self.url = f"{self.address}/viewer/?token={self.token}"
-        app = create_app(settings, spool, self.token)
+        app = create_app(settings, spool=spool, token=self.token)
         # The notebook's logging is left as it is, and requests (whose
         # addresses may hold the token) are not logged.
         config = uvicorn.Config(app, log_config=None, access_log=False)
