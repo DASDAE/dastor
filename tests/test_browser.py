@@ -807,6 +807,17 @@ class TestLimits:
             "[...tiles.values()].some(t => t.pid === S.pin && t.st === 'ok')"
         )
 
+    def test_level_too_large_is_not_held(self, page):
+        """A click on a level too large to load holds the closest which can."""
+        page.js("document.getElementById('levelBar').children[2].click()")  # raw
+        assert page.js("levelName(S.levels.find(l => l.p.id === S.pin).p)") == (
+            "max_100ms"
+        )
+        assert page.js("activeLevel() && S.blocked") is None
+        pinned = "document.querySelector('#levelBar .pinned').textContent"
+        assert page.js(pinned) == "max_100ms"
+        assert "too much" in page.js("document.getElementById('toast').textContent")
+
     def test_coarser_level_stands_in(self, page):
         """Between the levels, the coarse one is drawn rather than too much raw."""
         x, y = _pixel(page, "2024-05-01T00:00:30", 60)

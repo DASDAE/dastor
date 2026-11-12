@@ -319,7 +319,15 @@ function renderLevels() {
   updateLevelHighlight();
 }
 function setPin(id) {
-  if (id && !S.levels.some((l) => l.p.id === id)) return;
+  const level = id && S.levels.find((l) => l.p.id === id);
+  if (id && !level) return;
+  if (level && S.pin !== id && overLimits(level)) {
+    // it could not be drawn: the closest coarser level which can is held, else nothing changes
+    const near = S.levels.slice(0, S.levels.indexOf(level)).reverse().find((l) => !overLimits(l));
+    toast(`${levelName(level.p)} is too much to load at this zoom` + (near ? `: showing ${levelName(near.p)}` : ": zoom in first"));
+    if (!near || S.pin === near.p.id) return;
+    id = near.p.id;
+  }
   S.pin = S.pin === id ? null : id || null; S.autoPending = true;
   updateLevelHighlight(); redraw();
 }
