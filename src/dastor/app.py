@@ -37,7 +37,7 @@ from dastor.annotations import (
     MissingSetError,
     RevisionConflictError,
 )
-from dastor.auth import Authenticator, InvalidKeyError, Principal
+from dastor.auth import Authenticator, InvalidKeyError, Principal, TokenGate
 from dastor.catalog import Catalog, ChangedFileError, View
 from dastor.config import Settings
 from dastor.query import QueryError, selection
@@ -215,9 +215,17 @@ async def _refresh_forever(catalog: Catalog, seconds: float) -> None:
             log.exception("refreshing failed; still serving the last index")
 
 
-def create_app(settings: Settings) -> FastAPI:
-    """Return the dastor app for a configuration."""
-    catalog = Catalog(settings)
+def create_app(
+    settings: Settings, spool: dc.BaseSpool | None = None, token: str | None = None
+) -> FastAPI:
+    """
+    Return the dastor app for a configuration.
+
+    `spool` is served in place of the configured directory's, and with a
+    `token` the API answers only requests which carry it (see `TokenGate`).
+    Both are for `dastor.view`: no configuration file can set them.
+    """
+    catalog = Catalog(settings, spool)
     authenticate = Authenticator(settings.users)
     loads = threading.BoundedSemaphore(settings.limits.max_concurrent_loads)
 
@@ -232,6 +240,8 @@ def create_app(settings: Settings) -> FastAPI:
 
     app = FastAPI(title="dastor", version=__version__, lifespan=lifespan)
     app.state.catalog = catalog
+    if token:
+        app.add_middleware(TokenGate, token=token)
 
     def principal(
         authorization: Annotated[str | None, Header()] = None,

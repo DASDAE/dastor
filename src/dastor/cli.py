@@ -14,6 +14,15 @@ from pathlib import Path
 
 from dastor.auth import hash_key, new_key
 
+# The rule under which everything in the spool is readable.
+OPEN_RULE = {"column": "source_path", "pattern": "", "allow": ["*"]}
+
+
+def local_owner() -> str:
+    """Return the system user's name as the owner of annotation sets."""
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", getpass.getuser()).lstrip("_.-")
+    return name[:64] or "me"
+
 
 def browse_settings(path: str, annotations: str | None = None) -> dict:
     """
@@ -28,14 +37,13 @@ def browse_settings(path: str, annotations: str | None = None) -> dict:
         raise SystemExit(f"{data} is not a directory")
     # A drive's root has no name to put a folder beside.
     store = annotations or data.parent / f"{data.name or 'das'}_annotations"
-    owner = re.sub(r"[^A-Za-z0-9_.-]", "_", getpass.getuser()).lstrip("_.-") or "me"
     return {
         "spool": {
             "path": str(data),
-            "rules": [{"column": "source_path", "pattern": "", "allow": ["*"]}],
+            "rules": [OPEN_RULE],
             "refresh_seconds": 300,
         },
-        "annotations": {"path": str(store), "anonymous_owner": owner},
+        "annotations": {"path": str(store), "anonymous_owner": local_owner()},
     }
 
 

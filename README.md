@@ -62,6 +62,21 @@ $ dastor browse /data/das
 
 This serves the directory on `127.0.0.1`, opens the viewer, and keeps annotations beside the data in `/data/das_annotations` (`--annotations` puts them elsewhere). A server started with `dastor serve` has the same viewer at `/viewer/`. The viewer has no sign-in yet, so on a server with users it shows only what anonymous requests may read, and saves annotations only if the config names an `anonymous_owner`; use it on a trusted network.
 
+**In a notebook.** `dastor.view` shows the viewer in a Jupyter (or marimo) cell, on a directory or on a spool or patch you already hold, including data in memory and selections:
+
+```python
+import dascore as dc
+import dastor
+
+viewer = dastor.view(dc.get_example_spool("random_das"))  # or a patch, or "/data/das"
+viewer  # the last line of a cell shows the viewer
+viewer.url  # the same page, for a browser tab
+viewer.annotations()  # the sets drawn so far, as DASCore annotation sets by "owner/name"
+viewer.close()
+```
+
+It serves the spool from a thread of the notebook's process on `127.0.0.1`. As with Jupyter's own server, the address carries a random token which every request of the API must present (`Authorization: token <token>`, or `?token=` on a link), so other users of the machine and other websites are refused; `dastor.Client(viewer.address, key=viewer.token)` reads the same data from a script. A spool or patch is served as it is (patches held in memory without the limit on what one screen reads; `limits=` sets others), and its annotations go to a temporary directory, kept until the kernel stops, unless `annotations=` names one. `dastor.view(dastor.Client(url, key=KEY).spool())` shows another server's data with your key. Each `dastor.view` closes the viewer before it, so the page keeps its address and with it its settings; give `port=` to keep several open. When the notebook runs on another machine the browser can't reach that address: forward the port, or with jupyter-server-proxy pass `base_url="/proxy/{port}"`.
+
 **Products and levels.** The viewer draws products: the patches of one kind (the same `acquisition_key`, `tag` and DASCore's other kind attributes) with the same dims and steps. Products sharing an `acquisition_key` are one recording, and the Levels panel lists them from coarse to fine. Tick the ones to zoom through; the viewer draws the coarsest ticked product with at least one sample for each pixel along time (the finest, when none has). The control at the bottom right shows which level is on screen and holds the view on one when clicked ("auto" follows the zoom again). dastor does not make coarse products: write them into the directory with DASCore (for example the maximum over each second), tagged so they can be told apart.
 
 **Limits.** A view which would read more than `max_view_bytes` of a product is not loaded. The nearest coarser ticked product stands in; with none, or when the view is held on that product, the viewer draws an outline of where the product has data. Tick a coarser product, set the level to auto, or zoom in.

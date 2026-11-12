@@ -6,6 +6,7 @@ import hashlib
 import secrets
 from collections.abc import Iterable
 from dataclasses import dataclass
+from urllib.parse import parse_qsl, urlencode
 
 from dastor.config import User
 
@@ -72,3 +73,44 @@ class Authenticator:
         if principal is None:
             raise InvalidKeyError("unknown API key")
         return principal
+
+
+class TokenGate:
+    """
+    Refuse requests of the API which don't carry a token, as Jupyter does.
+
+    A server started for one person (`dastor.view`) makes a random token
+    and puts it in the address it hands out. The page sends it back as
+    `Authorization: token <token>`, or as `?token=` on a link; `Bearer` is
+    accepted too, so `dastor.Client(url, key=token)` reads the same server.
+    Without it other users of the machine, and pages of other websites,
+    are refused. The token is taken off the request before the app sees it,
+    so it is neither an API key nor a selection.
+    """
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.token = token.encode()
+
+    async def __call__(self, scope, receive, send) -> None:
+        """Pass on a request with the token; answer 403 to others of the API."""
+        if scope["type"] != "http" or not scope["path"].startswith("/v1/"):
+            await self.app(scope, receive, send)
+            return
+        headers = [(k, v) for k, v in scope["headers"] if k != b"authorization"]
+        query = parse_qsl(scope["query_string"].decode(), keep_blank_values=True)
+        given = [v.encode() for k, v in query if k == "token"]
+        for name, value in scope["headers"]:
+            scheme, _, text = value.partition(b" ")
+            if name == b"authorization" and scheme.lower() in (b"token", b"bearer"):
+                given.append(text.strip())
+        if not any(secrets.compare_digest(x, self.token) for x in given):
+            body = b'{"detail":"this viewer needs the token in its address"}'
+            start = {"type": "http.response.start", "status": 403}
+            start["headers"] = [(b"content-type", b"application/json")]
+            await send(start)
+            await send({"type": "http.response.body", "body": body})
+            return
+        kept = urlencode([(k, v) for k, v in query if k != "token"]).encode()
+        scope = {**scope, "headers": headers, "query_string": kept}
+        await self.app(scope, receive, send)

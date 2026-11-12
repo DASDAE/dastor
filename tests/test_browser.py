@@ -25,6 +25,7 @@ from conftest import VIEW_KEY
 from dastor.annotations import AnnotationStore
 from dastor.app import create_app
 from dastor.config import Limits
+from dastor.notebook import Viewer
 
 websocket = pytest.importorskip("websocket")
 
@@ -268,6 +269,25 @@ def page(served, viewer_settings):
         browser.js("1")  # reads any errors the page reported since the last call
     finally:
         browser.close()
+    assert not browser.errors
+
+
+def test_a_notebook_viewer_loads_with_its_token(viewer_dir, tmp_path):
+    """The page of `dastor.view` sends its token: tiles and sets load."""
+    if not _BROWSER:
+        pytest.skip("no Chromium or Chrome on the path")
+    viewer = Viewer(viewer_dir, tmp_path / "sets", port=0)
+    browser = Browser(viewer.url)
+    try:
+        browser.settle()
+        assert browser.js("S.levels.length") == 2
+        assert browser.js("S.me") and not browser.js("S.listError")
+        href = "document.querySelector('a[href*=token]')"
+        browser.js("S.area = windowBounds(); renderArea()")
+        browser.wait(f"{href} !== null")
+    finally:
+        browser.close()
+        viewer.close()
     assert not browser.errors
 
 
