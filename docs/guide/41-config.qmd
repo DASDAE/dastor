@@ -1,0 +1,83 @@
+---
+title: "Configuration"
+guide-section: Reference
+---
+
+`dastor serve` reads one YAML file. Unknown keys are refused, so a typo fails at start.
+
+```yaml
+spool:
+  path: /data/das
+  index: null
+  refresh_seconds: 300
+  rules:
+    - column: tag
+      pattern: "^public"
+      allow: ["*"]
+users:
+  - name: alice
+    key_sha256: <digest from dastor new-key>
+    groups: [lab]
+https: false
+limits:
+  max_request_bytes: 2147483648
+  max_concurrent_loads: 4
+  max_tile_bytes: 67108864
+  max_view_bytes: 536870912
+  max_upload_bytes: 67108864
+annotations:
+  path: /data/das_annotations
+  anonymous_owner: null
+```
+
+## spool
+
+| Key | Default | Meaning |
+|---|---|---|
+| `path` | required | The data directory, indexed recursively. |
+| `index` | in the directory | Where DASCore's index of the directory lives, for a read-only data mount. |
+| `refresh_seconds` | none | How often to index the directory again; none indexes only at start. |
+| `rules` | `[]` | Who may read which files. With none, nothing is visible. |
+
+### rules
+
+| Key | Meaning |
+|---|---|
+| `column` | A column of the spool's contents, such as `tag`, `station` or `source_path` (relative to the directory). |
+| `pattern` | A regular expression searched for in the column's text. Anchor it with `^` and `$`. |
+| `allow` | A list of who it grants: `*` (everyone, visitors included), `user:*` (every user), `user:<name>`, `group:<name>`. |
+
+A file is visible only when every row of it matches a rule granting the reader. With users and no rule granting `*`, the server is closed to visitors (see [Access control](32-access.qmd)).
+
+## users
+
+| Key | Meaning |
+|---|---|
+| `name` | The user's name. With annotations on, a plain word (letters, digits, `_ . -`), since it names a folder. |
+| `key_sha256` | The SHA-256 hex digest of the user's key, from `dastor new-key` or `dastor hash-key`. |
+| `groups` | The groups the user is in, for `group:<name>` rules. |
+
+Names and digests must be unique, and no user may be named `*`.
+
+## https
+
+`true` when the pages are served over HTTPS, here or by a proxy which passes them on over HTTP: the sign-in cookie is then always `Secure` and `__Host-`.
+
+## limits
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max_request_bytes` | 2 GiB | The largest data response, estimated before loading (413 above it). |
+| `max_concurrent_loads` | 4 | Patches loading at once across all requests. |
+| `max_tile_bytes` | 64 MiB | The most array bytes one viewer tile may read. |
+| `max_view_bytes` | 512 MiB | The most the viewer reads for one screen; above it a coarser product stands in. |
+| `max_upload_bytes` | 64 MiB | The largest annotation set uploaded as a file. |
+
+## annotations
+
+Optional; turns on the annotation API.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `path` | required | A directory outside the data directory. Sets are kept in it as `<owner>/<name>/`. |
+| `anonymous_owner` | none | The owner visitors save as; none refuses their saves. Not allowed on a server closed to visitors. |

@@ -3,8 +3,9 @@ The Arrow wire format for patches.
 
 Each patch is one Arrow IPC stream in DASCore's ``ARROW`` format: the values
 are a single ``data`` column and the dims, coordinates and attrs are JSON in
-the schema metadata (see ``docs/arrow-patch-format.md``). DASCore reads such a
-stream back exactly, ids included, and any Arrow library can read its data.
+the schema metadata (see ``docs/guide/43-arrow-patch-format.qmd``). DASCore
+reads such a stream back exactly, ids included, and any Arrow library can read
+its data.
 
 A response with several patches frames them: each stream is preceded by its
 length as an unsigned 64-bit little-endian integer.

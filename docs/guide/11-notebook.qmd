@@ -1,0 +1,58 @@
+---
+title: "Show data in a notebook"
+guide-section: How-to guides
+---
+
+`dastor.view` shows the viewer in a Jupyter (or marimo) cell. It takes a directory, or a spool or patch you already hold, including data in memory and selections:
+
+```python
+import dascore as dc
+import dastor
+
+viewer = dastor.view(dc.get_example_spool("random_das"))  # or a patch, or "/data/das"
+viewer  # the last line of a cell shows the viewer
+```
+
+## Get the annotations you drew
+
+```python
+viewer.annotations()  # the sets drawn so far, as DASCore annotation sets by "owner/name"
+```
+
+They are kept in a temporary directory until the kernel stops. Pass `annotations=` a directory to keep them.
+
+## Open the viewer in a browser tab
+
+`viewer.url` is the same page, for a browser tab.
+
+## Read the same data from a script
+
+The viewer's address carries a random token, which every request of its API must present:
+
+```python
+client = dastor.Client(viewer.address, key=viewer.token)
+```
+
+## Show another server's data
+
+```python
+dastor.view(dastor.Client("https://das.example.org", key=KEY).spool())
+```
+
+## Keep several viewers open
+
+Each `dastor.view` closes the viewer before it, so the page keeps its address and its settings. Give each one its own `port=` to keep several open.
+
+## Read more than the limits allow
+
+When every patch is held in memory, a tile and a screen may read any amount. Otherwise the server's [limits](41-config.qmd#limits) apply; `limits=` sets them.
+
+## Use a notebook on another machine
+
+The browser can't reach the viewer's address there. Forward the port, or with jupyter-server-proxy pass `base_url="/proxy/{port}"` (not yet tried against a real proxy).
+
+## Close it
+
+```python
+viewer.close()
+```

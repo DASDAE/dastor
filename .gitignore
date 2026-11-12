@@ -7,3 +7,5 @@ build/
 .scratch/
 .pytest_cache/
 .ruff_cache/
+# The docs build directory (great-docs build).
+great-docs/

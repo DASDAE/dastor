@@ -1,0 +1,70 @@
+---
+title: "Your first look at DAS data"
+guide-section: Tutorial
+---
+
+In this tutorial you make a small directory of DAS data, open it in the viewer, draw an annotation on it, and read that annotation back in Python. It takes about ten minutes.
+
+## Install dastor
+
+dastor needs DASCore's `dev` branch, so install both from GitHub:
+
+```bash
+pip install \
+  "dascore @ git+https://github.com/DASDAE/dascore@dev" \
+  "dastor @ git+https://github.com/DASDAE/dastor"
+```
+
+## Make some data
+
+Save this as `make_data.py` and run it with `python make_data.py`. It writes DASCore's example data as three files, one per patch:
+
+```python
+from pathlib import Path
+
+import dascore as dc
+
+folder = Path("das_example")
+folder.mkdir(exist_ok=True)
+for number, patch in enumerate(dc.get_example_spool("random_das", time_gap=0)):
+    patch.io.write(folder / f"patch_{number}.h5", "DASDAE")
+```
+
+You now have a directory, `das_example`, holding 24 seconds of random data.
+
+## Open the viewer
+
+```bash
+dastor browse das_example
+```
+
+Your browser opens on the viewer, showing the data as an image: time across, distance up. Turn the mouse wheel over it to zoom, and drag to move around. Press `w` to see the whole recording again.
+
+## Draw an annotation
+
+1. Press `4`, the box tool.
+2. Drag a box over part of the data.
+3. A label box opens beside it: type `noise` and press Enter.
+
+The box is saved as you draw it, in an annotation set named `annotations`. dastor keeps it beside the data, in `das_example_annotations`.
+
+## Read it back in Python
+
+Stop the server with Ctrl+C. Sets are kept under their owner's name, which for `dastor browse` is your user name on this machine. Read yours with DASCore:
+
+```python
+import getpass
+
+import dascore as dc
+
+sets = dc.annotations(f"das_example_annotations/{getpass.getuser()}")
+print(sets)
+```
+
+The summary shows one annotation and one feature: the box you drew, with the distance and time it covers. `sets.features` lists its features, with the label `noise`.
+
+## Next steps
+
+- [Show data in a notebook](11-notebook.qmd) without leaving Python.
+- [Run a server](12-serve.qmd) to share data with others.
+- [Products and levels](31-products.qmd) explains what the viewer draws.
