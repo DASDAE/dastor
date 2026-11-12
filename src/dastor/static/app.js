@@ -60,6 +60,7 @@ const S = {
   products: [], groups: new Map(), group: null,
   limits: { max_tile_bytes: Infinity, max_view_bytes: Infinity },
   sync: false,                    // whether selected areas can be synced into a local data directory
+  session: { user: null, sign_in: false },  // who the server takes the page for, and whether it can sign in here (session.js)
   levels: [], pin: null,          // the ladder, coarsest first: [{p, sx, sy}]
   x: "", y: "", xTime: false, xUnits: "", yUnits: "", ext: null,
   view: { x0: 0, spp: 1, y0: 0, ypp: 1 },
@@ -97,7 +98,10 @@ async function api(path, opt) {
   const r = await fetch(API + path, { ...opt, headers: { ...AUTH, ...(opt && opt.headers) } });
   if (r.status === 204) return null;
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) { const e = new Error(typeof j.detail === "string" ? j.detail : `HTTP ${r.status}`); e.status = r.status; e.body = j; throw e; }
+  if (!r.ok) {
+    if (r.status === 401 || r.status === 403) S.session.recheck?.(j.detail);  // a sign-in may have ended
+    const e = new Error(typeof j.detail === "string" ? j.detail : `HTTP ${r.status}`); e.status = r.status; e.body = j; throw e;
+  }
   return j;
 }
 // ISO 8601 text (no zone, UTC) <-> seconds since the epoch
@@ -168,11 +172,13 @@ function pieces() {
   return out;
 }
 function displaySpan() { return S.segs.length ? tau(S.segs[S.segs.length - 1].b) - tau(S.segs[0].a) : S.ext.x1 - S.ext.x0; }
+// How far the view zooms. In: to 16 px a sample of the finest product, and along y on until four
+// samples fill the plot, so a few channels can be looked at closely however many there are.
 function clampView() {
   const v = S.view, fine = S.levels[S.levels.length - 1];
   if (!fine || !S.ext) return;
   v.spp = clamp(v.spp, fine.sx / 16, Math.max(displaySpan() / 50, fine.sx));
-  v.ypp = clamp(v.ypp, fine.sy / 16, Math.max((S.ext.y1 - S.ext.y0) / 50, fine.sy));
+  v.ypp = clamp(v.ypp, Math.min(fine.sy / 16, (4 * fine.sy) / plotRect().h), Math.max((S.ext.y1 - S.ext.y0) / 50, fine.sy));
 }
 // Keeps a tenth of the plot over the data, so paging or dragging can't lose it. True if it moved the view.
 function clampPos() {
@@ -401,6 +407,7 @@ function pump() {
     fetch(url, { signal: tile.ctrl.signal, headers: AUTH }).then(async (resp) => {
       if (resp.status === 204) { tile.st = "empty"; return; }
       if (resp.status === 413) { tile.st = "empty"; S.refused = tile.pid; return; }  // more than the estimate
+      if (resp.status === 401) S.session.recheck?.();
       if (!resp.ok) { tile.st = "error"; tile.err = await resp.text(); return; }
       tile.data = new Float32Array(await resp.arrayBuffer());
       tile.st = tile.data.length === TILE * TILE ? "ok" : "error";
@@ -583,7 +590,9 @@ function draw() {
   ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
   if (!S.levels.length || !S.lut) {
     const text = S.listError ? `Could not reach the server: ${S.listError}. Click to try again.`
-      : S.ready ? "No data to show: nothing here of two dims that you may read." : "loading...";
+      : !S.ready ? "loading..."
+      : S.session.sign_in && !S.session.user ? "No data to show to visitors: sign in to see what you may read."
+      : "No data to show: nothing here of two dims that you may read.";
     ctx.fillStyle = S.listError ? C.bad : C.dim; ctx.font = "15px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
     ctx.fillText(text, 80, 40);
     return;
@@ -816,7 +825,7 @@ function renderSets() {
       `<span class="name" data-edit="${esc(k)}" title="${state}">${esc(k)}</span>` +
       `<span class="tag">${s.failed ? "unread" : s.editable ? "" : "\u{1F512}"}</span></div>`;
   }).join("");
-  $("annNote").textContent = S.annError ? `Could not list the sets: ${S.annError}` : S.me ? "" : "Read only here: visitors have no name to save under.";
+  $("annNote").textContent = S.annError ? `Could not list the sets: ${S.annError}` : S.me ? "" : S.session.sign_in ? "Read only: sign in to save sets." : "Read only here: visitors have no name to save under.";
   const can = !!S.me;
   $("btnNewSet").disabled = !can; $("btnLoadSet").disabled = !can;
   $("btnDeleteSet").disabled = !activeSet(); $("btnSaveSet").disabled = !activeSet(); $("btnDownloadSet").disabled = !activeSet();
@@ -1618,6 +1627,7 @@ window.addEventListener("keyup", (ev) => {
 window.addEventListener("keydown", (ev) => {
   const t = ev.target, k = ev.key;
   if (t.matches && t.matches("input:not([type=checkbox]), select, textarea")) return;
+  if (document.querySelector("dialog#signIn[open]")) return;
   if ($("help").open) { if (k === "?") { $("help").close(); ev.preventDefault(); } return; }
   if ((k === " " || k === "Enter") && t.closest && t.closest("button, summary, a")) return;
   if ((ev.ctrlKey || ev.metaKey) && k.toLowerCase() === "z") { ev.preventDefault(); if (ev.shiftKey) restore(S.redo, S.undo); else restore(S.undo, S.redo); return; }
@@ -1817,13 +1827,18 @@ async function init() {
   let theme = null; try { theme = localStorage.getItem("dastor.theme"); } catch (e) { /* the system's */ }
   setTheme(theme);
   initControls(); buildLut(); resize();
+  S.session = await dastorSession.start({ api: API, headers: AUTH, button: $("btnAccount"), toast,
+    busy: () => S.sets.some((s) => s.dirty || s.saving) });
   try {
     const listing = await api("/viewer/products");
     S.products = listing.products; S.limits = listing.limits; S.sync = !!listing.sync;
   } catch (e) { S.listError = e.message; }
   S.ready = true;
   buildGroups();
-  if (!S.groups.size) { window.dastorReady = true; redraw(); return; }
+  if (!S.groups.size) {
+    if (S.session.sign_in && !S.session.user) S.session.open();  // there may be data for a user
+    window.dastorReady = true; redraw(); return;
+  }
   const hash = readHash(), key = S.groups.has(hash.g) ? hash.g : S.groups.keys().next().value;
   await setGroup(key);
   const v = (hash.v || "").split(",").map(Number);

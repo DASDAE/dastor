@@ -30,11 +30,12 @@ spool:
       allow: ["*"]              # everyone, including anonymous requests
     - column: source_path       # paths are relative to the directory
       pattern: "^project_a/"
-      allow: ["group:lab"]      # or "user:<name>"
+      allow: ["group:lab"]      # or "user:<name>", or "user:*" for every user
 users:
   - name: alice
     key_sha256: <digest from dastor new-key>
     groups: [lab]
+https: true                     # served over HTTPS, here or by a proxy: the sign-in cookie is Secure
 limits:
   max_request_bytes: 2147483648 # largest data response, estimated before loading
   max_concurrent_loads: 4       # patches loading at once
@@ -60,7 +61,7 @@ dastor includes a viewer for looking at data in the browser, annotating it and c
 $ dastor browse /data/das
 ```
 
-This serves the directory on `127.0.0.1`, opens the viewer, and keeps annotations beside the data in `/data/das_annotations` (`--annotations` puts them elsewhere). A server started with `dastor serve` has the same viewer at `/viewer/`. The viewer has no sign-in yet, so on a server with users it shows only what anonymous requests may read, and saves annotations only if the config names an `anonymous_owner`; use it on a trusted network.
+This serves the directory on `127.0.0.1`, opens the viewer, and keeps annotations beside the data in `/data/das_annotations` (`--annotations` puts them elsewhere). A server started with `dastor serve` has the same viewer at `/viewer/`. On a server with users the viewer offers a sign-in: the API key is checked once and not kept, and the browser holds a session for the server's pages instead, until it signs out, 12 hours pass, or the server restarts. On a server with users whose rules grant visitors (`*`) nothing, the viewer sends them to `/signin` and goes back once they are signed in. Without users there is nothing to sign in as, so `dastor browse` and `dastor.view` show no sign-in.
 
 The same command opens the viewer on another dastor server, and `--data-dir` names a local data directory to copy selected data into:
 
@@ -98,12 +99,18 @@ It serves the spool from a thread of the notebook's process on `127.0.0.1`. As w
 
 ## Access control
 
-Access is per file. A file is visible to a user only when every patch in it matches a rule granting that user; a file is never partly served. With no rules, nothing is visible. Requests authenticate with `Authorization: Bearer <key>`; requests without the header are anonymous.
+Access is per file. A file is visible to a user only when every patch in it matches a rule granting that user; a file is never partly served. With no rules, nothing is visible. Requests authenticate with `Authorization: Bearer <key>`, or, from the server's pages, with the session cookie that signing in sets; requests with neither are anonymous.
+
+The session cookie is `HttpOnly` and `SameSite=Strict`, and over HTTPS also `Secure` with the `__Host-` prefix, so no other host of the domain can plant one. No cookie is kept to one port, over HTTP or HTTPS: a session is also sent to any other server on the same host name, and two dastor servers on one host sign each other's browsers out. Give a server with users a host name of its own, and serve it over HTTPS.
+
+A server with users whose rules grant nothing to `*` is closed to visitors: every request of the API but `/v1/session` needs a key or a session, and is refused (401) before the spool is read. `/signin`, `/health` and the viewer's scripts, styles and icons stay open, and the viewer's page redirects to `/signin`. Such a server can't also have an `anonymous_owner`. dastor doesn't limit how often a client may ask, nor how many sign-ins it may try: put a reverse proxy in front of a server open to the internet (nginx's `limit_req`, or Caddy's rate limits), and rate-limit `/v1/session` there most strictly. The proxy must pass the original `Host` (nginx: `proxy_set_header Host $host;`), since dastor refuses a change whose `Origin` names another host, and `https: true` in the config tells dastor the pages are served over HTTPS, so the session cookie is `Secure` and `__Host-` though the proxy passes requests on over HTTP. (Without it dastor goes by `X-Forwarded-Proto`, which uvicorn trusts only from `127.0.0.1` unless `FORWARDED_ALLOW_IPS` names the proxy, and logs a warning when someone signs in over plain HTTP from another machine.)
 
 ## API
 
 | Endpoint | Returns |
 |---|---|
+| `GET /v1/session` | Who the caller is (`user`, null for visitors), and `sign_in`: true on a server with users, where the browser can sign in. |
+| `POST`, `DELETE /v1/session` | Sign the browser in with `{"key": <key>}`, setting a session cookie for the server's pages, and out again. |
 | `GET /v1/summary` | Patch and file counts, an estimate of the array bytes, the contents columns, the dims and each dim's extent. |
 | `GET /v1/contents` | Patch metadata (JSON, or `format=arrow`). |
 | `GET /v1/coverage?dim=time` | The spans of a dimension the patches cover. |
@@ -119,6 +126,7 @@ Access is per file. A file is visible to a user only when every patch in it matc
 | `GET /v1/annotations/{owner}/{name}/export` | The set as a zip archive of its directory. |
 | `POST /v1/annotations/{owner}/{name}/import?filename=<name>` | Makes a new set from the request body: a zip of a set's directory, or a bare `.parquet` or `.csv` table (`dims` for a table stating none, `acquisition_key` for a set naming none). 409 if the set exists. |
 | `GET /health` | Server status. |
+| `GET /signin?next=<path>` | The page which signs the browser in, then goes to `next` (a page of this server). |
 
 Every endpoint but `/health` sees only what the caller may read, and the summary, contents, coverage, gaps, data, patch and tile endpoints take query parameters that select patches: `<coord>_min` and `<coord>_max` bound a coordinate, `product=<id>` keeps one product of `/v1/viewer/products` (repeat it to keep several), and any other parameter selects an attribute, with DASCore's `*` and `?` wildcards:
 

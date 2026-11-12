@@ -41,7 +41,7 @@ class Rule(_Model):
         `$` to anchor it).
     allow
         Who the rule grants: `*` for everyone (including anonymous
-        requests), `user:<name>`, or `group:<name>`.
+        requests), `user:*` for every user, `user:<name>`, or `group:<name>`.
     """
 
     column: str
@@ -160,11 +160,16 @@ class Settings(_Model):
     users: list[User] = []
     limits: Limits = Limits()
     annotations: AnnotationConfig | None = None
+    # The pages are served over HTTPS, perhaps by a proxy which passes them
+    # on over HTTP: the sign-in cookie is then always `Secure` and `__Host-`.
+    https: bool = False
 
     @field_validator("users")
     @classmethod
     def _unique_users(cls, value: list[User]) -> list[User]:
         """Refuse duplicate user names or keys, which would be ambiguous."""
+        if any(x.name == "*" for x in value):
+            raise ValueError("no user may be named '*': 'user:*' grants every user")
         for field in ("name", "key_sha256"):
             seen = [getattr(x, field) for x in value]
             if len(seen) != len(set(seen)):
@@ -188,7 +193,28 @@ class Settings(_Model):
             raise ValueError(msg)
         if self.annotations.anonymous_owner in names:
             raise ValueError("anonymous_owner is the name of a user")
+        if (
+            self.annotations.anonymous_owner
+            and self.users
+            and not self.open_to_visitors
+        ):
+            msg = (
+                "anonymous_owner: no rule grants visitors ('*'), so with users "
+                "they are turned away and can save nothing"
+            )
+            raise ValueError(msg)
         return self
+
+    @property
+    def open_to_visitors(self) -> bool:
+        """
+        Return True if some rule grants anonymous requests (`*`).
+
+        A server open to no visitors turns them away before any work: its
+        API answers only signed-in requests, and its viewer sends them to
+        sign in.
+        """
+        return any("*" in rule.allow for rule in self.spool.rules)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Settings:

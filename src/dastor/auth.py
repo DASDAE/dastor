@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import threading
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode
@@ -29,7 +31,7 @@ class Principal:
             kind, _, value = entry.partition(":")
             if not self.authenticated:
                 continue
-            if (kind == "user" and value == self.name) or (
+            if (kind == "user" and value in ("*", self.name)) or (
                 kind == "group" and value in self.groups
             ):
                 return True
@@ -37,6 +39,11 @@ class Principal:
 
 
 ANONYMOUS = Principal("anonymous")
+
+# The cookie naming a page's sign-in; over HTTPS it has the `__Host-` prefix,
+# which only this host, over HTTPS, may set.
+SESSION_COOKIE = "dastor_session"
+SECURE_SESSION_COOKIE = "__Host-dastor_session"
 
 
 class InvalidKeyError(Exception):
@@ -75,6 +82,45 @@ class Authenticator:
         if principal is None:
             raise InvalidKeyError("unknown API key")
         return principal
+
+
+class Sessions:
+    """
+    The sign-ins of the server's pages, kept in memory.
+
+    A page presents an API key once and is given a random session id for
+    its cookie, so the key itself is never stored in the browser. A
+    session ends when its page signs out, after `lifetime` seconds, or
+    when the server stops.
+    """
+
+    def __init__(self, lifetime: float = 12 * 3600, clock=time.monotonic):
+        self.lifetime = lifetime
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._by_id: dict[str, tuple[Principal, float]] = {}
+
+    def start(self, principal: Principal) -> str:
+        """Return the id of a new session for a principal."""
+        session_id = secrets.token_urlsafe(32)
+        now = self._clock()
+        with self._lock:
+            self._by_id = {k: v for k, v in self._by_id.items() if v[1] > now}
+            self._by_id[session_id] = (principal, now + self.lifetime)
+        return session_id
+
+    def get(self, session_id: str) -> Principal | None:
+        """Return the principal of a session, or None if it has ended."""
+        with self._lock:
+            found = self._by_id.get(session_id)
+        if found is None or found[1] <= self._clock():
+            return None
+        return found[0]
+
+    def end(self, session_id: str) -> None:
+        """End a session, if it is one."""
+        with self._lock:
+            self._by_id.pop(session_id, None)
 
 
 class TokenGate:

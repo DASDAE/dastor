@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dastor: sign in</title>
+<link rel="icon" type="image/svg+xml" href="viewer/favicon.svg">
+<link rel="alternate icon" href="viewer/favicon.ico">
+<link rel="stylesheet" href="viewer/style.css">
+</head>
+<body class="landing">
+<div id="landing"><span class="brand"><img src="viewer/logo.svg" alt="">DASTor</span></div>
+<script src="viewer/session.js"></script>
+<script>
+"use strict";
+// Where to go once signed in: a page of this server (never another site), else the viewer.
+// `next` is resolved as the browser would, so a trick like "/\t/elsewhere" can't leave.
+const target = (() => {
+  try {
+    const url = new URL(new URLSearchParams(location.search).get("next") || "viewer/", location.href);
+    return url.origin === location.origin ? url : new URL("viewer/", location.href);
+  } catch (e) { return new URL("viewer/", location.href); }
+})();
+function go() { target.hash = location.hash; location.replace(target.href); }  // the view the address held
+(async () => {
+  const theme = (() => { try { return localStorage.getItem("dastor.theme"); } catch (e) { return null; } })();
+  document.documentElement.dataset.theme = theme === "light" || theme === "dark" ? theme
+    : matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  const session = await dastorSession.start({ api: "v1", required: true, signedIn: go });
+  if (session.user || !session.sign_in) { go(); return; }  // nothing to do here
+  session.open();
+  window.dastorReady = true;
+})();
+</script>
+</body>
+</html>

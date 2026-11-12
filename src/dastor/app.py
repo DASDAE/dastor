@@ -10,6 +10,7 @@ import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path as FilePath
 from typing import Annotated, Literal
+from urllib.parse import urlencode
 
 import anyio
 import dascore as dc
@@ -27,7 +28,13 @@ from fastapi import (
     Query,
     Request,
 )
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from dastor import __version__
@@ -37,7 +44,16 @@ from dastor.annotations import (
     MissingSetError,
     RevisionConflictError,
 )
-from dastor.auth import Authenticator, InvalidKeyError, Principal, TokenGate
+from dastor.auth import (
+    ANONYMOUS,
+    SECURE_SESSION_COOKIE,
+    SESSION_COOKIE,
+    Authenticator,
+    InvalidKeyError,
+    Principal,
+    Sessions,
+    TokenGate,
+)
 from dastor.catalog import Catalog, ChangedFileError, View
 from dastor.config import Settings
 from dastor.query import QueryError, selection
@@ -235,6 +251,7 @@ def create_app(
     """
     catalog = Catalog(settings, spool)
     authenticate = Authenticator(settings.users)
+    sessions = Sessions()
     loads = threading.BoundedSemaphore(settings.limits.max_concurrent_loads)
 
     @contextlib.asynccontextmanager
@@ -255,15 +272,68 @@ def create_app(
         app.add_middleware(TokenGate, token=token)
 
     def principal(
-        authorization: Annotated[str | None, Header()] = None,
+        request: Request, authorization: Annotated[str | None, Header()] = None
     ) -> Principal:
-        try:
-            return authenticate(authorization)
-        except InvalidKeyError as exc:
-            headers = {"WWW-Authenticate": "Bearer"}
-            raise HTTPException(401, str(exc), headers=headers) from None
+        """
+        Return who a request acts for: its key's user, else anonymous.
+
+        The key is in the `Authorization` header or, on a server with users,
+        it was presented once to sign a page in, and the request carries
+        that session's cookie. The header wins.
+        """
+        session_id = _session_id(request, settings.https)
+        if authorization or not (session_id and settings.users):
+            try:
+                return authenticate(authorization)
+            except InvalidKeyError as exc:
+                headers = {"WWW-Authenticate": "Bearer"}
+                raise HTTPException(401, str(exc), headers=headers) from None
+        who = sessions.get(session_id)
+        if who is None:
+            raise HTTPException(401, "your sign-in has ended: sign in again")
+        return who
 
     Who = Annotated[Principal, Depends(principal)]
+
+    def signed_in(request: Request) -> bool:
+        """Return True for a request with a known key or a live session."""
+        try:
+            return principal(
+                request, request.headers.get("authorization")
+            ).authenticated
+        except HTTPException:
+            return False
+
+    # Without users no one could sign in, so a server open to no visitors
+    # merely shows nothing, as it always has.
+    if settings.users and not settings.open_to_visitors:
+
+        @app.middleware("http")
+        async def turn_visitors_away(request: Request, call_next):
+            """
+            Answer a visitor on a server open to none before doing any work.
+
+            The API refuses them, and the viewer's page sends them to sign
+            in. `/v1/session`, `/signin`, `/health` and the page's scripts,
+            styles and icons stay open, since signing in needs them. A
+            request with a key goes on, to be told if the key is unknown.
+            """
+            path = request.url.path.removeprefix(request.scope.get("root_path", ""))
+            api = path.startswith("/v1/") and path != "/v1/session"
+            page = path in ("/viewer", "/viewer/", "/viewer/index.html")
+            keyed = "authorization" in request.headers
+            if (api or page) and not keyed and not signed_in(request):
+                if api:
+                    detail = {"detail": "sign in to use this server"}
+                    return JSONResponse(detail, 401)
+                # Relative, so the way there and back holds behind a proxy
+                # which serves the app under a prefix it strips.
+                up = "../" * path[1:].count("/")
+                here = path[1:] + (f"?{q}" if (q := request.url.query) else "")
+                where = f"{up}signin?" + urlencode({"next": here})
+                return RedirectResponse(where, status_code=303)
+            return await call_next(request)
+
     TableFormat = Annotated[Literal["json", "arrow"], Query()]
 
     def selected_with_view(
@@ -315,6 +385,79 @@ def create_app(
     def health() -> dict:
         """Report that the server is up."""
         return {"status": "ok", "version": __version__}
+
+    @app.get("/v1/session")
+    def session(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> dict:
+        """
+        Say who the caller is, and whether its pages can sign in here.
+
+        `sign_in` is true on a server with users, and only there. An ended
+        sign-in is cleared rather than refused.
+        """
+        try:
+            who = principal(request, authorization)
+        except HTTPException:
+            if authorization:
+                raise
+            _forget_session(request, response)
+            who = ANONYMOUS
+        return _session(who, settings)
+
+    @app.post("/v1/session")
+    def sign_in(
+        request: Request,
+        response: Response,
+        key: Annotated[str, Body(embed=True, min_length=1)],
+    ) -> dict:
+        """
+        Sign the browser in with an API key, for every page of this server.
+
+        The key is checked and not kept: the cookie names a session of the
+        server's, so it can't be read for the key and ends on sign-out. It
+        is `HttpOnly` (the pages' scripts don't see it) and `SameSite=Strict`
+        (other websites' pages don't send it); over HTTPS it is also
+        `Secure` and `__Host-`, as always when the config says `https`.
+        Only on a server with users.
+        """
+        if not settings.users:
+            raise HTTPException(404, "this server has no users to sign in as")
+        try:
+            who = authenticate(f"Bearer {key.strip()}")
+        except InvalidKeyError:
+            raise HTTPException(401, "unknown API key") from None
+        if old := _session_id(request, settings.https):
+            sessions.end(old)
+        secure = _secure(request, settings.https)
+        if not secure and request.client and request.client.host not in _LOCAL:
+            log.warning(
+                "signed %s in over plain HTTP from %s: if a proxy serves this "
+                "server over HTTPS, set `https: true` in the config",
+                who.name,
+                request.client.host,
+            )
+        response.set_cookie(
+            SECURE_SESSION_COOKIE if secure else SESSION_COOKIE,
+            sessions.start(who),
+            max_age=int(sessions.lifetime),
+            httponly=True,
+            samesite="strict",
+            secure=secure,
+            # The server's pages need it as well as its API; `__Host-` cookies
+            # must cover the whole host.
+            path="/" if secure else _root_path(request),
+        )
+        return _session(who, settings)
+
+    @app.delete("/v1/session", status_code=204)
+    def sign_out(request: Request, response: Response) -> None:
+        """End the browser's sign-in, for every page of this server."""
+        if session_id := _session_id(request, settings.https):
+            sessions.end(session_id)
+        _forget_session(request, response)
 
     @app.get("/v1/summary")
     def summary(request: Request, who: Who) -> dict:
@@ -680,8 +823,51 @@ def create_app(
         own(who, owner)
         store.delete(owner, name)
 
+    @app.get("/signin", include_in_schema=False)
+    def signin_page() -> FileResponse:
+        """Return the page which signs the browser in, then goes on to `?next=`."""
+        return FileResponse(_STATIC / "signin.html")
+
     app.mount("/viewer", StaticFiles(directory=_STATIC, html=True), name="viewer")
     return app
+
+
+def _session(who: Principal, settings: Settings) -> dict:
+    """Return who a caller is, as `/v1/session` gives it."""
+    return {
+        "user": who.name if who.authenticated else None,
+        "sign_in": bool(settings.users),
+    }
+
+
+# Clients of the server's own machine, which sign in over plain HTTP unremarked.
+_LOCAL = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+
+
+def _secure(request: Request, https: bool) -> bool:
+    """Return True if the page is served over HTTPS, here or by a proxy."""
+    return https or request.url.scheme == "https"
+
+
+def _session_id(request: Request, https: bool) -> str | None:
+    """Return the session id a request's cookie names, if any."""
+    # Over HTTPS only the `__Host-` cookie counts: a plain one may have been
+    # planted by another host of the domain, to sign the browser in as
+    # someone else.
+    if _secure(request, https):
+        return request.cookies.get(SECURE_SESSION_COOKIE)
+    return request.cookies.get(SESSION_COOKIE)
+
+
+def _root_path(request: Request) -> str:
+    """Return the path the server is mounted at, under which its cookie is sent."""
+    return request.scope.get("root_path", "").rstrip("/") + "/"
+
+
+def _forget_session(request: Request, response: Response) -> None:
+    """Tell the browser to drop its session cookie."""
+    response.delete_cookie(SESSION_COOKIE, path=_root_path(request))
+    response.delete_cookie(SECURE_SESSION_COOKIE, path="/", secure=True)
 
 
 @contextlib.contextmanager

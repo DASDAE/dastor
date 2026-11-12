@@ -17,11 +17,12 @@ from pathlib import Path
 
 import dascore as dc
 import pytest
-from conftest import VIEW_KEY, free_port, live
+from conftest import ALICE_KEY, VIEW_KEY, free_port, live
 
 from dastor.annotations import AnnotationStore
 from dastor.app import create_app
-from dastor.config import Limits
+from dastor.auth import hash_key
+from dastor.config import Limits, Settings
 from dastor.notebook import Viewer
 
 websocket = pytest.importorskip("websocket")
@@ -273,6 +274,77 @@ def test_a_notebook_viewer_loads_with_its_token(viewer_dir, tmp_path):
     assert not browser.errors
 
 
+class TestSigningIn:
+    """A server with users offers its pages a sign-in; others don't."""
+
+    def test_a_local_viewer_offers_none(self, page):
+        assert page.js("$('btnAccount').hidden")
+        asked = "fetch('../v1/session').then(r => r.status === 200 && r.json())"
+        assert page.js(asked) == {"user": None, "sign_in": False}
+
+    def test_a_closed_server_sends_visitors_to_sign_in(self, viewer_settings):
+        """No data is for visitors: the viewer waits behind `/signin`."""
+        if not _BROWSER:
+            pytest.skip("no Chromium or Chrome on the path")
+        config = viewer_settings.model_dump(mode="json")
+        config["annotations"]["anonymous_owner"] = None
+        config["spool"]["rules"] = [
+            {"column": "tag", "pattern": ".*", "allow": ["user:*"]}
+        ]
+        config["users"] = [{"name": "alice", "key_sha256": hash_key(ALICE_KEY)}]
+        with live(create_app(Settings.model_validate(config))) as address:
+            view = f"#g={VIEW_KEY}&v=1714521610,0.05,0,0.2"
+            browser = Browser(f"{address}/viewer/{view}")
+            try:
+                browser.wait("window.dastorReady === true")
+                assert browser.js("location.pathname") == "/signin"
+                opened = "document.querySelector('dialog#signIn').open"
+                assert browser.js(opened)
+                assert browser.js("document.querySelector('#btnSignInCancel').hidden")
+                submit = "document.querySelector('#signInForm').requestSubmit()"
+                key = "document.querySelector('#inpKey').value"
+                browser.js(f"{key} = 'wrong'; {submit}")
+                error = "document.querySelector('#signInError').textContent"
+                browser.wait(f"{error}.includes('unknown')")
+                browser.js(f"{key} = '{ALICE_KEY}'; {submit}")
+                browser.wait(
+                    "location.pathname === '/viewer/' && window.dastorReady === true"
+                    " && S.levels.length === 2"
+                )
+                browser.settle()
+                assert not browser.js(opened)
+                assert browser.js("$('btnAccount').textContent") == "alice"
+                assert browser.js("S.me") == "alice"
+                # the view the address held came through the sign-in
+                assert browser.js("S.view.x0") == pytest.approx(1714521610, abs=1)
+                # the key is not where the page's scripts can read it
+                stored = (
+                    "document.cookie + JSON.stringify(localStorage)"
+                    " + JSON.stringify(sessionStorage)"
+                )
+                assert ALICE_KEY not in browser.js(stored)
+                states = browser.js("[...tiles.values()].map(t => t.st)")
+                assert states and set(states) == {"ok"}
+                # signed in, /signin goes straight on, but never to another site
+                for url in (
+                    "about:blank",
+                    f"{address}/signin?next=%2F%09%2Fevil.example",
+                ):
+                    browser.call("Page.navigate", url=url)
+                    browser.wait(f"location.href.startsWith('{url[:12]}')")
+                browser.wait(
+                    "location.pathname === '/viewer/' && window.dastorReady === true"
+                )
+                assert browser.js("location.origin") == address
+                browser.js("$('btnAccount').click()")
+                browser.wait("location.pathname === '/signin' && window.dastorReady")
+                assert browser.js(opened)
+            finally:
+                browser.close()
+        # only the wrong key's refusal
+        assert not [x for x in browser.errors if not ("401" in x and "session" in x)]
+
+
 def _pixel(page, time: str, distance: float) -> tuple[float, float]:
     """Return where a time and distance are drawn, in page pixels."""
     point = f"[x2px(parseTime('{time}')), y2px({distance})]"
@@ -436,6 +508,20 @@ class TestViewing:
         assert page.js("[S.view.x0, S.view.spp]") == pytest.approx(whole)
         page.key("b", 66)
         assert page.js("S.view.spp") < whole[1] / 2
+
+    def test_distance_zooms_in_past_the_whole_recording(self, page):
+        """Zooming in from the whole view keeps narrowing distance, not time only."""
+        page.key("w", 87)
+        fit = page.js("S.view.ypp")
+        x, y = _pixel(page, "2024-05-01T00:00:10", 60)
+        for _ in range(15):
+            page.wheel(x, y, -200)
+        channel = page.js("S.levels[S.levels.length - 1].sy")
+        assert page.js("S.view.ypp") < min(fit / 10, channel / 16)
+        # the distance under the cursor stays put
+        assert page.js(f"px2y({y} - cv.getBoundingClientRect().top)") == pytest.approx(
+            60, abs=0.5
+        )
 
     def test_overview_strip_moves_the_window(self, page):
         """A press on the strip under the axis centres the window there."""
