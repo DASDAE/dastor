@@ -285,6 +285,8 @@ def test_a_notebook_viewer_loads_with_its_token(viewer_dir, tmp_path):
         href = "document.querySelector('a[href*=token]')"
         browser.js("S.area = windowBounds(); renderArea()")
         browser.wait(f"{href} !== null")
+        fetched = f"fetch({href}.href).then(r => r.status)"
+        assert browser.js(fetched) == 200
     finally:
         browser.close()
         viewer.close()

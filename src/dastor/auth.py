@@ -8,6 +8,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode
 
+from starlette.responses import JSONResponse
+
 from dastor.config import User
 
 
@@ -105,11 +107,8 @@ class TokenGate:
             if name == b"authorization" and scheme.lower() in (b"token", b"bearer"):
                 given.append(text.strip())
         if not any(secrets.compare_digest(x, self.token) for x in given):
-            body = b'{"detail":"this viewer needs the token in its address"}'
-            start = {"type": "http.response.start", "status": 403}
-            start["headers"] = [(b"content-type", b"application/json")]
-            await send(start)
-            await send({"type": "http.response.body", "body": body})
+            detail = {"detail": "this viewer needs the token in its address"}
+            await JSONResponse(detail, 403)(scope, receive, send)
             return
         kept = urlencode([(k, v) for k, v in query if k != "token"]).encode()
         scope = {**scope, "headers": headers, "query_string": kept}

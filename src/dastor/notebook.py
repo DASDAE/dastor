@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import functools
 import html
 import secrets
 import socket
 import tempfile
 import threading
 import time
-import weakref
 from pathlib import Path
 
 import dascore as dc
@@ -19,61 +19,35 @@ from dastor.app import create_app
 from dastor.cli import OPEN_RULE, browse_settings, local_owner
 from dastor.config import Settings
 
-# The port `view` uses unless told another. The page keeps its settings
-# (theme, levels, display) by address, so they last while the port does.
+# The port viewers use in turn unless told another. The page keeps its
+# settings (theme, levels, display) by address, so they last while it does.
 DEFAULT_PORT = 8765
 
-# Limits for patches held in memory, where a read is a slice: none in effect.
+# For patches held in memory, where a read is a slice: a tile and a screen
+# may read any amount.
 _IN_MEMORY = {"max_tile_bytes": 2**50, "max_view_bytes": 2**50}
 
-# The viewer `view` last put on the default port, which the next replaces.
-_current: Viewer | None = None
-
-# The temporary directory of annotation sets drawn on spools and patches.
-_folder: tempfile.TemporaryDirectory | None = None
-
-
-def _bind(host: str, port: int) -> socket.socket:
-    """Return a socket bound to a port (0 for any free one)."""
-    family = socket.AF_INET6 if ":" in host else socket.AF_INET
-    sock = socket.socket(family, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        sock.bind((host, port))
-    except OSError:
-        sock.close()
-        raise
-    return sock
+# The viewers being served, which keeps each alive until it is closed, and
+# the one which last took the port viewers use in turn.
+_open: set[Viewer] = set()
+_shared: Viewer | None = None
 
 
-def _listen(host: str, port: int | None) -> socket.socket:
-    """Return a socket on `port`; with none asked for, a free one if need be."""
-    if port is not None:
-        return _bind(host, port)
-    try:
-        return _bind(host, DEFAULT_PORT)
-    except OSError:
-        return _bind(host, 0)
-
-
-def _scratch() -> str:
+@functools.cache
+def _scratch() -> tempfile.TemporaryDirectory:
     """
     Return this process's temporary annotation directory, made when first asked.
 
     Every viewer of a spool or patch shares it, so what was drawn outlives
     the viewer it was drawn in (a cell run again); it goes with the process.
     """
-    global _folder  # noqa: PLW0603
-    if _folder is None:
-        _folder = tempfile.TemporaryDirectory(prefix="dastor-annotations-")
-    return _folder.name
+    return tempfile.TemporaryDirectory(prefix="dastor-annotations-")
 
 
-def _stop(server: uvicorn.Server, thread: threading.Thread) -> None:
-    """Stop a viewer's server."""
-    server.should_exit = True
-    if thread is not threading.current_thread():
-        thread.join(timeout=10)
+def _listen(host: str, port: int) -> socket.socket:
+    """Return a socket listening on a port (0 for any free one)."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    return socket.create_server((host, port), family=family)
 
 
 class Viewer:
@@ -81,11 +55,12 @@ class Viewer:
     The dastor viewer on a spool, served from this process.
 
     Displayed in a notebook it is the viewer's page in a frame; `url` opens
-    the same page in a browser tab. The server listens on this machine only
-    and, as Jupyter's does, answers only requests carrying its `token`, a
-    random one which `url` includes: other users of the machine and other
-    websites are refused. `dastor.Client(viewer.address, key=viewer.token)`
-    reads it from a script.
+    the same page in a browser tab. By default the server listens on this
+    machine only. As Jupyter's does, its API answers only requests carrying
+    its `token`, a random one which `url` includes, so other users of the
+    machine and other websites read nothing. A script reads it with
+    `dastor.Client(viewer.address, key=viewer.token)`. It is served until
+    `close` is called or the process ends.
 
     Parameters
     ----------
@@ -102,12 +77,13 @@ class Viewer:
         The height of the frame in a notebook, in pixels.
     limits
         Values for the server's `limits` (see the README), such as
-        `max_view_bytes`. By default a directory has the server's, and
-        patches held in memory have no limit on what a screen reads.
+        `max_view_bytes`. Left alone, a tile and a screen may read any
+        amount when every patch is held in memory, and otherwise what a
+        server allows.
     port
-        The port to serve on. By default one port is used by every viewer in
-        turn, so the page keeps its settings: a new viewer closes the one
-        before it. Give a port to keep several open.
+        The port to serve on. By default viewers take one port in turn, so
+        the page keeps its settings: a new viewer closes the one before it.
+        Give a port (0 for any free one) to keep several open.
     host
         The address to listen on.
     base_url
@@ -127,6 +103,7 @@ class Viewer:
         host: str = "127.0.0.1",
         base_url: str | None = None,
     ):
+        global _shared  # noqa: PLW0603
         self.height = height
         if isinstance(source, str | Path):
             if not Path(source).expanduser().is_dir():
@@ -137,56 +114,63 @@ class Viewer:
             paths = spool.get_contents()["source_path"].astype(str)
             if paths.str.startswith("memorypatch://").all():
                 limits = _IN_MEMORY | (limits or {})
-            annotations = _scratch() if annotations is None else annotations
-            config = {
-                "spool": {"rules": [OPEN_RULE]},
-                "annotations": {
-                    "path": str(annotations),
-                    "anonymous_owner": local_owner(),
-                },
-            }
+            store = _scratch().name if annotations is None else annotations
+            owner = {"path": str(store), "anonymous_owner": local_owner()}
+            config = {"spool": {"rules": [OPEN_RULE]}, "annotations": owner}
         settings = Settings.model_validate(config | {"limits": limits or {}})
         self._store = AnnotationStore(settings.annotations.path)
-        sock = _listen(host, port)
+        if port is not None:
+            sock = _listen(host, port)
+        else:
+            # The last viewer's port, even one fallen back to, keeps the address.
+            last = _shared
+            if last is not None:
+                last.close()
+            try:
+                sock = _listen(host, last.port if last else DEFAULT_PORT)
+            except OSError:
+                sock = _listen(host, 0)
         self.port = sock.getsockname()[1]
         address = f"[{host}]" if ":" in host else host
         base = base_url or f"http://{address}:{self.port}"
         self.token = secrets.token_urlsafe(32)
         self.address = base.format(port=self.port).rstrip("/")
         self.url = f"{self.address}/viewer/?token={self.token}"
-        # log_config=None: the notebook's logging is left as it is.
         app = create_app(settings, spool, self.token)
-        server = uvicorn.Server(uvicorn.Config(app, log_config=None))
+        # The notebook's logging is left as it is, and requests (whose
+        # addresses may hold the token) are not logged.
+        config = uvicorn.Config(app, log_config=None, access_log=False)
+        self._server = uvicorn.Server(config)
         # A daemon thread with its own event loop, so the notebook's is free.
-        thread = threading.Thread(
-            target=server.run, kwargs={"sockets": [sock]}, daemon=True
+        self._thread = threading.Thread(
+            target=self._server.run, kwargs={"sockets": [sock]}, daemon=True
         )
-        self._close = weakref.finalize(self, _stop, server, thread)
-        thread.start()
+        self._thread.start()
         # The server answers only once the spool is indexed.
-        while not server.started:
-            if not thread.is_alive():
-                self.close()
+        while not self._server.started:
+            if not self._thread.is_alive():
                 sock.close()
                 msg = "the viewer's server did not start; its error is logged above"
                 raise RuntimeError(msg)
             time.sleep(0.02)
+        _open.add(self)
+        if port is None:
+            _shared = self
 
     def annotations(self) -> dict[str, dc.AnnotationSet]:
-        """Return the annotation sets saved in the viewer, by `owner/name`."""
-        sets = self._store.list()
-        names = [(x["owner"], x["name"]) for x in sets]
-        return {
-            f"{owner}/{name}": self._store.load(owner, name) for owner, name in names
-        }
+        """Return the stored annotation sets, by `owner/name`."""
+        names = [(x["owner"], x["name"]) for x in self._store.list()]
+        return {f"{o}/{n}": self._store.load(o, n) for o, n in names}
 
     def close(self) -> None:
         """Stop serving; the annotation sets stay where they are kept."""
-        self._close()
+        self._server.should_exit = True
+        self._thread.join(timeout=10)
+        _open.discard(self)
 
     def _repr_html_(self) -> str:
         """Return the viewer's page in a frame."""
-        if not self._close.alive:
+        if self not in _open:
             return "<i>this dastor viewer is closed</i>"
         return (
             f'<iframe src="{html.escape(self.url)}" width="100%" '
@@ -196,11 +180,10 @@ class Viewer:
 
     def __repr__(self) -> str:
         """Return the viewer's address, or that it is closed."""
-        state = self.url if self._close.alive else "closed"
-        return f"<dastor viewer: {state}>"
+        return f"<dastor viewer: {self.url if self in _open else 'closed'}>"
 
 
-def view(source, annotations=None, *, port: int | None = None, **kwargs) -> Viewer:
+def view(source, annotations=None, **kwargs) -> Viewer:
     """
     Show a spool, a patch or a directory of DAS files in the viewer.
 
@@ -215,10 +198,4 @@ def view(source, annotations=None, *, port: int | None = None, **kwargs) -> View
     >>> sets = viewer.annotations()  # what was drawn, as DASCore sets
     >>> viewer.close()
     """
-    global _current  # noqa: PLW0603
-    if port is not None:
-        return Viewer(source, annotations, port=port, **kwargs)
-    if _current is not None:
-        _current.close()
-    _current = Viewer(source, annotations, **kwargs)
-    return _current
+    return Viewer(source, annotations, **kwargs)

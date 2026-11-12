@@ -45,6 +45,9 @@ _MAX_MEMBERS = 16
 _TABLE_SUFFIXES = (".csv", ".parquet")
 
 
+_LOCKS: dict[Path, threading.Lock] = {}
+
+
 class AnnotationError(ValueError):
     """Raised for an annotation set or name the store can't accept."""
 
@@ -152,7 +155,8 @@ class AnnotationStore:
 
     def __init__(self, root: Path):
         self.root = Path(root)
-        self._lock = threading.Lock()
+        # One lock for a directory, shared by every store of this process on it.
+        self._lock = _LOCKS.setdefault(self.root.resolve(), threading.Lock())
 
     def _path(self, owner: str, name: str) -> Path:
         """Return the directory of a set, refusing names which aren't plain."""

@@ -97,7 +97,7 @@ class Catalog:
 
     def refresh(self) -> None:
         """
-        Index the spool's directory and forget what it last made visible.
+        Index the directory again, if one is served, and forget what was visible.
 
         Refuses rules naming columns the contents lack.
         """
