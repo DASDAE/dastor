@@ -172,11 +172,13 @@ function pieces() {
   return out;
 }
 function displaySpan() { return S.segs.length ? tau(S.segs[S.segs.length - 1].b) - tau(S.segs[0].a) : S.ext.x1 - S.ext.x0; }
+// How far the view zooms. Distance zooms in until four channels of the finest product fill the
+// plot, so a few channels can be looked at closely however many the recording has.
 function clampView() {
   const v = S.view, fine = S.levels[S.levels.length - 1];
   if (!fine || !S.ext) return;
   v.spp = clamp(v.spp, fine.sx / 16, Math.max(displaySpan() / 50, fine.sx));
-  v.ypp = clamp(v.ypp, fine.sy / 16, Math.max((S.ext.y1 - S.ext.y0) / 50, fine.sy));
+  v.ypp = clamp(v.ypp, Math.min(fine.sy / 16, (4 * fine.sy) / plotRect().h), Math.max((S.ext.y1 - S.ext.y0) / 50, fine.sy));
 }
 // Keeps a tenth of the plot over the data, so paging or dragging can't lose it. True if it moved the view.
 function clampPos() {

@@ -281,44 +281,45 @@ class TestSigningIn:
         assert page.js("$('btnAccount').hidden")
         assert page.js("S.session.sign_in") is False
 
-    def test_signing_in_shows_what_the_key_may_read(self, viewer_settings):
-        """Visitors see nothing, so the page asks for a key; tabs share it."""
+    def test_a_closed_server_sends_visitors_to_sign_in(self, viewer_settings):
+        """No data is for visitors: the viewer waits behind `/signin`."""
         if not _BROWSER:
             pytest.skip("no Chromium or Chrome on the path")
         config = viewer_settings.model_dump(mode="json")
         config["annotations"]["anonymous_owner"] = None
         config["spool"]["rules"] = [
-            {"column": "tag", "pattern": ".*", "allow": ["user:alice"]}
+            {"column": "tag", "pattern": ".*", "allow": ["user:*"]}
         ]
         config["users"] = [{"name": "alice", "key_sha256": hash_key(ALICE_KEY)}]
         with live(create_app(Settings.model_validate(config))) as address:
-            browser = Browser(f"{address}/viewer/")
+            browser = Browser(f"{address}/viewer/#g=x")
             try:
                 browser.wait("window.dastorReady === true")
-                assert browser.js("S.levels.length") == 0
-                assert browser.js("$('signIn').open")
-                assert browser.js("$('btnAccount').textContent") == "Sign in"
-                submit = "$('signInForm').requestSubmit()"
-                browser.js(f"$('inpKey').value = 'wrong'; {submit}")
-                browser.wait("$('signInError').textContent.includes('unknown')")
-                browser.js(f"$('inpKey').value = '{ALICE_KEY}'; {submit}")
-                browser.wait("window.dastorReady === true && S.levels.length === 2")
+                assert browser.js("location.pathname") == "/signin"
+                opened = "document.querySelector('dialog#signIn').open"
+                assert browser.js(opened)
+                assert browser.js("document.querySelector('#btnSignInCancel').hidden")
+                submit = "document.querySelector('#signInForm').requestSubmit()"
+                key = "document.querySelector('#inpKey').value"
+                browser.js(f"{key} = 'wrong'; {submit}")
+                error = "document.querySelector('#signInError').textContent"
+                browser.wait(f"{error}.includes('unknown')")
+                browser.js(f"{key} = '{ALICE_KEY}'; {submit}")
+                browser.wait(
+                    "location.pathname === '/viewer/' && window.dastorReady === true"
+                    " && S.levels.length === 2"
+                )
                 browser.settle()
                 assert browser.js("$('btnAccount').textContent") == "alice"
                 assert browser.js("S.me") == "alice"
                 # the key is not where the page's scripts can read it
-                assert ALICE_KEY not in browser.js(
-                    "document.cookie + JSON.stringify(localStorage)"
-                )
+                stored = "document.cookie + JSON.stringify(localStorage)"
+                assert ALICE_KEY not in browser.js(stored)
                 states = browser.js("[...tiles.values()].map(t => t.st)")
                 assert states and set(states) == {"ok"}
-                # any page of the server reads as the same user
-                other = "fetch('../v1/session').then(r => r.json()).then(j => j.user)"
-                assert browser.js(other) == "alice"
                 browser.js("$('btnAccount').click()")
-                browser.wait("window.dastorReady === true && S.levels.length === 0")
-                assert browser.js(other) is None
-                assert browser.js("$('signIn').open")
+                browser.wait("location.pathname === '/signin' && window.dastorReady")
+                assert browser.js(opened)
             finally:
                 browser.close()
         assert not [x for x in browser.errors if "401" not in x]
@@ -487,6 +488,20 @@ class TestViewing:
         assert page.js("[S.view.x0, S.view.spp]") == pytest.approx(whole)
         page.key("b", 66)
         assert page.js("S.view.spp") < whole[1] / 2
+
+    def test_distance_zooms_in_past_the_whole_recording(self, page):
+        """Zooming in from the whole view keeps narrowing distance, not time only."""
+        page.key("w", 87)
+        fit = page.js("S.view.ypp")
+        x, y = _pixel(page, "2024-05-01T00:00:10", 60)
+        for _ in range(15):
+            page.wheel(x, y, -200)
+        channel = page.js("S.levels[S.levels.length - 1].sy")
+        assert page.js("S.view.ypp") < min(fit / 10, channel / 16)
+        # the distance under the cursor stays put
+        assert page.js(f"px2y({y} - cv.getBoundingClientRect().top)") == pytest.approx(
+            60, abs=0.5
+        )
 
     def test_overview_strip_moves_the_window(self, page):
         """A press on the strip under the axis centres the window there."""

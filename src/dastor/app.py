@@ -10,6 +10,7 @@ import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path as FilePath
 from typing import Annotated, Literal
+from urllib.parse import urlencode
 
 import anyio
 import dascore as dc
@@ -27,7 +28,13 @@ from fastapi import (
     Query,
     Request,
 )
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from dastor import __version__
@@ -287,6 +294,40 @@ def create_app(
         return who
 
     Who = Annotated[Principal, Depends(principal)]
+
+    def signed_in(request: Request) -> bool:
+        """Return True for a request with a known key or a live session."""
+        try:
+            return principal(
+                request, request.headers.get("authorization")
+            ).authenticated
+        except HTTPException:
+            return False
+
+    if not settings.open_to_visitors:
+
+        @app.middleware("http")
+        async def turn_visitors_away(request: Request, call_next):
+            """
+            Answer a visitor on a server open to none before doing any work.
+
+            The API refuses them, and the viewer's page sends them to sign
+            in; `/v1/session`, `/signin`, `/health` and the page's own
+            files stay open, since signing in needs them.
+            """
+            root = request.scope.get("root_path", "")
+            path = request.url.path.removeprefix(root)
+            api = path.startswith("/v1/") and path != "/v1/session"
+            page = path in ("/viewer", "/viewer/", "/viewer/index.html")
+            if (api or page) and not signed_in(request):
+                if api:
+                    detail = {"detail": "sign in to use this server"}
+                    return JSONResponse(detail, 401)
+                here = request.url.path + (f"?{q}" if (q := request.url.query) else "")
+                where = f"{root}/signin?" + urlencode({"next": here})
+                return RedirectResponse(where, status_code=303)
+            return await call_next(request)
+
     TableFormat = Annotated[Literal["json", "arrow"], Query()]
 
     def selected_with_view(
@@ -391,8 +432,9 @@ def create_app(
             httponly=True,
             samesite="strict",
             secure=secure,
-            # `__Host-` cookies must cover the whole host.
-            path="/" if secure else _api_path(request),
+            # The server's pages need it as well as its API; `__Host-` cookies
+            # must cover the whole host.
+            path="/" if secure else _root_path(request),
         )
         return _session(who, settings)
 
@@ -767,6 +809,11 @@ def create_app(
         own(who, owner)
         store.delete(owner, name)
 
+    @app.get("/signin", include_in_schema=False)
+    def signin_page() -> FileResponse:
+        """Return the page which signs the browser in, then goes on to `?next=`."""
+        return FileResponse(_STATIC / "signin.html")
+
     app.mount("/viewer", StaticFiles(directory=_STATIC, html=True), name="viewer")
     return app
 
@@ -785,16 +832,16 @@ def _session_id(request: Request) -> str | None:
     return cookies.get(SECURE_SESSION_COOKIE) or cookies.get(SESSION_COOKIE)
 
 
-def _api_path(request: Request) -> str:
-    """Return the path of the API, under which a plain session cookie is sent."""
-    # The API is `<root>/v1/...` however the server is mounted.
+def _root_path(request: Request) -> str:
+    """Return the path the server is mounted at, under which its cookie is sent."""
+    # The session endpoint is `<root>/v1/session` however the server is mounted.
     path = request.url.path
-    return path[: path.rindex("/v1/") + len("/v1")]
+    return path[: path.rindex("/v1/")] + "/"
 
 
 def _forget_session(request: Request, response: Response) -> None:
     """Tell the browser to drop its session cookie."""
-    response.delete_cookie(SESSION_COOKIE, path=_api_path(request))
+    response.delete_cookie(SESSION_COOKIE, path=_root_path(request))
     response.delete_cookie(SECURE_SESSION_COOKIE, path="/", secure=True)
 
 

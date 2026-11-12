@@ -8,13 +8,16 @@
  *   const session = await dastorSession.start({ api: "../v1", headers, button, busy, toast });
  *   session.user, session.sign_in      // who the server takes the page for; whether it offers sign-in
  *   session.open(why)                  // ask for a key (also done on any 401, via session.refused)
+ *
+ * `required: true` is for the sign-in page: the dialog can't be dismissed, and `signedIn()` is
+ * called once the browser is signed in, where other pages load themselves again.
  */
 "use strict";
 
 window.dastorSession = (() => {
   const CHANNEL = "dastor.session";
   const state = { user: null, sign_in: false, open, refused, signOut };
-  let opt = { api: "../v1", headers: {}, button: null, busy: () => false };
+  let opt = { api: "../v1", headers: {}, button: null, busy: () => false, required: false, signedIn: () => location.reload() };
   let dialog = null, channel = null;
 
   async function call(method, body) {
@@ -40,12 +43,15 @@ window.dastorSession = (() => {
     </form>`;
     document.body.append(dialog);
     const key = dialog.querySelector("#inpKey"), error = dialog.querySelector("#signInError"), go = dialog.querySelector("#btnSignIn");
-    dialog.querySelector("#btnSignInCancel").onclick = () => dialog.close();
+    const cancel = dialog.querySelector("#btnSignInCancel");
+    cancel.hidden = opt.required;
+    cancel.onclick = () => dialog.close();
+    dialog.addEventListener("cancel", (ev) => { if (opt.required) ev.preventDefault(); });  // Esc
     dialog.querySelector("form").onsubmit = async (ev) => {
       ev.preventDefault();
       if (!key.value.trim()) return;
       go.disabled = true;
-      try { await call("POST", { key: key.value.trim() }); key.value = ""; changed(); }
+      try { await call("POST", { key: key.value.trim() }); key.value = ""; changed(opt.signedIn); }
       catch (e) { error.textContent = e.message; key.select(); }
       finally { go.disabled = false; }
     };
@@ -64,13 +70,13 @@ window.dastorSession = (() => {
   async function signOut() {
     if (opt.busy()) throw new Error("Wait for the edits to be saved, then sign out.");
     await call("DELETE");
-    changed();
+    changed(() => location.reload());
   }
 
-  // This tab signed in or out: tell the others, then load this one again as the new user.
-  function changed() {
+  // This tab signed in or out: tell the others, then go on as the new user.
+  function changed(then) {
     if (channel) channel.postMessage("changed");  // not to this tab: a channel doesn't hear itself
-    location.reload();
+    then();
   }
 
   function render() {
@@ -91,7 +97,8 @@ window.dastorSession = (() => {
     if (opt.button) opt.button.onclick = () => (state.user ? signOut().catch((e) => tell(e.message)) : open());
     if ("BroadcastChannel" in window) {
       channel = new BroadcastChannel(CHANNEL);
-      channel.onmessage = () => {
+      channel.onmessage = async () => {
+        if (opt.required) { Object.assign(state, await call("GET").catch(() => ({}))); if (state.user) opt.signedIn(); return; }
         if (!opt.busy()) location.reload();
         else tell("You signed in or out in another tab: reload this one once its edits are saved.");
       };

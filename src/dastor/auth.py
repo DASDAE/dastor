@@ -31,7 +31,7 @@ class Principal:
             kind, _, value = entry.partition(":")
             if not self.authenticated:
                 continue
-            if (kind == "user" and value == self.name) or (
+            if (kind == "user" and value in ("*", self.name)) or (
                 kind == "group" and value in self.groups
             ):
                 return True

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dastor: sign in</title>
+<link rel="icon" type="image/svg+xml" href="viewer/favicon.svg">
+<link rel="alternate icon" href="viewer/favicon.ico">
+<link rel="stylesheet" href="viewer/style.css">
+</head>
+<body class="landing">
+<div id="landing"><span class="brand"><img src="viewer/logo.svg" alt="">DASTor</span></div>
+<script src="viewer/session.js"></script>
+<script>
+"use strict";
+// Where to go once signed in: a path of this server (never another site), else the viewer.
+const next = new URLSearchParams(location.search).get("next");
+const target = next && /^\/(?![/\\])/.test(next) ? next : "viewer/";
+function go() { location.replace(target + location.hash); }  // the view the address held
+(async () => {
+  const theme = (() => { try { return localStorage.getItem("dastor.theme"); } catch (e) { return null; } })();
+  document.documentElement.dataset.theme = theme === "light" || theme === "dark" ? theme
+    : matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  const session = await dastorSession.start({ api: "v1", required: true, signedIn: go });
+  if (session.user || !session.sign_in) { go(); return; }  // nothing to do here
+  session.open();
+  window.dastorReady = true;
+})();
+</script>
+</body>
+</html>

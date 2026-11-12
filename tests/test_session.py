@@ -1,10 +1,14 @@
 """Signing the server's pages in with an API key, kept as a session."""
 
+from urllib.parse import urlencode
+
+import pytest
 from conftest import ALICE_KEY, BOB_KEY, auth, live
 from fastapi.testclient import TestClient
 
 from dastor.app import create_app
 from dastor.auth import ANONYMOUS, SESSION_COOKIE, Principal, Sessions
+from dastor.config import Settings
 from dastor.proxy import create_proxy
 
 ALICE = Principal("alice", frozenset({"lab"}), True)
@@ -59,7 +63,7 @@ class TestSignIn:
             cookie = _signed_in(client).headers["set-cookie"]
             # the cookie names a session, not the key
             assert ALICE_KEY not in cookie
-            for part in ("HttpOnly", "SameSite=strict", "Path=/v1", "Max-Age="):
+            for part in ("HttpOnly", "SameSite=strict", "Path=/;", "Max-Age="):
                 assert part.lower() in cookie.lower()
             assert client.get("/v1/session").json()["user"] == "alice"
             assert _patches(client) == _patches(client, auth(ALICE_KEY)) > anonymous
@@ -134,3 +138,53 @@ class TestThroughTheProxy:
             with TestClient(create_proxy(address)) as anonymous:
                 got = anonymous.get("/v1/session").json()
                 assert got == {"user": None, "sign_in": False}
+
+
+class TestClosedServer:
+    """With no rule for visitors, they are turned away before any work."""
+
+    @pytest.fixture
+    def closed(self, settings):
+        config = settings.model_dump(mode="json")
+        config["spool"]["rules"] = [
+            {"column": "tag", "pattern": "^public$", "allow": ["user:*"]},
+            {"column": "tag", "pattern": ".*", "allow": ["group:lab"]},
+        ]
+        closed = Settings.model_validate(config)
+        assert settings.open_to_visitors and not closed.open_to_visitors
+        with TestClient(create_app(closed)) as client:
+            yield client
+
+    def test_visitors_do_no_work(self, closed, monkeypatch):
+        def no_reading(*args):
+            raise AssertionError("a visitor's request read the spool")
+
+        monkeypatch.setattr(closed.app.state.catalog, "view", no_reading)
+        for path in ("/v1/summary", "/v1/data", "/v1/viewer/tile", "/v1/annotations"):
+            reply = closed.get(path)
+            assert reply.status_code == 401
+            assert reply.json()["detail"] == "sign in to use this server"
+        assert closed.get("/v1/session").json() == {"user": None, "sign_in": True}
+        assert closed.get("/health").status_code == 200
+
+    def test_the_viewer_sends_visitors_to_sign_in(self, closed):
+        for path in ("/viewer/", "/viewer", "/viewer/index.html"):
+            reply = closed.get(path, follow_redirects=False)
+            assert reply.status_code == 303
+            assert reply.headers["location"] == "/signin?" + urlencode({"next": path})
+        # the sign-in page and the files it is made of stay open
+        for path in ("/signin", "/viewer/session.js", "/viewer/style.css"):
+            assert closed.get(path).status_code == 200
+        assert closed.get("/viewer/?a=1", follow_redirects=False).headers[
+            "location"
+        ] == "/signin?" + urlencode({"next": "/viewer/?a=1"})
+
+    def test_signed_in_users_pass(self, closed):
+        assert closed.get("/v1/summary", headers=auth(BOB_KEY)).status_code == 200
+        _signed_in(closed, BOB_KEY)
+        assert closed.get("/viewer/").status_code == 200
+        # `user:*` grants every user: bob sees the public files, alice all
+        assert _patches(closed) == 2
+        assert _patches(closed, auth(ALICE_KEY)) == 5
+        closed.delete("/v1/session")
+        assert closed.get("/v1/summary").status_code == 401

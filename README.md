@@ -30,7 +30,7 @@ spool:
       allow: ["*"]              # everyone, including anonymous requests
     - column: source_path       # paths are relative to the directory
       pattern: "^project_a/"
-      allow: ["group:lab"]      # or "user:<name>"
+      allow: ["group:lab"]      # or "user:<name>", or "user:*" for every user
 users:
   - name: alice
     key_sha256: <digest from dastor new-key>
@@ -60,7 +60,7 @@ dastor includes a viewer for looking at data in the browser, annotating it and c
 $ dastor browse /data/das
 ```
 
-This serves the directory on `127.0.0.1`, opens the viewer, and keeps annotations beside the data in `/data/das_annotations` (`--annotations` puts them elsewhere). A server started with `dastor serve` has the same viewer at `/viewer/`. On a server with users the viewer offers a sign-in (and asks for one when visitors may read nothing): the API key is checked once and not kept, and the browser holds a session for the server's pages instead, until it signs out, for 12 hours, or until the server restarts. Without users there is nothing to sign in as, so `dastor browse` and `dastor.view` show no sign-in.
+This serves the directory on `127.0.0.1`, opens the viewer, and keeps annotations beside the data in `/data/das_annotations` (`--annotations` puts them elsewhere). A server started with `dastor serve` has the same viewer at `/viewer/`. On a server with users the viewer offers a sign-in: the API key is checked once and not kept, and the browser holds a session for the server's pages instead, until it signs out, for 12 hours, or until the server restarts. On a server whose rules grant visitors (`*`) nothing, the viewer sends them to `/signin` and goes back once they are signed in. Without users there is nothing to sign in as, so `dastor browse` and `dastor.view` show no sign-in.
 
 The same command opens the viewer on another dastor server, and `--data-dir` names a local data directory to copy selected data into:
 
@@ -102,6 +102,8 @@ Access is per file. A file is visible to a user only when every patch in it matc
 
 The session cookie is `HttpOnly` and `SameSite=Strict`, and over HTTPS also `Secure` with the `__Host-` prefix. A browser keeps cookies apart by host, not by port, so over plain HTTP a session is also sent to any other server on the same host; serve a server with users over HTTPS, on a host name of its own.
 
+A server whose rules grant nothing to `*` is closed to visitors: every request of the API but `/v1/session` needs a key or a session, and is refused (401) before the spool is read. Its pages and `/health` stay open. dastor doesn't limit how often a client may ask, nor how many sign-ins it may try: put a reverse proxy in front of a server open to the internet (nginx's `limit_req`, or Caddy's rate limits), and rate-limit `/v1/session` there most strictly.
+
 ## API
 
 | Endpoint | Returns |
@@ -123,6 +125,7 @@ The session cookie is `HttpOnly` and `SameSite=Strict`, and over HTTPS also `Sec
 | `GET /v1/annotations/{owner}/{name}/export` | The set as a zip archive of its directory. |
 | `POST /v1/annotations/{owner}/{name}/import?filename=<name>` | Makes a new set from the request body: a zip of a set's directory, or a bare `.parquet` or `.csv` table (`dims` for a table stating none, `acquisition_key` for a set naming none). 409 if the set exists. |
 | `GET /health` | Server status. |
+| `GET /signin?next=<path>` | The page which signs the browser in, then goes to `next` (a path of this server). |
 
 Every endpoint but `/health` sees only what the caller may read, and the summary, contents, coverage, gaps, data, patch and tile endpoints take query parameters that select patches: `<coord>_min` and `<coord>_max` bound a coordinate, `product=<id>` keeps one product of `/v1/viewer/products` (repeat it to keep several), and any other parameter selects an attribute, with DASCore's `*` and `?` wildcards:
 
