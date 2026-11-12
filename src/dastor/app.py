@@ -281,7 +281,7 @@ def create_app(
         it was presented once to sign a page in, and the request carries
         that session's cookie. The header wins.
         """
-        session_id = _session_id(request)
+        session_id = _session_id(request, settings.https)
         if authorization or not (session_id and settings.users):
             try:
                 return authenticate(authorization)
@@ -304,7 +304,9 @@ def create_app(
         except HTTPException:
             return False
 
-    if not settings.open_to_visitors:
+    # Without users no one could sign in, so a server open to no visitors
+    # merely shows nothing, as it always has.
+    if settings.users and not settings.open_to_visitors:
 
         @app.middleware("http")
         async def turn_visitors_away(request: Request, call_next):
@@ -312,19 +314,23 @@ def create_app(
             Answer a visitor on a server open to none before doing any work.
 
             The API refuses them, and the viewer's page sends them to sign
-            in; `/v1/session`, `/signin`, `/health` and the page's own
-            files stay open, since signing in needs them.
+            in. `/v1/session`, `/signin`, `/health` and the page's scripts,
+            styles and icons stay open, since signing in needs them. A
+            request with a key goes on, to be told if the key is unknown.
             """
-            root = request.scope.get("root_path", "")
-            path = request.url.path.removeprefix(root)
+            path = request.url.path.removeprefix(request.scope.get("root_path", ""))
             api = path.startswith("/v1/") and path != "/v1/session"
             page = path in ("/viewer", "/viewer/", "/viewer/index.html")
-            if (api or page) and not signed_in(request):
+            keyed = "authorization" in request.headers
+            if (api or page) and not keyed and not signed_in(request):
                 if api:
                     detail = {"detail": "sign in to use this server"}
                     return JSONResponse(detail, 401)
-                here = request.url.path + (f"?{q}" if (q := request.url.query) else "")
-                where = f"{root}/signin?" + urlencode({"next": here})
+                # Relative, so the way there and back holds behind a proxy
+                # which serves the app under a prefix it strips.
+                up = "../" * path[1:].count("/")
+                here = path[1:] + (f"?{q}" if (q := request.url.query) else "")
+                where = f"{up}signin?" + urlencode({"next": here})
                 return RedirectResponse(where, status_code=303)
             return await call_next(request)
 
@@ -414,7 +420,8 @@ def create_app(
         server's, so it can't be read for the key and ends on sign-out. It
         is `HttpOnly` (the pages' scripts don't see it) and `SameSite=Strict`
         (other websites' pages don't send it); over HTTPS it is also
-        `Secure` and `__Host-`. Only on a server with users.
+        `Secure` and `__Host-`, as always when the config says `https`.
+        Only on a server with users.
         """
         if not settings.users:
             raise HTTPException(404, "this server has no users to sign in as")
@@ -422,9 +429,16 @@ def create_app(
             who = authenticate(f"Bearer {key.strip()}")
         except InvalidKeyError:
             raise HTTPException(401, "unknown API key") from None
-        if old := _session_id(request):
+        if old := _session_id(request, settings.https):
             sessions.end(old)
-        secure = request.url.scheme == "https"
+        secure = _secure(request, settings.https)
+        if not secure and request.client and request.client.host not in _LOCAL:
+            log.warning(
+                "signed %s in over plain HTTP from %s: if a proxy serves this "
+                "server over HTTPS, set `https: true` in the config",
+                who.name,
+                request.client.host,
+            )
         response.set_cookie(
             SECURE_SESSION_COOKIE if secure else SESSION_COOKIE,
             sessions.start(who),
@@ -441,7 +455,7 @@ def create_app(
     @app.delete("/v1/session", status_code=204)
     def sign_out(request: Request, response: Response) -> None:
         """End the browser's sign-in, for every page of this server."""
-        if session_id := _session_id(request):
+        if session_id := _session_id(request, settings.https):
             sessions.end(session_id)
         _forget_session(request, response)
 
@@ -826,17 +840,28 @@ def _session(who: Principal, settings: Settings) -> dict:
     }
 
 
-def _session_id(request: Request) -> str | None:
+# Clients of the server's own machine, which sign in over plain HTTP unremarked.
+_LOCAL = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+
+
+def _secure(request: Request, https: bool) -> bool:
+    """Return True if the page is served over HTTPS, here or by a proxy."""
+    return https or request.url.scheme == "https"
+
+
+def _session_id(request: Request, https: bool) -> str | None:
     """Return the session id a request's cookie names, if any."""
-    cookies = request.cookies
-    return cookies.get(SECURE_SESSION_COOKIE) or cookies.get(SESSION_COOKIE)
+    # Over HTTPS only the `__Host-` cookie counts: a plain one may have been
+    # planted by another host of the domain, to sign the browser in as
+    # someone else.
+    if _secure(request, https):
+        return request.cookies.get(SECURE_SESSION_COOKIE)
+    return request.cookies.get(SESSION_COOKIE)
 
 
 def _root_path(request: Request) -> str:
     """Return the path the server is mounted at, under which its cookie is sent."""
-    # The session endpoint is `<root>/v1/session` however the server is mounted.
-    path = request.url.path
-    return path[: path.rindex("/v1/")] + "/"
+    return request.scope.get("root_path", "").rstrip("/") + "/"
 
 
 def _forget_session(request: Request, response: Response) -> None:

@@ -99,7 +99,7 @@ async function api(path, opt) {
   if (r.status === 204) return null;
   const j = await r.json().catch(() => ({}));
   if (!r.ok) {
-    if (r.status === 401) S.session.refused?.(j.detail);  // a sign-in which has ended
+    if (r.status === 401 || r.status === 403) S.session.recheck?.(j.detail);  // a sign-in may have ended
     const e = new Error(typeof j.detail === "string" ? j.detail : `HTTP ${r.status}`); e.status = r.status; e.body = j; throw e;
   }
   return j;
@@ -172,8 +172,8 @@ function pieces() {
   return out;
 }
 function displaySpan() { return S.segs.length ? tau(S.segs[S.segs.length - 1].b) - tau(S.segs[0].a) : S.ext.x1 - S.ext.x0; }
-// How far the view zooms. Distance zooms in until four channels of the finest product fill the
-// plot, so a few channels can be looked at closely however many the recording has.
+// How far the view zooms. In: to 16 px a sample of the finest product, and along y on until four
+// samples fill the plot, so a few channels can be looked at closely however many there are.
 function clampView() {
   const v = S.view, fine = S.levels[S.levels.length - 1];
   if (!fine || !S.ext) return;
@@ -407,6 +407,7 @@ function pump() {
     fetch(url, { signal: tile.ctrl.signal, headers: AUTH }).then(async (resp) => {
       if (resp.status === 204) { tile.st = "empty"; return; }
       if (resp.status === 413) { tile.st = "empty"; S.refused = tile.pid; return; }  // more than the estimate
+      if (resp.status === 401) S.session.recheck?.();
       if (!resp.ok) { tile.st = "error"; tile.err = await resp.text(); return; }
       tile.data = new Float32Array(await resp.arrayBuffer());
       tile.st = tile.data.length === TILE * TILE ? "ok" : "error";

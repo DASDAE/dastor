@@ -7,7 +7,7 @@ from conftest import ALICE_KEY, BOB_KEY, auth, live
 from fastapi.testclient import TestClient
 
 from dastor.app import create_app
-from dastor.auth import ANONYMOUS, SESSION_COOKIE, Principal, Sessions
+from dastor.auth import ANONYMOUS, SESSION_COOKIE, Principal, Sessions, hash_key
 from dastor.config import Settings
 from dastor.proxy import create_proxy
 
@@ -123,6 +123,67 @@ class TestSignIn:
             assert cookie.startswith("__Host-dastor_session=")
             assert "secure" in cookie.lower() and "path=/;" in cookie.lower()
             assert client.get("/v1/session").json()["user"] == "alice"
+            # a plain cookie, which another host of the domain could plant, is not read
+            planted = client.cookies.get("__Host-dastor_session")
+            client.cookies.clear()
+            client.cookies.set(SESSION_COOKIE, planted)
+            assert client.get("/v1/session").json()["user"] is None
+
+    def test_behind_a_proxy_ending_https(self, settings, caplog):
+        """`https: true` makes the cookie secure though requests come over HTTP."""
+        plain = TestClient(create_app(settings), client=("10.0.0.5", 50000))
+        with plain:
+            with caplog.at_level("WARNING", logger="dastor.app"):
+                assert (
+                    _signed_in(plain)
+                    .headers["set-cookie"]
+                    .startswith(f"{SESSION_COOKIE}=")
+                )
+        assert "set `https: true`" in caplog.text
+        caplog.clear()
+        https = settings.model_copy(update={"https": True})
+        with TestClient(create_app(https), client=("10.0.0.5", 50000)) as proxied:
+            with caplog.at_level("WARNING", logger="dastor.app"):
+                cookie = _signed_in(proxied).headers["set-cookie"]
+            assert cookie.startswith("__Host-dastor_session=")
+            assert "secure" in cookie.lower() and "path=/;" in cookie.lower()
+            # a plain cookie is not read, though the request came over HTTP
+            proxied.cookies.set(SESSION_COOKIE, "planted")
+            assert proxied.get("/v1/session").json()["user"] is None
+        assert "plain HTTP" not in caplog.text
+
+    def test_user_star_grants_users_not_visitors(self, settings):
+        config = settings.model_dump(mode="json")
+        config["spool"]["rules"] = [
+            {"column": "tag", "pattern": "^public$", "allow": ["*"]},
+            {"column": "tag", "pattern": "^secret$", "allow": ["user:*"]},
+        ]
+        with TestClient(create_app(Settings.model_validate(config))) as client:
+            assert _patches(client) == 2  # the mixed file is half secret
+            assert _patches(client, auth(BOB_KEY)) == 5
+
+    def test_configs_which_cannot_mean_what_they_say(self, settings):
+        config = settings.model_dump(mode="json")
+        star = {
+            **config,
+            "users": [*config["users"], {"name": "*", "key_sha256": hash_key("star")}],
+        }
+        with pytest.raises(ValueError, match="named"):
+            Settings.model_validate(star)
+        closed = {
+            **config,
+            "spool": {**config["spool"], "rules": [config["spool"]["rules"][1]]},
+            "annotations": {"path": "/tmp/x", "anonymous_owner": "guest"},
+        }
+        with pytest.raises(ValueError, match="anonymous_owner"):
+            Settings.model_validate(closed)
+
+    def test_without_users_nothing_is_closed(self, data_dir):
+        # no rules: nothing to show, but no sign-in to send anyone to either
+        bare = Settings.model_validate({"spool": {"path": str(data_dir)}})
+        with TestClient(create_app(bare)) as client:
+            assert client.get("/viewer/", follow_redirects=False).status_code == 200
+            assert client.get("/v1/summary").json()["patches"] == 0
 
 
 class TestThroughTheProxy:
@@ -138,6 +199,33 @@ class TestThroughTheProxy:
             with TestClient(create_proxy(address)) as anonymous:
                 got = anonymous.get("/v1/session").json()
                 assert got == {"user": None, "sign_in": False}
+            with TestClient(create_proxy(address, "wrong")) as wrong:
+                reply = wrong.get("/v1/session")
+                assert reply.status_code == 401
+                assert "DASTOR_KEY" in reply.json()["detail"]
+
+    def test_odd_answers_from_in_front_of_the_server(self, tmp_path):
+        """A server from before sign-in, and a 401 which isn't dastor's."""
+        from fastapi import FastAPI  # noqa: PLC0415
+        from fastapi.responses import HTMLResponse  # noqa: PLC0415
+
+        old = FastAPI()
+
+        @old.get("/v1/session")
+        def missing():
+            return HTMLResponse("<h1>Not Found</h1>", 404)
+
+        @old.api_route("/v1/{rest:path}", methods=["GET"])
+        def gateway(rest: str):
+            return HTMLResponse("<h1>401 Authorization Required</h1>", 401)
+
+        with live(old) as address:
+            with TestClient(create_proxy(address, sync_dir=tmp_path)) as client:
+                got = client.get("/v1/session").json()
+                assert got == {"user": None, "sign_in": False}
+                for reply in (client.get("/v1/summary"), client.post("/v1/sync")):
+                    assert reply.status_code == 401
+                    assert "set DASTOR_KEY" in reply.json()["detail"]
 
 
 class TestClosedServer:
@@ -168,16 +256,39 @@ class TestClosedServer:
         assert closed.get("/health").status_code == 200
 
     def test_the_viewer_sends_visitors_to_sign_in(self, closed):
-        for path in ("/viewer/", "/viewer", "/viewer/index.html"):
+        # relative both ways, so they hold under a prefix a proxy strips
+        for path, where in (
+            ("/viewer/", "../signin?next=viewer%2F"),
+            ("/viewer", "signin?next=viewer"),
+            ("/viewer/index.html", "../signin?next=viewer%2Findex.html"),
+            ("/viewer/?a=1", "../signin?" + urlencode({"next": "viewer/?a=1"})),
+        ):
             reply = closed.get(path, follow_redirects=False)
             assert reply.status_code == 303
-            assert reply.headers["location"] == "/signin?" + urlencode({"next": path})
+            assert reply.headers["location"] == where
         # the sign-in page and the files it is made of stay open
         for path in ("/signin", "/viewer/session.js", "/viewer/style.css"):
             assert closed.get(path).status_code == 200
-        assert closed.get("/viewer/?a=1", follow_redirects=False).headers[
-            "location"
-        ] == "/signin?" + urlencode({"next": "/viewer/?a=1"})
+
+    def test_a_wrong_key_is_told_so(self, closed):
+        reply = closed.get("/v1/summary", headers=auth("wrong"))
+        assert reply.status_code == 401
+        assert reply.json()["detail"] == "unknown API key"
+        assert reply.headers["WWW-Authenticate"] == "Bearer"
+
+    def test_mounted_under_a_prefix(self, closed):
+        app = closed.app
+        with TestClient(app, root_path="/das") as client:
+            reply = client.get("/das/viewer/", follow_redirects=False)
+            assert reply.headers["location"] == "../signin?next=viewer%2F"
+            assert client.get("/das/v1/summary").status_code == 401
+            cookie = _signed_in(client).headers["set-cookie"]
+            assert "path=/das/;" in cookie.lower()
+            assert client.get("/das/v1/summary").status_code == 200
+            gone = client.delete("/das/v1/session").headers.get_list("set-cookie")
+            assert any(
+                "path=/das/" in x.lower() and "max-age=0" in x.lower() for x in gone
+            )
 
     def test_signed_in_users_pass(self, closed):
         assert closed.get("/v1/summary", headers=auth(BOB_KEY)).status_code == 200

@@ -279,7 +279,8 @@ class TestSigningIn:
 
     def test_a_local_viewer_offers_none(self, page):
         assert page.js("$('btnAccount').hidden")
-        assert page.js("S.session.sign_in") is False
+        asked = "fetch('../v1/session').then(r => r.status === 200 && r.json())"
+        assert page.js(asked) == {"user": None, "sign_in": False}
 
     def test_a_closed_server_sends_visitors_to_sign_in(self, viewer_settings):
         """No data is for visitors: the viewer waits behind `/signin`."""
@@ -292,7 +293,8 @@ class TestSigningIn:
         ]
         config["users"] = [{"name": "alice", "key_sha256": hash_key(ALICE_KEY)}]
         with live(create_app(Settings.model_validate(config))) as address:
-            browser = Browser(f"{address}/viewer/#g=x")
+            view = f"#g={VIEW_KEY}&v=1714521610,0.05,0,0.2"
+            browser = Browser(f"{address}/viewer/{view}")
             try:
                 browser.wait("window.dastorReady === true")
                 assert browser.js("location.pathname") == "/signin"
@@ -310,19 +312,37 @@ class TestSigningIn:
                     " && S.levels.length === 2"
                 )
                 browser.settle()
+                assert not browser.js(opened)
                 assert browser.js("$('btnAccount').textContent") == "alice"
                 assert browser.js("S.me") == "alice"
+                # the view the address held came through the sign-in
+                assert browser.js("S.view.x0") == pytest.approx(1714521610, abs=1)
                 # the key is not where the page's scripts can read it
-                stored = "document.cookie + JSON.stringify(localStorage)"
+                stored = (
+                    "document.cookie + JSON.stringify(localStorage)"
+                    " + JSON.stringify(sessionStorage)"
+                )
                 assert ALICE_KEY not in browser.js(stored)
                 states = browser.js("[...tiles.values()].map(t => t.st)")
                 assert states and set(states) == {"ok"}
+                # signed in, /signin goes straight on, but never to another site
+                for url in (
+                    "about:blank",
+                    f"{address}/signin?next=%2F%09%2Fevil.example",
+                ):
+                    browser.call("Page.navigate", url=url)
+                    browser.wait(f"location.href.startsWith('{url[:12]}')")
+                browser.wait(
+                    "location.pathname === '/viewer/' && window.dastorReady === true"
+                )
+                assert browser.js("location.origin") == address
                 browser.js("$('btnAccount').click()")
                 browser.wait("location.pathname === '/signin' && window.dastorReady")
                 assert browser.js(opened)
             finally:
                 browser.close()
-        assert not [x for x in browser.errors if "401" not in x]
+        # only the wrong key's refusal
+        assert not [x for x in browser.errors if not ("401" in x and "session" in x)]
 
 
 def _pixel(page, time: str, distance: float) -> tuple[float, float]:

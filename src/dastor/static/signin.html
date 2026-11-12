@@ -13,10 +13,15 @@
 <script src="viewer/session.js"></script>
 <script>
 "use strict";
-// Where to go once signed in: a path of this server (never another site), else the viewer.
-const next = new URLSearchParams(location.search).get("next");
-const target = next && /^\/(?![/\\])/.test(next) ? next : "viewer/";
-function go() { location.replace(target + location.hash); }  // the view the address held
+// Where to go once signed in: a page of this server (never another site), else the viewer.
+// `next` is resolved as the browser would, so a trick like "/\t/elsewhere" can't leave.
+const target = (() => {
+  try {
+    const url = new URL(new URLSearchParams(location.search).get("next") || "viewer/", location.href);
+    return url.origin === location.origin ? url : new URL("viewer/", location.href);
+  } catch (e) { return new URL("viewer/", location.href); }
+})();
+function go() { target.hash = location.hash; location.replace(target.href); }  // the view the address held
 (async () => {
   const theme = (() => { try { return localStorage.getItem("dastor.theme"); } catch (e) { return null; } })();
   document.documentElement.dataset.theme = theme === "light" || theme === "dark" ? theme

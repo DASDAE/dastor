@@ -69,7 +69,10 @@ def create_proxy(
     def refused(remote) -> JSONResponse:
         """Return the answer to give when the server refuses the key, or wants one."""
         with remote:
-            detail = json.loads(remote.read() or b"{}").get("detail", "")
+            try:  # from dastor, JSON; from something in front of it, perhaps not
+                detail = json.loads(remote.read()).get("detail", "")
+            except OSError, ValueError, AttributeError:
+                detail = "HTTP 401"
         if key is None:
             hint = (
                 f"{base} needs an API key: set DASTOR_KEY and start dastor browse again"
@@ -134,18 +137,29 @@ def create_proxy(
             )
         except OSError as exc:
             return unreachable(exc)
-        with remote:
-            body = await anyio.to_thread.run_sync(remote.read)
+        if (moved := redirected(remote)) is not None:
+            remote.close()
+            return moved
+        if remote.status == 401:
+            return await anyio.to_thread.run_sync(refused, remote)
+        try:
+            with remote:
+                body = await anyio.to_thread.run_sync(remote.read)
+            found = json.loads(body) if remote.status == 200 else {}
+        except (OSError, ValueError) as exc:
+            return unreachable(exc)
         if remote.status == 404:  # a server from before sign-in
             return {"user": None, "sign_in": False}
         if remote.status != 200:
             return _relay(remote, body)
-        return {**json.loads(body), "sign_in": False}
+        return {"user": found.get("user"), "sign_in": False}
 
     @app.api_route("/v1/session", methods=["POST", "DELETE"])
     def no_sign_in():
         """Refuse to sign in: the key is the one this app was started with."""
-        detail = "dastor browse reads the server with the key in DASTOR_KEY"
+        detail = (
+            "dastor browse signs in with the key in DASTOR_KEY, read when it starts"
+        )
         return JSONResponse({"detail": detail}, 400)
 
     @app.get("/health")

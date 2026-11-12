@@ -160,11 +160,16 @@ class Settings(_Model):
     users: list[User] = []
     limits: Limits = Limits()
     annotations: AnnotationConfig | None = None
+    # The pages are served over HTTPS, perhaps by a proxy which passes them
+    # on over HTTP: the sign-in cookie is then always `Secure` and `__Host-`.
+    https: bool = False
 
     @field_validator("users")
     @classmethod
     def _unique_users(cls, value: list[User]) -> list[User]:
         """Refuse duplicate user names or keys, which would be ambiguous."""
+        if any(x.name == "*" for x in value):
+            raise ValueError("no user may be named '*': 'user:*' grants every user")
         for field in ("name", "key_sha256"):
             seen = [getattr(x, field) for x in value]
             if len(seen) != len(set(seen)):
@@ -188,6 +193,16 @@ class Settings(_Model):
             raise ValueError(msg)
         if self.annotations.anonymous_owner in names:
             raise ValueError("anonymous_owner is the name of a user")
+        if (
+            self.annotations.anonymous_owner
+            and self.users
+            and not self.open_to_visitors
+        ):
+            msg = (
+                "anonymous_owner: no rule grants visitors ('*'), so with users "
+                "they are turned away and can save nothing"
+            )
+            raise ValueError(msg)
         return self
 
     @property
