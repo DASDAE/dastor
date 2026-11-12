@@ -22,10 +22,10 @@ const CHROME = {
     text: "#cfd3d8", dim: "#9aa0a6", tick: "#777", strip: "#3a3d42", stripGap: "#15161a", bad: "#ff8b96",
     win: "#ffc934", winFill: "rgba(255,201,52,0.28)", outline: "#c6c7cb", outlineFill: "rgba(198,199,203,0.06)",
     noteBg: "rgba(20,22,26,0.92)", noteText: "#ffc934", noteSub: "#cfd3d8", accent: "#ffc934" },
-  light: { bg: "#f3f4f6", plot: "#e9ebee", gap: "#e4e6ea", hatch: "rgba(122,82,0,0.38)", gapText: "#7a5200",
-    text: "#2b2e33", dim: "#5d6167", tick: "#8a8e95", strip: "#6b7078", stripGap: "#dfe2e6", bad: "#b00020",
+  light: { bg: "#e4e6ea", plot: "#b9bec6", gap: "#cdd1d7", hatch: "rgba(122,82,0,0.38)", gapText: "#7a5200",
+    text: "#2b2e33", dim: "#5d6167", tick: "#8a8e95", strip: "#6b7078", stripGap: "#cdd1d7", bad: "#b00020",
     win: "#8a5d00", winFill: "rgba(138,93,0,0.16)", outline: "#5d6167", outlineFill: "rgba(29,31,35,0.05)",
-    noteBg: "rgba(255,255,255,0.94)", noteText: "#7a5200", noteSub: "#2b2e33", accent: "#8a5d00" },
+    noteBg: "rgba(239,240,243,0.95)", noteText: "#7a5200", noteSub: "#2b2e33", accent: "#8a5d00" },
 };
 let C = CHROME.dark;
 // The theme: the one chosen here before, else the system's.

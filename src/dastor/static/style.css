@@ -9,15 +9,15 @@
   --btn-hover: #9bbdf0; --btn-hover-text: #002868; --backdrop: rgba(0, 0, 0, 0.55);
 }
 :root[data-theme="light"] {
-  --bg: #f3f4f6; --panel: #ffffff; --raised: #e7e9ec; --line: #b4b8bf;
+  --bg: #e4e6ea; --panel: #eff0f3; --raised: #dfe2e6; --line: #a9aeb6;
   --text: #1d1f23; --muted: #5d6167;
   --blue: #2f6cc7; --blue-soft: #1d4f9c; --navy: #002868;
   --gold: #ffc934; --red: #c2001f; --red-deep: #d0002a;
-  --gold-ink: #8a5d00; --field: #ffffff; --edge: #8d929a; --hair: #e1e4e8; --lift: 0 2px 8px rgba(0, 0, 0, 0.18);
+  --gold-ink: #8a5d00; --field: #f8f9fa; --edge: #858a93; --hair: #d5d8dd; --lift: 0 2px 8px rgba(0, 0, 0, 0.18);
   --btn-hover: #1d4f9c; --btn-hover-text: #ffffff; --backdrop: rgba(29, 31, 35, 0.35);
   color-scheme: light;
 }
-:root[data-theme="light"] button:disabled { opacity: 1; color: #8a8e95; background: #f3f4f6; border-color: #d5d8dd; }
+:root[data-theme="light"] button:disabled { opacity: 1; color: #7f848c; background: #e4e6ea; border-color: #c9cdd3; }
 :root[data-theme="light"] :is(#levelBar button.pinned, a.btn.big, #labelBox) { border-color: #b97f00; }
 :root[data-theme="light"] dialog#help { box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25); }
 :root[data-theme="light"] .brand img { filter: drop-shadow(0 0 0.6px #232426) contrast(1.15) brightness(0.92); }
