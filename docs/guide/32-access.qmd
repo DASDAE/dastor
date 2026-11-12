@@ -1,0 +1,30 @@
+---
+title: "Access control"
+guide-section: Explanation
+---
+
+## Per file
+
+Access is decided for whole files. A file is visible to a user only when every patch in it matches a rule granting that user, and a file is never partly served. With no rules nothing is visible.
+
+A rule matches a regular expression against a column of the spool's contents, such as `tag`, `station` or `source_path`, and grants it to `*` (everyone, visitors included), `user:*` (every user), `user:<name>` or `group:<name>`.
+
+Every request reads the spool through one place, which applies the rules. Rows are checked again on every selection and patches again as they load, so a refresh, or a file changed since it was indexed, can only narrow what is served.
+
+## Who is asking
+
+A request names its user with `Authorization: Bearer <key>`, or, from the server's pages, with the session cookie that signing in sets. A request with neither is a visitor's.
+
+The server keeps only each key's SHA-256 digest. Signing in checks the key once and keeps a random session id in memory, for 12 hours or until the server restarts. The browser holds only an `HttpOnly`, `SameSite=Strict` cookie naming it, shared by every page and tab of the server. The key itself never goes into a cookie or the browser's storage.
+
+## Servers closed to visitors
+
+A server with users whose rules grant nothing to `*` turns visitors away before any work: the API answers 401, and the viewer's page sends them to `/signin`. Only `/signin`, `/health`, `/v1/session` and the viewer's scripts, styles and icons stay open. That keeps unauthenticated requests cheap; how often anyone may ask is left to a [reverse proxy](13-proxy.qmd).
+
+## Servers without users
+
+`dastor browse` and `dastor.view` have no users, so there is nothing to sign in as. `dastor.view` instead puts a random token in its address, which every request of its API must present, so other users of the machine and other websites are refused.
+
+## Annotations
+
+An annotation set is shown to its owner, and to those who may read every file of the acquisition it was made on. Annotations never describe data their reader can't see. Only a set's owner changes it, and only the server writes a feature's `created_time`, `modified_time` and `modified_by`.

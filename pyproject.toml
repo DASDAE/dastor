@@ -38,6 +38,9 @@ dev = [
     "ruff>=0.15",
     "websocket-client>=1.9.2",
 ]
+docs = [
+    "great-docs>=0.17",
+]
 
 [tool.hatch.version]
 path = "src/dastor/__init__.py"

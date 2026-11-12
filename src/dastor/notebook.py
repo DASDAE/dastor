@@ -76,7 +76,7 @@ class Viewer:
     height
         The height of the frame in a notebook, in pixels.
     limits
-        Values for the server's `limits` (see the README), such as
+        Values for the `limits` of a server's configuration, such as
         `max_view_bytes`. Left alone, a tile and a screen may read any
         amount when every patch is held in memory, and otherwise what a
         server allows.

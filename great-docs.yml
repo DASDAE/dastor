@@ -1,0 +1,38 @@
+# Great Docs configuration: every option and its default is listed at
+# https://posit-dev.github.io/great-docs/user-guide/configuration.html
+# Build the site with `uv run --group docs great-docs build` (needs Quarto).
+
+display_name: dastor
+parser: numpy
+dynamic: false # static: dastor.notebook is imported only when used
+repo: https://github.com/DASDAE/dastor
+site_url: https://dasdae.github.io/dastor/
+pypi: false # not on PyPI yet
+
+logo:
+  light: docs/images/favicon.svg
+  show_title: true
+hero: false # the README, the home page, opens with the logo
+favicon: docs/images/favicon.svg
+
+authors:
+  - name: Derrick Chambers
+    role: Author
+
+announcement:
+  content: "**Experimental.** dastor's API and wire format will change without notice."
+  type: warning
+  dismissable: true
+
+# Pages are ordered by their number and grouped by `guide-section` in
+# their front matter, following Diataxis: tutorial, how-to, explanation,
+# reference.
+user_guide: docs/guide
+
+reference:
+  - title: Python
+    desc: Read a dastor server from Python, or show data in the viewer.
+    contents:
+      - Client
+      - view
+      - notebook.Viewer

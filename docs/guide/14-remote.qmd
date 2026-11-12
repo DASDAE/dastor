@@ -1,0 +1,46 @@
+---
+title: "Work with data on a server"
+guide-section: How-to guides
+---
+
+## Browse a server
+
+```bash
+export DASTOR_KEY=...          # your API key on that server, if it needs one
+dastor browse https://das.example.org
+```
+
+The page is served from your machine and its requests are passed to the server with your key, which never reaches the browser. Annotations are kept on the server, under your name there. Anyone who can reach the local port reads the server as you, so leave it on `127.0.0.1`.
+
+## Copy selected data into a local directory
+
+```bash
+dastor browse https://das.example.org --data-dir ~/das
+```
+
+The viewer's Sync button then writes the area chosen under Download into `~/das` as one DASDAE file (see [Use the viewer](15-viewer.qmd#download-an-area)). Nothing there is replaced. `--data-dir` works for a local directory too, but may not be inside the directory being browsed.
+
+## Read data from Python
+
+`dastor.Client` opens the server's patches as a DASCore spool:
+
+```python
+from dastor import Client
+
+spool = Client("https://das.example.org", key=KEY).spool()
+sub = spool.select(time=("2020-01-03T00:00:04", "2020-01-03T00:00:10"), tag="public*")
+for patch in sub.chunk(time=2):
+    ...
+```
+
+Selecting, chunking, coverage and contents run locally, on the server's index. Each patch is downloaded when it loads, trimmed on the server to the part the selection needs.
+
+## Request data over HTTP
+
+```bash
+curl -H "Authorization: Bearer $KEY" \
+    "https://das.example.org/v1/data?time_min=2020-01-03T00:00:04&time_max=2020-01-03T00:00:10&distance_max=50&format=dasdae" \
+    -o patches.h5
+```
+
+[HTTP API](42-http-api.qmd) lists every endpoint.

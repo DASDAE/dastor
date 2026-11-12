@@ -1,0 +1,24 @@
+---
+title: "Products and levels"
+guide-section: Explanation
+---
+
+A long DAS recording holds far more samples than a screen has pixels. The viewer doesn't thin the data itself. It draws *products*, and leaves the choice of coarse products to whoever writes the data.
+
+## Products
+
+A product is the patches of one kind: the same `acquisition_key`, `tag` and DASCore's other kind attributes, with the same dims and steps. Products sharing an `acquisition_key` are one recording, seen at different resolutions. A raw recording and its maximum over each second, tagged apart, are two products of one recording.
+
+## Levels
+
+The Levels panel lists a recording's products from coarse to fine. At each zoom the viewer draws the coarsest ticked product with at least one sample for each pixel along time, or the finest when none has. Zoomed out it draws the coarse product, and zoomed in the fine one, so a screen never reads much more data than it shows.
+
+dastor doesn't make coarse products yet. Write them into the directory with DASCore, tagged so they can be told apart.
+
+## Limits
+
+A view which would read more than `max_view_bytes` of a product isn't loaded. The nearest coarser ticked product stands in; with none, the viewer draws an outline of where the product has data. Each tile is held to `max_tile_bytes` by the server, estimated before anything loads.
+
+## Tiles
+
+Each tile is read from the spool when it is asked for, through the same access checks as any other request, and isn't cached on the server. A tile can't show what its reader may not read.

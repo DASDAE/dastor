@@ -1,0 +1,42 @@
+---
+title: "Use the viewer"
+guide-section: How-to guides
+---
+
+Press `?` in the viewer for every key and mouse action.
+
+## Move around
+
+The wheel zooms (with Shift time only, with Ctrl distance only), and the arrows pan. In the pan tool a drag moves the view; in any tool the middle button, or Space and drag, does. Tab moves on by a screen in time, and Shift+Tab back. The strip under the time axis is the whole recording: click or drag on it to move the window, and press `b` to go back to the view before a jump. `w` fits the whole recording.
+
+## Set the colours
+
+Drag the top or bottom of the colour bar to move that limit, or its middle to move both. A click on it, or `a`, sets the limits from what is on screen. The Display panel picks the colour map, the statistic a pixel shows and a log scale.
+
+## Annotate
+
+1. Pick a tool: `1` point, `2` path, `3` polygon, `4` box.
+2. Click to place points. End a path or polygon with Enter, a double-click or a right-click.
+3. Type a label in the box that opens, or press Enter to keep the last one.
+
+Drawings go into the set being edited and are saved as you go. To edit, switch to the select tool (`v`, or double-click): drag an annotation or a vertex to move it, double-click a side to add a vertex, and press Delete to remove.
+
+## Correct someone else's annotations
+
+Select them and press `c` to copy them into your own set. Each copy records where it came from in `derived_from` and `derived_revision`. Only a set's owner can change it.
+
+## Move sets between the viewer and DASCore
+
+"download" gives the set being edited as a zip of its folder. "load" makes a new set from such a zip, or from a table of annotations (`.parquet` or `.csv`).
+
+## Download an area
+
+1. In the Download panel, take an area: from the selected annotation, from the window on screen, or by dragging a box (`d`).
+2. Tick the products to take; it shows their size.
+3. Press download for one DASDAE file, or Sync (under `dastor browse --data-dir`) to write it into your local data directory.
+
+A synced file is named for the recording, the product and the start of the area, with a number added if that name is taken, so nothing is replaced. The directory's spool sees it when it next indexes (`spool.update()`).
+
+## Choose the levels to zoom through
+
+The Levels panel lists a recording's [products](31-products.qmd) from coarse to fine. Tick the ones to zoom through. The control at the bottom right shows the level on screen; click it to hold the view on one level, and choose "auto" to follow the zoom again.

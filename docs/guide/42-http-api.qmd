@@ -1,0 +1,74 @@
+---
+title: "HTTP API"
+guide-section: Reference
+---
+
+Every endpoint but `/health` sees only what the caller may read. Requests authenticate with `Authorization: Bearer <key>` or a session cookie (see [Access control](32-access.qmd)).
+
+## Session
+
+| Endpoint | Returns |
+|---|---|
+| `GET /v1/session` | Who the caller is (`user`, null for visitors), and `sign_in`: true on a server with users. |
+| `POST /v1/session` | Signs the browser in with `{"key": <key>}`, setting a session cookie. |
+| `DELETE /v1/session` | Signs it out. |
+| `GET /signin?next=<path>` | The sign-in page, which then goes to `next` (a page of this server). |
+| `GET /health` | Server status. |
+
+## Data
+
+| Endpoint | Returns |
+|---|---|
+| `GET /v1/summary` | Patch and file counts, an estimate of the array bytes, the contents columns, the dims and each dim's extent. |
+| `GET /v1/contents` | Patch metadata (JSON, or `format=arrow`). |
+| `GET /v1/coverage?dim=time` | The spans of a dimension the patches cover. |
+| `GET /v1/gaps?dim=time` | The gaps between them. |
+| `GET /v1/data` | The patches, trimmed to the query (`format=arrow` or `format=dasdae`). |
+| `GET /v1/patch/{data_id}` | One patch, by the `data_id` of its contents row, as one Arrow IPC stream (404 if missing or not visible). |
+| `GET /v1/index` | A DASCore spool index (SQLite) of the patches the caller may read, for the client. |
+| `POST /v1/sync?name=<name>` | Only under `dastor browse --data-dir`: writes what `/v1/data` would return as `<name>.h5` in the local data directory. |
+
+### Selecting patches
+
+The summary, contents, coverage, gaps, data, patch and tile endpoints take query parameters that select patches:
+
+- `<coord>_min` and `<coord>_max` bound a coordinate, such as `time_min=2020-01-03T00:00:04`.
+- `product=<id>` keeps one product of `/v1/viewer/products`; repeat it to keep several.
+- Any other parameter selects an attribute, with DASCore's `*` and `?` wildcards, such as `tag=public*`.
+
+In JSON, times are ISO 8601 strings and durations are seconds.
+
+### Status codes
+
+Data requests answer 204 when nothing matches and 413 when the response would exceed `max_request_bytes`. Patches are checked again as they load: a file changed since it was indexed makes a DASDAE request answer 409, and an Arrow stream end early.
+
+## Viewer
+
+| Endpoint | Returns |
+|---|---|
+| `GET /v1/viewer/products` | The products the caller may read, each with an `id`, its steps, extents and recorded spans, and the viewer's limits. |
+| `GET /v1/viewer/tile?product=<id>` | One image of a product: `<x>_min`/`<x>_max` and `<y>_min`/`<y>_max` bound it, `width` and `height` size it, `stat` is `max`, `mean` or `absmax`. Little-endian float32 rows, the lowest y first, NaN where there is no data (204 if none, 413 over `max_tile_bytes`). |
+
+## Annotations
+
+| Endpoint | Returns |
+|---|---|
+| `GET /v1/annotations` | The sets the caller may read, and the name the caller saves under. |
+| `GET /v1/annotations/{owner}/{name}` | One set, as the JSON records of its annotations and features tables. |
+| `PUT /v1/annotations/{owner}/{name}` | Saves it, stating the `base_revision` it was read at (409 if the set has moved on). Owner only. |
+| `DELETE /v1/annotations/{owner}/{name}` | Deletes it. Owner only. |
+| `GET /v1/annotations/{owner}/{name}/export` | The set as a zip of its directory. |
+| `POST /v1/annotations/{owner}/{name}/import?filename=<name>` | A new set from the body: a zip of a set's directory, or a `.parquet` or `.csv` table (`dims` for a table stating none, `acquisition_key` for a set naming none). 409 if the set exists. |
+
+## Wire format
+
+`format=arrow` responses hold one Arrow IPC stream per patch, each preceded by its length as an unsigned 64-bit little-endian integer. Each stream is a patch in DASCore's [ARROW format](43-arrow-patch-format.qmd). `dastor.wire.read_framed` reads them:
+
+```python
+from dastor.wire import read_framed
+
+with open("patches.arrow", "rb") as fi:
+    patches = list(read_framed(fi))  # DASCore patches
+```
+
+`format=dasdae` returns one DASDAE HDF5 file, which `dascore.spool` reads.

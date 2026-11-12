@@ -1,0 +1,37 @@
+---
+title: "Command line"
+guide-section: Reference
+---
+
+## dastor serve
+
+```bash
+dastor serve CONFIG [--host 127.0.0.1] [--port 8000]
+```
+
+Serves the spool in a [config file](41-config.qmd).
+
+## dastor browse
+
+```bash
+dastor browse PATH [--annotations DIR] [--data-dir DIR] [--host 127.0.0.1] [--port 8000] [--no-open]
+```
+
+Opens the viewer on a directory of DAS files, or on the dastor server at a URL.
+
+| Option | Meaning |
+|---|---|
+| `PATH` | A directory, or a server's URL. A server's API key is read from `DASTOR_KEY`. |
+| `--annotations` | Where a directory's annotation sets are kept; `<directory>_annotations` by default. |
+| `--data-dir` | A local data directory which the viewer's Sync copies selected data into. Not inside the directory browsed. |
+| `--no-open` | Don't open a browser. |
+
+A directory is served with everything readable and re-indexed every 5 minutes, saving annotations as your system user.
+
+## dastor new-key
+
+Prints a new API key and its digest, for the `users` of a config.
+
+## dastor hash-key
+
+Prints the digest of a key read from stdin.

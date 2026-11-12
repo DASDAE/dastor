@@ -1,4 +1,7 @@
-# DASCore Arrow patch format, version 1.0
+---
+title: "DASCore Arrow patch format, version 1.0"
+guide-section: Reference
+---
 
 DASCore's `ARROW` format holds one patch in one [Apache Arrow IPC](https://arrow.apache.org/docs/format/Columnar.html#serialization-and-interprocess-communication-ipc) stream (`.arrows`, `application/vnd.apache.arrow.stream`) or file (`.arrow`). dastor sends patches in it. The reference implementation is `dascore/io/arrow`; this page describes what it writes and reads.
 

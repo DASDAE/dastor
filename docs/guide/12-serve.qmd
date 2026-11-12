@@ -1,0 +1,60 @@
+---
+title: "Run a server"
+guide-section: How-to guides
+---
+
+A server shares one directory of DAS files, with [rules](32-access.qmd) saying who may read each file.
+
+## Make a key for each user
+
+```bash
+dastor new-key
+```
+
+It prints:
+
+```text
+key:        <give this to the user>
+key_sha256: <put this in the config>
+```
+
+Only the digest goes in the config. `dastor hash-key` prints the digest of a key you already have, read from stdin.
+
+## Write a config
+
+```yaml
+spool:
+  path: /data/das               # a directory of DAS files, indexed recursively
+  refresh_seconds: 300          # re-index every 5 minutes
+  rules:
+    - column: tag
+      pattern: "^public"
+      allow: ["*"]              # everyone, including visitors
+    - column: source_path       # paths are relative to the directory
+      pattern: "^project_a/"
+      allow: ["group:lab"]
+users:
+  - name: alice
+    key_sha256: <digest from dastor new-key>
+    groups: [lab]
+annotations:                    # optional: turns on annotations
+  path: /data/das_annotations   # a directory outside the data directory
+```
+
+[Configuration](41-config.qmd) lists every key.
+
+## Start it
+
+```bash
+dastor serve config.yaml --host 0.0.0.0 --port 8000
+```
+
+The server runs as one process. It indexes the directory at start, and again every `refresh_seconds`, and loads patches in a thread pool. The viewer is at `/viewer/`; users sign in there with their key.
+
+## Let only users in
+
+Leave `*` out of every rule. Visitors are then turned away before any work: the API answers them 401, and the viewer sends them to `/signin`.
+
+## Serve it on the internet
+
+[Put it behind a reverse proxy](13-proxy.qmd), which ends TLS and limits how often clients may ask.

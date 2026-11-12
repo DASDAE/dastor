@@ -1,0 +1,50 @@
+---
+title: "Put a server behind a reverse proxy"
+guide-section: How-to guides
+---
+
+dastor doesn't serve TLS or limit how often a client may ask. A reverse proxy in front of it does both.
+
+## Tell dastor the pages are served over HTTPS
+
+Add to the config:
+
+```yaml
+https: true
+```
+
+The sign-in cookie is then `Secure` with the `__Host-` prefix, though the proxy passes requests on over plain HTTP. Without it, dastor goes by `X-Forwarded-Proto`, which uvicorn trusts only from `127.0.0.1` unless `FORWARDED_ALLOW_IPS` names the proxy.
+
+## Pass the original Host
+
+dastor refuses a change whose `Origin` names another host, so the proxy must pass the `Host` the browser asked for.
+
+## Limit request rates
+
+Limit every path, and `/v1/session` (where keys are tried) most strictly. With nginx:
+
+```nginx
+limit_req_zone $binary_remote_addr zone=dastor:10m rate=20r/s;
+limit_req_zone $binary_remote_addr zone=signin:10m rate=5r/m;
+
+server {
+    listen 443 ssl;
+    server_name das.example.org;
+    # ssl_certificate ... ;
+
+    location / {
+        limit_req zone=dastor burst=100;
+        proxy_set_header Host $host;
+        proxy_pass http://127.0.0.1:8000;
+    }
+    location = /v1/session {
+        limit_req zone=signin burst=5;
+        proxy_set_header Host $host;
+        proxy_pass http://127.0.0.1:8000;
+    }
+}
+```
+
+## Give the server a host name of its own
+
+Cookies aren't kept to one port, so two dastor servers on one host name sign each other's browsers out. Serve each on its own name.
