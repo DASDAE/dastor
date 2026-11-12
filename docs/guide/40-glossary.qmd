@@ -1,0 +1,32 @@
+---
+title: "Glossary"
+guide-section: Reference
+---
+
+**Patch.** DASCore's unit of data: an array with its coordinates (such as time and distance) and attributes. A file holds one or more.
+
+**Spool.** DASCore's collection of patches. A dastor server serves one spool: a directory of DAS files, indexed recursively.
+
+**Index.** DASCore's table of every patch in a spool (its attributes and extents), kept in a file so the spool is searched without opening the data. Each row is one patch; the rows are the spool's *contents*.
+
+**Attribute.** A value a patch carries, such as `tag`, `station` or `acquisition_key`. Every attribute is a column of the contents, which rules and queries match.
+
+**Product.** The patches of one kind (the same `acquisition_key`, `tag` and DASCore's other kind attributes) with the same dims and steps: for example a recording's raw data, or its maximum over each second.
+
+**Recording.** The products sharing an `acquisition_key`: one acquisition, seen at different resolutions.
+
+**Level.** A product of a recording, as the viewer zooms through it: a coarse level when zoomed out, the raw data when zoomed in.
+
+**Tile.** One image the viewer asks for: a product's samples in a window, reduced to the window's pixels with a statistic (`max`, `mean` or `absmax`).
+
+**Rule.** A line of the config granting the files whose rows match a pattern to `*` (everyone), `user:*` (every user), a user or a group. Access is per file: a file is visible when every row of it is granted.
+
+**User.** An API key holder named in the config. A *visitor* is a request without a key or session. A *group* names several users at once.
+
+**Session.** What signing in in the browser starts: the server checks the key once and gives the browser a cookie, valid for 12 hours or until the server restarts.
+
+**Closed server.** A server with users whose rules grant nothing to `*`. Visitors are turned away and sent to sign in.
+
+**Annotation set.** Points, paths, polygons and boxes drawn on the data, saved as a DASCore annotation set in a directory `<owner>/<name>/`. Only the *owner* changes it.
+
+**Workspace mode.** `dastor browse` on a directory and `dastor.view`: no config file and no users, everything in the directory readable, annotations saved as you.
