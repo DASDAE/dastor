@@ -66,6 +66,18 @@ def create_proxy(
         detail = f"{base} redirects to {where}; browse that address instead"
         return JSONResponse({"detail": detail}, 502)
 
+    def refused(remote) -> JSONResponse:
+        """Return the answer to give when the server refuses the key, or wants one."""
+        with remote:
+            detail = json.loads(remote.read() or b"{}").get("detail", "")
+        if key is None:
+            hint = (
+                f"{base} needs an API key: set DASTOR_KEY and start dastor browse again"
+            )
+        else:
+            hint = f"{base} refused the key in DASTOR_KEY ({detail})"
+        return JSONResponse({"detail": hint}, 401)
+
     def unreachable(exc: Exception) -> JSONResponse:
         return JSONResponse({"detail": f"could not reach {base}: {exc}"}, 502)
 
@@ -95,6 +107,8 @@ def create_proxy(
                     return {"name": None, "bytes": 0}
                 if (moved := redirected(remote)) is not None:
                     return moved
+                if remote.status == 401:
+                    return refused(remote)
                 if remote.status != 200:
                     return _relay(remote, remote.read())
                 try:
@@ -163,6 +177,8 @@ def create_proxy(
         if remote.status in (204, 304):
             remote.close()
             return Response(status_code=remote.status)
+        if remote.status == 401:
+            return await anyio.to_thread.run_sync(refused, remote)
         return _relay(remote)
 
     app.mount("/viewer", StaticFiles(directory=_STATIC, html=True), name="viewer")

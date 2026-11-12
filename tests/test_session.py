@@ -188,3 +188,19 @@ class TestClosedServer:
         assert _patches(closed, auth(ALICE_KEY)) == 5
         closed.delete("/v1/session")
         assert closed.get("/v1/summary").status_code == 401
+
+    def test_a_missing_or_refused_key_says_what_to_do(self, settings):
+        config = settings.model_dump(mode="json")
+        config["spool"]["rules"] = [
+            {"column": "tag", "pattern": "", "allow": ["user:*"]}
+        ]
+        with live(create_app(Settings.model_validate(config))) as address:
+            with TestClient(create_proxy(address)) as none:
+                reply = none.get("/v1/viewer/products")
+                assert reply.status_code == 401
+                assert "set DASTOR_KEY" in reply.json()["detail"]
+            with TestClient(create_proxy(address, "wrong")) as wrong:
+                detail = wrong.get("/v1/summary").json()["detail"]
+                assert "refused the key in DASTOR_KEY" in detail
+            with TestClient(create_proxy(address, BOB_KEY)) as bob:
+                assert bob.get("/v1/summary").status_code == 200
