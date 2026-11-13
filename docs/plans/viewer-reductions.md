@@ -34,6 +34,9 @@ A third scale beside linear and log, which spreads the colours by how common val
 
 ## 4. A command which builds coarse levels
 
+Superseded by `config-and-pyramids.md`.
+
+
 Already agreed: `dastor` may build generic reductions (max, mean, count, and the signed extreme of item 1) as products of the same recording, told apart by `tag`. It waits on DASCore's Zarr append. Datashader's `render_tiles` is the same idea and adds nothing to design.
 
 ## Order
