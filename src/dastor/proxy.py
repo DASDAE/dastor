@@ -18,7 +18,13 @@ from dastor.sync import SyncNameError, check_name, refuse_elsewhere, synced_file
 
 _STATIC = FilePath(__file__).parent / "static"
 # Headers of the server's answer which are passed on to the page.
-_PASSED = ("content-type", "content-disposition", "content-encoding", "vary")
+_PASSED = (
+    "content-type",
+    "content-disposition",
+    "content-encoding",
+    "vary",
+    "x-tile-dtype",
+)
 _LISTING = "v1/viewer/products"
 
 

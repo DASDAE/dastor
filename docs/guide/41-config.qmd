@@ -19,6 +19,7 @@ users:
     key_sha256: <digest from dastor new-key>
     groups: [lab]
 https: false
+trusting: true
 limits:
   max_request_bytes: 2147483648
   max_concurrent_loads: 4
@@ -39,6 +40,19 @@ annotations:
 | `refresh_seconds` | none | How often to index the directory again; none indexes only at start. |
 | `rules` | `[]` | Who may read which files. With none, nothing is visible. |
 
+### raw
+
+Optional: raw data shown as level 0 of the recordings it belongs to.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `path` | required | The raw data directory. |
+| `index` | in the directory | Its DASCore index. |
+| `links` | required | A table (Parquet or CSV) of `source_path` (relative to `path`) and the recording's `acquisition_key`, `network` and `station`. Rows it doesn't name aren't served. |
+| `update` | `false` | Index the directory again at start. Off, the index is read as it is: build it beforehand, as a large remote directory takes hours. |
+
+The raw rows pass the same access rules as the others, matched against the raw files' own attributes.
+
 ### rules
 
 | Key | Meaning |
@@ -54,10 +68,16 @@ A file is visible only when every row of it matches a rule granting the reader. 
 | Key | Meaning |
 |---|---|
 | `name` | The user's name. With annotations on, a plain word (letters, digits, `_ . -`), since it names a folder. |
-| `key_sha256` | The SHA-256 hex digest of the user's key, from `dastor new-key` or `dastor hash-key`. |
+| `key_sha256` | The SHA-256 hex digest of the user's key, from `dastor new-key` or `dastor hash-key`. Optional: a user with none signs in by name, and only on a trusting server. |
 | `groups` | The groups the user is in, for `group:<name>` rules. |
 
 Names and digests must be unique, and no user may be named `*`.
+
+## trusting
+
+`true` by default. The sign-in lists the server's users (those above, and the owners of annotation sets), and anyone may sign in as one with no key, or under a new name, a plain word. A user with a key still has to give it. A new name gets what `user:*` grants.
+
+This suits a lab's private network, where knowing who drew what is enough. Set it to `false` on a server others can reach: then only keys sign in. `dastor browse` and `dastor.view` are never trusting.
 
 ## https
 
@@ -72,6 +92,7 @@ Names and digests must be unique, and no user may be named `*`.
 | `max_tile_bytes` | 64 MiB | The most array bytes one viewer tile may read. |
 | `max_view_bytes` | 512 MiB | The most the viewer reads for one screen; above it a coarser product stands in. |
 | `max_upload_bytes` | 64 MiB | The largest annotation set uploaded as a file. |
+| `tile_workers` | 0 | Processes which load and reduce viewer tiles. A tile's work holds Python's lock, so the server's threads run tiles one at a time; workers run them side by side. 0 does the work in the server's process. |
 
 ## annotations
 

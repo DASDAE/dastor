@@ -11,7 +11,9 @@ A product is the patches of one kind: the same `acquisition_key`, `tag` and DASC
 
 ## Levels
 
-The Levels panel lists a recording's products from coarse to fine. At each zoom the viewer draws the coarsest ticked product with at least one sample for each pixel along time, or the finest when none has. Zoomed out it draws the coarse product, and zoomed in the fine one, so a screen never reads much more data than it shows.
+The viewer lists a recording's resolutions, numbered from 1, the finest. Where several products share a resolution (one for each statistic, say), the reader picks one, by default one whose tag ends with the statistic the tiles take ("· max" for max). At each zoom the viewer draws the coarsest ticked level whose samples are at most a few pixels across ("switch finer at", 2 by default) along both time and distance, or along time alone when no level is that fine along distance. Zoomed out it draws a coarse level, and zoomed in a fine one, so a screen never reads much more data than it shows.
+
+Level 0 is raw data, joined to the recordings it belongs to by `spool.raw` (see [Configuration](41-config.qmd)) and loaded only when ticked.
 
 dastor doesn't make coarse products yet. Write them into the directory with DASCore, tagged so they can be told apart.
 
@@ -21,4 +23,4 @@ A view which would read more than `max_view_bytes` of a product isn't loaded. Th
 
 ## Tiles
 
-Each tile is read from the spool when it is asked for, through the same access checks as any other request, and isn't cached on the server. A tile can't show what its reader may not read.
+Each tile is read from the spool when it is asked for, through the same access checks as any other request, and isn't cached on the server. A tile can't show what its reader may not read. With `limits.tile_workers`, the patches a tile needs are checked in the server's process and loaded and reduced in worker processes. Tiles come as float16 when the viewer asks and their values fit it, else float32.

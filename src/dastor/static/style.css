@@ -33,7 +33,11 @@ button.tool svg { pointer-events: none; }
 #top select { padding: 5px 8px; }
 .spacer { flex: 1; }
 /* The set being edited and whether it is saved. */
-#setChip { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px; }
+#saveDot[hidden] { display: none; }
+#signInUsers { display: flex; flex-wrap: wrap; gap: 6px; }
+#signInUsers[hidden], #inpUser[hidden], #inpKey[hidden] { display: none; }
+#signInUsers button[aria-selected=true] { background: var(--blue); border-color: var(--blue-soft); color: #fff; }
+#inpUser { padding: 6px 8px; }
 .swatch { width: 11px; height: 11px; border-radius: 2px; flex: none; border: 1px solid #000; }
 .dot { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--muted); box-sizing: border-box; }
 .dot.ok { background: var(--muted); }
@@ -43,7 +47,10 @@ button.tool svg { pointer-events: none; }
 #view { position: relative; flex: 1; min-width: 0; }
 #cv { width: 100%; height: 100%; display: block; cursor: default; }
 #cv:focus-visible { outline: 1px solid var(--blue); outline-offset: -1px; }
-#side { width: 340px; overflow-y: auto; scrollbar-gutter: stable; background: var(--panel); border-left: 1px solid var(--line); padding: 4px 8px; }
+#side { position: fixed; top: 62px; right: 8px; z-index: 6; width: 440px; max-width: calc(100vw - 16px); max-height: calc(100vh - 110px);
+  overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--gold); border-radius: 4px;
+  padding: 4px 10px; box-shadow: var(--lift); box-sizing: border-box; }
+#side[hidden] { display: none; }
 #status { position: fixed; bottom: 0; left: 0; right: 0; height: 30px; padding: 0 8px; box-sizing: border-box;
   background: var(--panel); border-top: 1px solid var(--line); display: flex; gap: 16px; align-items: center; font-size: 14px;
   color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -93,13 +100,10 @@ table.keys td:last-child { color: var(--muted); }
 table.keys tr.group th { text-align: left; padding: 12px 6px 3px; color: var(--gold-ink); font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; }
 #toast, #tip { position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; display: none; z-index: 4; box-shadow: var(--lift); }
 #toast { left: 50%; top: 12px; transform: translateX(-50%); padding: 6px 12px; border-left: 3px solid var(--gold-ink); max-width: 70%; }
-#tip { pointer-events: none; padding: 3px 8px; font-size: 14px; white-space: nowrap; }
+#tip { pointer-events: none; padding: 4px 9px; font-size: 13px; line-height: 1.45; white-space: pre; }
 /* The label of a new annotation, typed where it was drawn. */
 #labelBox { position: absolute; width: 170px; z-index: 4; border: 2px solid var(--gold); background: var(--panel); padding: 3px 6px; box-shadow: var(--lift); }
 /* The tab on the side panel's edge, halfway down, which folds it away. */
-#sideHandle { position: absolute; right: 0; top: 50%; transform: translateY(-50%); width: 16px; height: 56px; padding: 0;
-  border-radius: 6px 0 0 6px; border-right: 0; background: var(--panel); color: var(--muted); font-size: 18px; line-height: 1; z-index: 3; }
-#sideHandle:hover { color: var(--gold-ink); border-color: var(--gold-ink); }
 dialog:is(#help, #signIn) { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-top: 3px solid var(--gold);
   border-radius: 6px; padding: 14px 18px; width: min(640px, 92vw); max-height: 88vh; overflow-y: auto; }
 dialog#signIn { width: min(420px, 92vw); }
@@ -126,3 +130,27 @@ a.btn.big { background: var(--gold); border-color: var(--gold); color: #1c1c1c; 
 #landing .brand { font-size: 28px; }
 #landing .brand img { height: 48px; }
 body.landing dialog::backdrop { background: none; }
+#btnPyramid { background: none; border: 0; padding: 0 2px; height: 24px; display: inline-flex; align-items: center; color: var(--muted); cursor: pointer; }
+#btnPyramid:hover, #btnPyramid.on { color: var(--gold-ink); }
+#btnPyramid.on { background: none; }
+.pyrSub { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--hair); }
+#pyrMenu .level select.name { flex: 1; min-width: 0; }
+#pyrMenu .level .step { min-width: 9em; }
+#pyrMenu .hint { padding: 4px 4px 2px; }
+#btnPyramid[hidden] { display: none; }
+.level .num { width: 1.4em; text-align: right; color: var(--gold-ink); font-variant-numeric: tabular-nums; font-weight: 600; }
+#side .tabs { display: flex; gap: 2px; margin: 4px 0 8px; border-bottom: 1px solid var(--line); }
+#side [role=tab] { background: none; border: 0; border-bottom: 3px solid transparent; border-radius: 0; padding: 6px 10px; color: var(--muted); font-weight: 600; }
+#side [role=tab][aria-selected=true] { color: var(--text); border-bottom-color: var(--gold); }
+#side [role=tab][hidden] { display: none; }
+#side .pane[hidden] { display: none; }
+.level.none { opacity: 0.5; }
+.level.raw { border-top: 1px dashed var(--hair); margin-top: 4px; padding-top: 4px; }
+#levelBar button.off { opacity: 0.4; cursor: default; }
+/* A ? which shows its note on hover or focus, in place of a paragraph in the menu. */
+.info { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px;
+  border: 1px solid var(--muted); border-radius: 50%; color: var(--muted); font-size: 11px; font-weight: 700; cursor: help; vertical-align: middle; }
+.info:hover, .info:focus { color: var(--gold-ink); border-color: var(--gold-ink); outline: none; }
+.info:hover::after, .info:focus::after { content: attr(data-tip); position: absolute; top: 22px; left: -8px; z-index: 7; width: 300px;
+  padding: 8px 10px; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-left: 3px solid var(--gold-ink);
+  border-radius: 4px; box-shadow: var(--lift); font-size: 13px; font-weight: normal; line-height: 1.4; white-space: normal; }

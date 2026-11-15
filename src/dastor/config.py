@@ -69,6 +69,35 @@ class Rule(_Model):
         return value
 
 
+class RawConfig(_Model):
+    """
+    Raw data served as level 0 of the recordings it belongs to.
+
+    Its rows join a recording through `links`, a table (Parquet or CSV) of
+    `source_path` (relative to `path`) and the recording's
+    `acquisition_key`, `network` and `station`. Rows it does not name are
+    not served. Prototype: the access rules are checked against the raw
+    patches' own attributes.
+
+    Parameters
+    ----------
+    path
+        The raw data directory.
+    index
+        Its DASCore index, when not in the directory.
+    links
+        The table joining raw files to recordings.
+    update
+        Index the directory again at start; off, the index is read as it is
+        (build it beforehand: a large remote directory takes hours).
+    """
+
+    path: Path
+    index: Path | None = None
+    links: Path
+    update: bool = False
+
+
 class SpoolConfig(_Model):
     """
     The served spool: a directory of DAS files and who may read them.
@@ -89,24 +118,30 @@ class SpoolConfig(_Model):
         it matches a rule granting that user; with no rules, nothing is.
     refresh_seconds
         How often to re-index the directory; None to index only at start.
+    raw
+        Raw data served as level 0 of the recordings (see `RawConfig`).
     """
 
     path: Path | None = None
     index: Path | None = None
     rules: list[Rule] = []
     refresh_seconds: float | None = Field(default=None, gt=0)
+    raw: RawConfig | None = None
 
 
 class User(_Model):
     """
-    An API key holder.
+    A user of the server, with an API key or none.
 
-    Only the SHA-256 hex digest of the key is stored; `dastor new-key`
-    makes a key and its digest.
+    Only the SHA-256 hex digest of a key is stored; `dastor new-key` makes a
+    key and its digest. A user with no key signs in by name alone, and only
+    on a trusting server (see `Settings.trusting`).
     """
 
     name: str
-    key_sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    key_sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")] | None = (
+        None
+    )
     groups: list[str] = []
 
 
@@ -125,6 +160,10 @@ class Limits(_Model):
     # keeps to it (the server enforces only the tile limit): beyond it a
     # coarser product stands in, and with none the data is only outlined.
     max_view_bytes: int = Field(default=512 * 1024**2, gt=0)
+    # Processes which load and reduce viewer tiles, beside the server's: a
+    # tile's work holds Python's lock, so threads alone run tiles one at a
+    # time. 0 does the work in the server's process.
+    tile_workers: int = Field(default=0, ge=0)
 
 
 class AnnotationConfig(_Model):
@@ -163,6 +202,10 @@ class Settings(_Model):
     # The pages are served over HTTPS, perhaps by a proxy which passes them
     # on over HTTP: the sign-in cookie is then always `Secure` and `__Host-`.
     https: bool = False
+    # Sign-in lists the users, and anyone may sign in as one with no key, or
+    # under a new name: for a lab's private network, not a public server.
+    # A user with a key still needs it.
+    trusting: bool = True
 
     @field_validator("users")
     @classmethod
@@ -171,7 +214,7 @@ class Settings(_Model):
         if any(x.name == "*" for x in value):
             raise ValueError("no user may be named '*': 'user:*' grants every user")
         for field in ("name", "key_sha256"):
-            seen = [getattr(x, field) for x in value]
+            seen = [y for x in value if (y := getattr(x, field)) is not None]
             if len(seen) != len(set(seen)):
                 raise ValueError(f"duplicate user {field}")
         return value

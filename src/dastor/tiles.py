@@ -55,6 +55,25 @@ def _kind_columns(contents: pd.DataFrame) -> list[str]:
     return [x for x in dc.get_config().patch_kind_attrs if x in contents.columns]
 
 
+def _grouped(steps: np.ndarray, digits: int = 12) -> np.ndarray:
+    """
+    Return steps rounded to `digits` significant digits, to group by.
+
+    Files of one recording can state its step a float's last digit apart
+    (1.5952381342006605 and ...603 m), which `product_rows` takes as one;
+    rounded finer than `_STEP_TOLERANCE`, the step a product states still
+    matches every row of it.
+    """
+    # through decimal text, which rounds exactly; whole numbers (nanoseconds) stay
+    return np.array(
+        [
+            x if not np.isfinite(x) or x == int(x) else float(f"{x:.{digits}g}")
+            for x in steps
+        ],
+        dtype="float64",
+    )
+
+
 def _step_numbers(contents: pd.DataFrame, dim: str) -> np.ndarray:
     """Return each row's step along a dim as a number, NaN where it has none."""
     name = f"{dim}_step"
@@ -145,7 +164,7 @@ def list_products(contents: pd.DataFrame) -> list[dict]:
     frame["dims"] = _text(contents["dims"]).to_numpy()
     all_dims = sorted({y for x in frame["dims"].unique() for y in x.split(",") if y})
     for dim in all_dims:
-        frame[f"_step_{dim}"] = _step_numbers(contents, dim)
+        frame[f"_step_{dim}"] = _grouped(_step_numbers(contents, dim))
     keys = [*kinds, "dims", *(f"_step_{x}" for x in all_dims)]
     out = []
     groups = frame.groupby(keys, dropna=False, sort=True).indices
@@ -322,6 +341,23 @@ def tile_range(value: tuple, timelike: bool) -> tuple:
     return low, high
 
 
-def encode_tile(values: np.ndarray) -> bytes:
-    """Return a tile as little-endian float32 rows, the lowest y first."""
-    return np.ascontiguousarray(values, dtype="<f4").tobytes()
+# float16's normal range: within it a value keeps three significant digits.
+_HALF_MAX, _HALF_TINY = 65504.0, 6.103515625e-05
+
+
+def encode_tile(values: np.ndarray, half: bool = False) -> tuple[bytes, str]:
+    """
+    Return a tile as little-endian rows, the lowest y first, and their dtype.
+
+    Given `half`, rows are float16, half the bytes, when every value fits its
+    normal range (else float32): about 0.05 % apart, finer than a colour map
+    shows.
+    """
+    if half:
+        finite = np.abs(values[np.isfinite(values)])
+        nonzero = finite[finite > 0]
+        if not nonzero.size or (
+            nonzero.max() <= _HALF_MAX and nonzero.min() >= _HALF_TINY
+        ):
+            return np.ascontiguousarray(values, dtype="<f2").tobytes(), "float16"
+    return np.ascontiguousarray(values, dtype="<f4").tobytes(), "float32"

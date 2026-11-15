@@ -11,15 +11,21 @@ The wheel zooms (with Shift time only, with Ctrl distance only), and the arrows 
 
 ## Set the colours
 
-Drag the top or bottom of the colour bar to move that limit, or its middle to move both. A click on it, or `a`, sets the limits from what is on screen. The Display panel picks the colour map, the statistic a pixel shows and a log scale.
+The colour bar's axis spans the values on screen. Drag a triangle to move that limit, or the part between them to move both; the axis stays put. A click elsewhere on the bar, or `a`, sets the limits from what is on screen, leaving out the extreme 1 % at each end. The cog (top right, or `p`) opens the menu: its Display tab picks the scale (log10 by default), the limits and the colour map.
+
+## Measure
+
+The ruler (`m`) measures between two clicks: the difference along each axis and the slope, a speed when x is time. A third click starts again; Esc clears it, then returns to pan.
 
 ## Annotate
+
+Sign in first with the button at the top right, if the server asks you to: on a trusting server, pick your name or type a new one.
 
 1. Pick a tool: `1` point, `2` path, `3` polygon, `4` box.
 2. Click to place points. End a path or polygon with Enter, a double-click or a right-click.
 3. Type a label in the box that opens, or press Enter to keep the last one.
 
-Drawings go into the set being edited and are saved as you go. To edit, switch to the select tool (`v`, or double-click): drag an annotation or a vertex to move it, double-click a side to add a vertex, and press Delete to remove.
+Drawings go into the set being edited and are saved as you go; the dot beside your name is filled once they are. The cog menu's Annotations tab lists the sets. Rest the mouse on an annotation, or on a counted group, for a summary of it. To edit, switch to the select tool (`v`, or double-click): drag an annotation or a vertex to move it, double-click a side to add a vertex, and press Delete to remove.
 
 ## Correct someone else's annotations
 
@@ -31,12 +37,12 @@ Select them and press `c` to copy them into your own set. Each copy records wher
 
 ## Download an area
 
-1. In the Download panel, take an area: from the selected annotation, from the window on screen, or by dragging a box (`d`).
-2. Tick the products to take; it shows their size.
+1. In the cog menu's Download tab, take an area: from the selected annotation, from the window on screen, or by dragging a box (`d`).
+2. Tick the products to take (the raw data, where there is some, unless you choose otherwise); it shows their size.
 3. Press download for one DASDAE file, or Sync (under `dastor browse --data-dir`) to write it into your local data directory.
 
 A synced file is named for the recording, the product and the start of the area, with a number added if that name is taken, so nothing is replaced. The directory's spool sees it when it next indexes (`spool.update()`).
 
 ## Choose the levels to zoom through
 
-The Levels panel lists a recording's [products](31-products.qmd) from coarse to fine. Tick the ones to zoom through. The control at the bottom right shows the level on screen; click it to hold the view on one level, and choose "auto" to follow the zoom again.
+The pyramid icon at the bottom right (or `l`) opens the levels, in the cog menu's Display tab: one row for each resolution of the recording's [products](31-products.qmd), the coarsest at the top and 1, the finest, at the bottom. Tick the ones to zoom through; where several products share a resolution, pick one, or set every level at once. Level 0 is the raw data, which is loaded only when ticked. The numbers beside the icon show the level on screen; click one to hold the view on it, and "auto" to follow the zoom again.

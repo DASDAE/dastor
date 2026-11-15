@@ -280,7 +280,39 @@ class TestSigningIn:
     def test_a_local_viewer_offers_none(self, page):
         assert page.js("$('btnAccount').hidden")
         asked = "fetch('../v1/session').then(r => r.status === 200 && r.json())"
-        assert page.js(asked) == {"user": None, "sign_in": False}
+        assert page.js(asked) == {"user": None, "sign_in": False, "trusting": False}
+
+    def test_a_trusting_server_lists_its_users(self, viewer_settings):
+        """Pick a name, or type a new one; a user with a key is asked for it."""
+        if not _BROWSER:
+            pytest.skip("no Chromium or Chrome on the path")
+        config = viewer_settings.model_dump(mode="json") | {"trusting": True}
+        config["annotations"]["anonymous_owner"] = None
+        config["users"] = [{"name": "alice", "key_sha256": hash_key(ALICE_KEY)}]
+        with live(create_app(Settings.model_validate(config))) as address:
+            browser = Browser(f"{address}/viewer/")
+            try:
+                browser.wait("window.dastorReady === true")
+                assert browser.js("$('btnAccount').textContent") == "Sign in"
+                # a drawing tool asks who is drawing
+                browser.js("setMode('point')")
+                opened = "document.querySelector('dialog#signIn').open"
+                assert browser.js(opened)
+                users = "[...document.querySelectorAll('#signInUsers button')]"
+                assert browser.js(f"{users}.map(b => b.dataset.user)") == ["alice"]
+                key = "document.getElementById('inpKey')"
+                browser.js(f"{users}[0].click()")  # alice has a key: it is asked for
+                assert browser.js(f"{key}.hidden") is False
+                name = "document.getElementById('inpUser')"
+                browser.js(
+                    f"{name}.value = 'carol'; {name}.dispatchEvent(new Event('input'))"
+                )
+                assert browser.js(f"{key}.hidden") is True  # a new name has none
+                browser.js("document.querySelector('#signInForm').requestSubmit()")
+                browser.wait("window.dastorReady === true && S.me === 'carol'")
+                assert browser.js("$('btnAccount').textContent") == "carol"
+            finally:
+                browser.close()
 
     def test_a_closed_server_sends_visitors_to_sign_in(self, viewer_settings):
         """No data is for visitors: the viewer waits behind `/signin`."""
@@ -323,7 +355,7 @@ class TestSigningIn:
                     " + JSON.stringify(sessionStorage)"
                 )
                 assert ALICE_KEY not in browser.js(stored)
-                states = browser.js("[...tiles.values()].map(t => t.st)")
+                states = browser.js(SCREEN_TILES)  # the ring round it may be empty
                 assert states and set(states) == {"ok"}
                 # signed in, /signin goes straight on, but never to another site
                 for url in (
@@ -336,13 +368,23 @@ class TestSigningIn:
                     "location.pathname === '/viewer/' && window.dastorReady === true"
                 )
                 assert browser.js("location.origin") == address
-                browser.js("$('btnAccount').click()")
+                browser.js("$('btnAccount').click()")  # who am I: switch, or sign out
+                assert browser.js(opened)
+                browser.js("document.getElementById('btnSignOut').click()")
                 browser.wait("location.pathname === '/signin' && window.dastorReady")
                 assert browser.js(opened)
             finally:
                 browser.close()
         # only the wrong key's refusal
         assert not [x for x in browser.errors if not ("401" in x and "session" in x)]
+
+
+# The states of the tiles on screen (the ring fetched round it may fall in a gap).
+SCREEN_TILES = (
+    "(() => { const l = activeLevel(), [zx, zy] = zooms(l);"
+    " return visibleTiles(l, zx, zy).map(([ix, iy]) =>"
+    " (tiles.get(tileKey(l, zx, zy, ix, iy)) || {}).st); })()"
+)
 
 
 def _pixel(page, time: str, distance: float) -> tuple[float, float]:
@@ -375,7 +417,7 @@ class TestViewing:
         assert page.js("S.levels.map(l => levelName(l.p))") == ["max_100ms", "raw"]
         assert page.js("S.segs.length") == 2
         assert page.js("levelName(activeLevel().p)") == "max_100ms"
-        states = page.js("[...tiles.values()].map(t => t.st)")
+        states = page.js(SCREEN_TILES)  # the ring round it may be empty
         assert states and set(states) == {"ok"}
 
     def test_zooming_in_reaches_the_raw_level(self, page):
@@ -403,14 +445,20 @@ class TestViewing:
         page.key("ArrowLeft", 37)
         assert page.js("[S.view.x0, S.view.y0]") == pytest.approx(before[:2])
 
-    def test_side_panel_folds_and_help_opens(self, page):
-        """The side panel gives its width to the plot; "?" opens the keys."""
+    def test_cog_menu_opens_over_the_plot_and_help_opens(self, page):
+        """The cog opens the menu over the plot; "?" opens the keys."""
         wide = page.js("plotRect().w")
-        page.js("document.getElementById('sideHandle').click()")
         assert page.js("document.getElementById('side').hidden") is True
-        assert page.js("plotRect().w") == pytest.approx(wide + 340, abs=20)
-        page.js("document.getElementById('sideHandle').click()")
-        assert page.js("plotRect().w") == pytest.approx(wide)
+        page.js("document.getElementById('btnMenu').click()")
+        assert page.js("document.getElementById('side').hidden") is False
+        assert page.js("plotRect().w") == pytest.approx(wide)  # over it, not beside
+        page.key("Escape", 27)
+        assert page.js("document.getElementById('side').hidden") is True
+        page.key("p", 80)
+        assert page.js("document.getElementById('side').hidden") is False
+        x, y = _pixel(page, "2024-05-01T00:00:10", 60)
+        page.click(x, y)  # a press on the plot closes it
+        assert page.js("document.getElementById('side').hidden") is True
         assert page.js("document.getElementById('help').open") is False
         page.js("document.getElementById('btnHelp').click()")
         assert page.js("document.getElementById('help').open") is True
@@ -476,13 +524,11 @@ class TestViewing:
         names = page.js(
             "[...document.getElementById('levelBar').children].map(b => b.textContent)"
         )
-        assert names == ["auto", "max_100ms", "raw"]
+        assert names == ["auto", "2", "1", "0"]  # 1 the finest; 0, raw, waits greyed
         page.js("document.getElementById('levelBar').children[2].click()")
         page.settle()
         assert page.js("levelName(activeLevel().p)") == "raw"
-        assert (
-            page.js("document.querySelector('#levelBar .pinned').textContent") == "raw"
-        )
+        assert page.js("document.querySelector('#levelBar .pinned').textContent") == "1"
         # held on raw, no other level stands in while its tiles load
         x, y = _pixel(page, "2024-05-01T00:00:10", 60)
         page.wheel(x, y, -200)
@@ -508,6 +554,39 @@ class TestViewing:
         assert page.js("[S.view.x0, S.view.spp]") == pytest.approx(whole)
         page.key("b", 66)
         assert page.js("S.view.spp") < whole[1] / 2
+
+    def test_measure_gives_each_axis_and_the_velocity(self, page):
+        """Two clicks measure along each axis; the slope along time is a velocity."""
+        page.js("document.getElementById('btnMeasure').click()")
+        page.wait("S.mode === 'measure'")
+        page.click(*_pixel(page, "2024-05-01T00:00:10", 20))
+        page.click(*_pixel(page, "2024-05-01T00:00:30", 120))
+        a, b = page.js("[S.measure.a, S.measure.b]")
+        assert b[0] - a[0] == pytest.approx(20, rel=0.05)
+        assert b[1] - a[1] == pytest.approx(100, rel=0.05)
+        lines = page.js("measureText(S.measure.a, S.measure.b)")
+        speed = (b[1] - a[1]) / (b[0] - a[0])
+        assert lines[2].startswith(f"{float(f'{speed:.4g}'):g} m/s")
+        assert "km/h" in lines[2]
+        page.click(
+            *_pixel(page, "2024-05-01T00:00:40", 50)
+        )  # a third click starts again
+        assert page.js("S.measure.b") is None
+        page.key("Escape", 27)
+        assert page.js("S.measure") is None
+        page.key("Escape", 27)  # then back to pan, the tool one starts with
+        assert page.js("S.mode") == "pan"
+
+    def test_zooming_in_does_not_stop(self, page):
+        """The wheel keeps zooming in, on both axes, past a sample per pixel."""
+        x, y = _pixel(page, "2024-05-01T00:00:10", 60)
+        fine = page.js(
+            "[S.levels[S.levels.length - 1].sx, S.levels[S.levels.length - 1].sy]"
+        )
+        for _ in range(40):
+            page.wheel(x, y, -300)
+        spp, ypp = page.js("[S.view.spp, S.view.ypp]")
+        assert spp < fine[0] / 100 and ypp < fine[1] / 100
 
     def test_distance_zooms_in_past_the_whole_recording(self, page):
         """Zooming in from the whole view keeps narrowing distance, not time only."""
@@ -540,6 +619,11 @@ class TestViewing:
 
     def test_colour_bar_sets_the_limits(self, page):
         """Limits typed by hand are held; a click on the colour bar frees them."""
+        page.js(  # on the linear scale, where a diverging map centres on zero
+            "(() => { const e = document.getElementById('selScale');"
+            " e.value = 'linear'; e.dispatchEvent(new Event('change')); })()"
+        )
+        page.settle()
         page.js(
             "(() => { const e = document.getElementById('inpVmax'); e.value = '123';"
             " e.dispatchEvent(new Event('change')); })()"
@@ -566,19 +650,241 @@ class TestViewing:
         assert page.js("C === CHROME.light") is True
         page.js("document.getElementById('btnTheme').click()")
         assert page.js("C === CHROME.dark") is True
-        # dragged, the bar moves its limits: the top end the high one, the middle both
+        # dragged, a triangle moves its limit and the span between them both
+        page.settle()  # the axis follows the tiles on screen until they have loaded
+        page.js("draw()")
         low, high = page.js("[S.disp.vmin, S.disp.vmax]")
-        height = page.js("barRect(plotRect()).h")
-        page.drag((left, top - 0.45 * height), (left, top - 0.2 * height))
+        bar_left, y_high, y_low, height = page.js(
+            "(() => { const r = cv.getBoundingClientRect(), b = barRect(plotRect()),"
+            " g = S.barRange; return [r.left + b.x, r.top + barY(b, g, S.disp.vmax),"
+            " r.top + barY(b, g, S.disp.vmin), b.h]; })()"
+        )
+        page.drag((bar_left - 5, y_high), (bar_left - 5, y_high - 0.1 * height))
         assert page.js("S.manual") is True
         raised = page.js("S.disp.vmax")
         assert raised > high and page.js("S.disp.vmin") == low
         shown = page.js("+document.getElementById('inpVmax').value")
         assert shown == pytest.approx(raised, rel=1e-5)
-        page.drag((left, top), (left, top - 0.1 * height))
+        # the axis stayed put while dragging: the triangle is where it was let go
+        y_now = page.js(
+            "(() => { const r = cv.getBoundingClientRect(), b = barRect(plotRect());"
+            " return r.top + barY(b, S.barRange, S.disp.vmax); })()"
+        )
+        assert y_now == pytest.approx(y_high - 0.1 * height, abs=0.15 * height)
+        middle = page.js(
+            "(() => { const r = cv.getBoundingClientRect(), b = barRect(plotRect()),"
+            " g = S.barRange; return r.top + (barY(b, g, S.disp.vmax)"
+            " + barY(b, g, S.disp.vmin)) / 2; })()"
+        )
+        # moving the limits never moves the axis: it follows the data on screen
+        axis = page.js("[S.barRange.lo, S.barRange.hi]")
+        page.js(  # limits well inside the axis, then drag between them
+            "(() => { const r = S.barRange, w = r.hi - r.lo;"
+            " S.disp.vmin = r.lo + 0.3 * w; S.disp.vmax = r.lo + 0.5 * w;"
+            " S.manual = true; S.lutVer++; draw(); })()"
+        )
+        low, high = page.js("[S.disp.vmin, S.disp.vmax]")
+        middle = page.js(
+            "(() => { const r = cv.getBoundingClientRect(), b = barRect(plotRect()),"
+            " g = S.barRange; return r.top + (barY(b, g, S.disp.vmax)"
+            " + barY(b, g, S.disp.vmin)) / 2; })()"
+        )
+        page.drag((left, middle), (left, middle - 0.05 * height))
         shifted = page.js("[S.disp.vmin, S.disp.vmax]")
-        assert shifted[0] < low and shifted[1] < raised
-        assert shifted[1] - shifted[0] == pytest.approx(raised - low, rel=1e-3)
+        assert shifted[0] > low and shifted[1] > high
+        assert shifted[1] - shifted[0] == pytest.approx(high - low, rel=1e-3)
+        assert page.js("[S.barRange.lo, S.barRange.hi]") == pytest.approx(axis)
+        # dragged past the end of the bar, the limits stop at it, keeping their span
+        page.drag((left, middle), (left, middle - 2 * height))
+        moved = page.js("[S.disp.vmin, S.disp.vmax]")
+        assert moved[1] == pytest.approx(axis[1])
+        assert moved[1] - moved[0] == pytest.approx(high - low, rel=1e-3)
+        assert page.js("[S.barRange.lo, S.barRange.hi]") == pytest.approx(axis)
+        # a click on a triangle takes nothing from the screen
+        page.js("draw()")  # the axis widened again once the drag let go
+        y_low = page.js(
+            "(() => { const r = cv.getBoundingClientRect(), b = barRect(plotRect());"
+            " return r.top + barY(b, S.barRange, S.disp.vmin); })()"
+        )
+        page.click(bar_left - 5, y_low)
+        assert page.js("S.manual") is True
+
+    def test_levels_menu_names_the_levels(self, page):
+        """The pyramid icon opens the cog menu on its levels; Esc closes it."""
+        hidden = "document.getElementById('side').hidden"
+        assert page.js(hidden) is True
+        page.js("document.getElementById('btnPyramid').click()")
+        assert page.js(hidden) is False
+        assert page.js("sideTab()") == "display"
+        rows = page.js(
+            "[...document.querySelectorAll('#levels .level:not(.raw)')]"
+            ".map(r => [r.querySelector('.num').textContent,"
+            " r.querySelector('.name').textContent])"
+        )
+        assert rows == [["2", "max_100ms"], ["1", "raw"]]  # coarsest on top
+        page.key("Escape", 27)
+        assert page.js(hidden) is True
+        page.key("l", 76)
+        assert page.js(hidden) is False
+        # the display options and the levels share a tab; the others hold the rest
+        assert page.js("document.getElementById('selCmap').offsetParent") is not None
+        page.js("document.querySelector('#side [data-tab=download]').click()")
+        assert page.js("sideTab()") == "download"
+        assert page.js("document.getElementById('levels').offsetParent") is None
+
+    def test_a_ring_round_the_screen_is_fetched(self, page):
+        """Once the screen is loaded, the tiles just off it are fetched too."""
+        x, y = _pixel(page, "2024-05-01T00:00:20", 60)
+        for _ in range(6):
+            page.wheel(x, y, -200)
+        page.settle()
+        beyond = page.js(
+            "(() => { const l = activeLevel(), [zx, zy] = zooms(l),"
+            " vis = visibleTiles(l, zx, zy), right = Math.max(...vis.map(v => v[0]));"
+            " return vis.filter(v => v[0] === right).map(([ix, iy]) =>"
+            " (tiles.get(tileKey(l, zx, zy, ix + 1, iy)) || {}).st); })()"
+        )
+        assert beyond and all(st in ("ok", "empty") for st in beyond)
+
+    def test_a_coarse_level_keeps_what_finer_ones_do_not_cover(self, page):
+        """Of a coarse stretch, the parts no finer level covers are kept."""
+        assert page.js("uncovered(0, 20, [[5, 15]])") == [[0, 5], [15, 20]]
+        assert page.js("uncovered(0, 20, [[0, 20]])") == []
+        assert page.js("uncovered(0, 20, [[30, 40]])") == [[0, 20]]
+
+    def test_tiles_never_paint_into_a_gap(self, page):
+        """Whatever a tile holds, nothing is drawn outside the recorded stretches."""
+        page.settle()
+        page.js("S.segs = []")  # a gap too short to squeeze, drawn as it is
+        red = (
+            "const d0 = drawTiles; drawTiles = (P) => { ctx.fillStyle = '#ff0000';"
+            " ctx.fillRect(P.x, P.y, P.w, P.h); return false; };"
+            " draw(); drawTiles = d0;"
+        )
+        page.js(f"(() => {{ {red} }})()")
+        dpr = page.js("window.devicePixelRatio || 1")
+
+        def pixel(time):
+            x, y = page.js(f"[x2px(parseTime('{time}')), y2px(60)]")
+            return page.js(
+                f"[...ctx.getImageData({x * dpr}, {y * dpr}, 1, 1).data].slice(0, 3)"
+            )
+
+        assert pixel("2024-05-01T00:00:30") == [255, 0, 0]  # in the first block
+        assert pixel("2024-05-01T00:02:00") != [255, 0, 0]  # in the gap
+
+    def test_distance_counts_in_choosing_a_level(self, page):
+        """Zoomed in along distance, a level too coarse along it gives way."""
+        pick = "(spp, ypp) => { S.view.spp = spp; S.view.ypp = ypp; levelMemo.key = '';"
+        pick += " return levelName(pickLevel().p); }"
+        assert page.js(f"({pick})(0.3, 5)") == "max_100ms"  # 8 m bins: 1.6 px
+        assert page.js(f"({pick})(0.3, 2)") == "raw"  # 8 m bins would be 4 px
+        # with no level fine enough along distance, time alone decides
+        assert page.js(f"({pick})(0.3, 0.1)") == "max_100ms"
+
+    def test_a_finer_level_keeps_the_band_of_the_one_above(self, page):
+        """With no product named for the statistic, a level follows the one above."""
+        page.js(
+            "(() => { const ps = S.groups.get(S.group), p = ps.find(q => q.attrs.tag"
+            " === 'raw'), finer = {...p.coords, time: {...p.coords.time,"
+            " step: p.coords.time.step / 10}};"
+            " for (const t of ['aaa', 'raw hi']) ps.push({...p, id: t,"
+            " attrs: {...p.attrs, tag: t}, coords: finer});"
+            " buildLadder(); })()"
+        )
+        names = page.js("S.levels.map(l => levelName(l.p))")
+        assert names == ["max_100ms", "raw", "raw hi"]
+
+    def test_level_zero_is_raw_and_waits_to_be_ticked(self, page):
+        """Level 0 is greyed until ticked; a recording with no raw data says so."""
+        zero = "[...document.getElementById('levelBar').children].pop()"
+        assert page.js(f"[{zero}.textContent, {zero}.disabled]") == ["0", True]
+        none = "document.querySelector('#levels .level.raw input')"
+        assert page.js(f"{none}.disabled") is True
+        # a product the server marks raw, finer than the rest
+        page.js(
+            "(() => { const ps = S.groups.get(S.group), p = ps.find(q => q.attrs.tag"
+            " === 'raw'), b = (t) => t.replace(/-/g, '+').replace(/_/g, '/'),"
+            " o = JSON.parse(atob(b(p.id))); o.attrs.tag = 'raw DAS';"
+            " o.steps.time = o.steps.time / 10;"
+            " const id = btoa(JSON.stringify(o)).replace(/\\+/g, '-')"
+            ".replace(/\\//g, '_').replace(/=+$/, ''); S.rawId = id;"
+            " ps.push({...p, id, raw: true, attrs: {...p.attrs, tag: 'raw DAS'},"
+            " coords: {...p.coords, time: {...p.coords.time,"
+            " step: p.coords.time.step / 10}}}); buildLadder(); })()"
+        )
+        assert page.js("S.levels.some(l => l.p.raw)") is False  # not until ticked
+        page.js(
+            f"(() => {{ const e = {none}; e.checked = true;"
+            " e.dispatchEvent(new Event('change', {bubbles: true})); })()"
+        )
+        assert page.js("S.levels.map(l => levelNumber(l.p))") == [2, 1, 0]
+        assert page.js(f"[{zero}.textContent, {zero}.disabled]") == ["0", False]
+        # and an area downloads the raw data unless asked otherwise
+        page.js("S.area = windowBounds(); S.areaProducts = null; renderArea()")
+        ticked = "[...document.querySelectorAll('#areaProducts input:checked')]"
+        assert page.js(f"{ticked}.map(e => e.value)") == [page.js("S.rawId")]
+
+    def test_a_recording_opens_on_its_extent_outlined(self, page):
+        """The view fits the recording, and a dashed box shows where it lies."""
+        page.js("S.view.spp /= 20; S.view.x0 += 5; setGroup(S.group)")
+        page.wait("S.view.spp > 0")
+        inside = page.js(
+            "S.view.x0 <= tau(S.ext.x0) && viewEnd().x1 >= tau(S.ext.x1)"
+            " && S.view.y0 <= S.ext.y0 && viewEnd().y1 >= S.ext.y1"
+        )
+        assert inside is True
+        page.js(
+            "S.boxes = []; const r0 = ctx.strokeRect.bind(ctx);"
+            " ctx.strokeRect = (...a) => { if (ctx.getLineDash().length)"
+            " S.boxes.push(a); r0(...a); }; draw();"
+            " S.counted = [S.boxes.length, S.spans.length]; ctx.strokeRect = r0"
+        )
+        boxes, spans = page.js("S.counted")
+        assert boxes == spans >= 1
+
+    def test_products_sharing_a_resolution_are_picked_from(self, page):
+        """Two products at one resolution make one level, with a choice."""
+        assert page.js("document.querySelector('#levels select')") is None
+        page.js(
+            "(() => { const ps = S.groups.get(S.group), p = ps.find(q => q.attrs.tag"
+            " === 'max_100ms'), b = (t) => t.replace(/-/g, '+').replace(/_/g, '/'),"
+            " o = JSON.parse(atob(b(p.id))); o.attrs.tag = 'mean_100ms';"
+            " const id = btoa(JSON.stringify(o)).replace(/\\+/g, '-')"
+            ".replace(/\\//g, '_').replace(/=+$/, '');"
+            " ps.push({...p, id, attrs: {...p.attrs, tag: 'mean_100ms'}});"
+            " S.meanId = id; buildLadder(); })()"
+        )
+        assert page.js("S.resolutions.map(r => r.products.length)") == [1, 2]
+        assert page.js("levelName(S.levels[0].p)") == "max_100ms"  # tiles take max
+        page.js("document.getElementById('btnPyramid').click()")
+        assert not page.js("document.getElementById('levelsAll').hidden")
+        page.js(
+            "(() => { const e = document.querySelector('#levels select');"
+            " e.value = S.meanId; e.dispatchEvent(new Event('change',"
+            " {bubbles: true})); })()"
+        )
+        assert page.js("S.levels.map(l => levelName(l.p))") == ["mean_100ms", "raw"]
+        # one pick sets every level which has it
+        page.js(
+            "(() => { const e = document.getElementById('selLevelsAll');"
+            " e.value = 'max_100ms'; e.dispatchEvent(new Event('change',"
+            " {bubbles: true})); })()"
+        )
+        assert page.js("levelName(S.levels[0].p)") == "max_100ms"
+        # unticking a level leaves it out; the last one stays
+        page.js(
+            "(() => { const e = document.querySelectorAll('#levels input')[1];"
+            " e.checked = false; e.dispatchEvent(new Event('change',"
+            " {bubbles: true})); })()"
+        )
+        assert page.js("S.levels.map(l => levelName(l.p))") == ["max_100ms"]
+        page.js(
+            "(() => { const e = document.querySelector('#levels input');"
+            " e.checked = false; e.dispatchEvent(new Event('change',"
+            " {bubbles: true})); })()"
+        )
+        assert page.js("S.levels.length") == 1
 
 
 class TestAnnotating:
@@ -764,6 +1070,7 @@ class TestAnnotating:
         page.key("Escape", 27)
         page.js("setMode('select')")
         page.settle()
+        page.js("showSide(true, 'annotations')")  # the fields are in the cog menu
         note = "document.querySelector('#selected input[data-col=note]')"
         page.js(f"{note}.focus()")
         page.type("half")
@@ -824,11 +1131,12 @@ class TestAnnotating:
         )
         assert page.js("S.many.length") == 30
         page.key("c", 67)
+        # the copy waits for its set to be made, while the page is still idle
+        page.wait("S.many.every(r => r.set === 'me/annotations')")
         page.settle()
         features = _saved(viewer_settings, "annotations").features
         assert len(features) == 30
         assert features["derived_from"].str.startswith("detector/many/pick_").all()
-        assert page.js("S.many.every(r => r.set === 'me/annotations')")
         page.key("z", 90, modifiers=2)  # one step undoes them all
         page.settle()
         assert page.js("activeSet().feats.length") == 0
@@ -888,7 +1196,7 @@ class TestLimits:
     @pytest.fixture
     def viewer_settings(self, viewer_settings):
         """Settings whose limit for one screen is a few megabytes."""
-        limits = Limits(max_view_bytes=3_500_000)
+        limits = Limits(max_view_bytes=12_000_000)  # for 512-pixel tiles
         return viewer_settings.model_copy(update={"limits": limits})
 
     def test_pinned_level_over_the_limit_is_outlined(self, page):
@@ -915,7 +1223,7 @@ class TestLimits:
         )
         assert page.js("activeLevel() && S.blocked") is None
         pinned = "document.querySelector('#levelBar .pinned').textContent"
-        assert page.js(pinned) == "max_100ms"
+        assert page.js(pinned) == "2"
         assert "too much" in page.js("document.getElementById('toast').textContent")
 
     def test_coarser_level_stands_in(self, page):
@@ -941,7 +1249,10 @@ class TestCrowding:
             " return [c.x + r.left, c.y + r.top]; })()"
         )
         page._mouse("mouseMoved", x, y)
-        assert "30 annotations" in page.js("document.getElementById('tip').textContent")
+        tip = "document.getElementById('tip')"
+        assert page.js(f"{tip}.style.display") == "none"  # not at once: on a long hover
+        page.wait(f"{tip}.style.display === 'block'", 5)
+        assert "30 annotations" in page.js(f"{tip}.textContent")
         before = page.js("S.view.spp")
         page.click(x, y)
         page.settle()
@@ -951,6 +1262,30 @@ class TestCrowding:
         # and the view is on them, not somewhere empty
         middle = "px2x(plotRect().x + plotRect().w / 2)"
         assert page.js(f"Math.abs({middle} - parseTime('2024-05-01T00:03:30'))") < 2
+
+    def test_a_long_hover_sums_up_an_annotation(self, page):
+        """Resting on one annotation shows its label, kind, set and extent."""
+        page.js("zoomToCluster(S.clusters.find(c => c.set === 'detector/many'))")
+        page.settle()
+        page.js("draw()")
+        hit = page.js(  # a pick the cursor can rest on alone, not in a crowd
+            "(() => { const P = plotRect(), r = cv.getBoundingClientRect();"
+            " for (const s of S.sets) for (const f of s.feats || []) {"
+            " const b = featureBounds(f, P); if (!b) continue;"
+            " const x = (b.x0 + b.x1) / 2, y = (b.y0 + b.y1) / 2;"
+            " if (x < P.x || x > P.x + P.w || y < P.y || y > P.y + P.h) continue;"
+            " const h = hitFeature(x, y); if (h && h.id === f.id && !hitCluster(x, y))"
+            " return [r.left + x, r.top + y, setKey(s)]; } return null; })()"
+        )
+        assert hit, "an annotation on screen"
+        page._mouse("mouseMoved", hit[0], hit[1])
+        tip = "document.getElementById('tip')"
+        page.wait(f"{tip}.style.display === 'block'", 5)
+        text = page.js(f"{tip}.textContent")
+        assert hit[2] in text and "time:" in text and "distance:" in text
+        page._mouse("mousePressed", hit[0], hit[1], button="left", clickCount=1)
+        assert page.js(f"{tip}.style.display") == "none"  # a press puts it away
+        page._mouse("mouseReleased", hit[0], hit[1], button="left", clickCount=1)
 
     def test_download_around_an_annotation(self, page):
         """A selected annotation's download button sets the area to its box."""

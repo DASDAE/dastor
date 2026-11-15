@@ -11,7 +11,7 @@ const API = "../v1";
 const TOKEN = new URLSearchParams(location.search).get("token");
 const AUTH = TOKEN ? { Authorization: `token ${TOKEN}` } : {};
 function withToken(url) { return TOKEN ? `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(TOKEN)}` : url; }
-const TILE = 256;
+const TILE = 512;  // pixels a side: fewer, larger tiles share the fixed cost of each request
 const M = { l: 80, r: 78, t: 8, b: 66 };  // plot margins (CSS px): the colour bar on the right, the overview strip below
 const BAR = { gap: 12, w: 14 };            // the colour bar, right of the plot
 const STRIP = { top: 46, h: 10 };          // the overview strip, below the x axis
@@ -65,7 +65,7 @@ const S = {
   x: "", y: "", xTime: false, xUnits: "", yUnits: "", ext: null,
   view: { x0: 0, spp: 1, y0: 0, ypp: 1 },
   segs: [], gapD: 0,
-  disp: { stat: "max", scale: "linear", vmin: 0, vmax: 1, cmap: "viridis", smooth: false },
+  disp: { stat: "max", scale: "log", vmin: 0, vmax: 1, cmap: "viridis", smooth: false, detail: 2 },
   lut: null, lutVer: 0, autoPending: true, autoFor: null, manual: false,
   me: null, annotations: false, sets: [], active: null,
   sel: null,                      // {set, id}: the one annotation being edited
@@ -174,11 +174,14 @@ function pieces() {
 function displaySpan() { return S.segs.length ? tau(S.segs[S.segs.length - 1].b) - tau(S.segs[0].a) : S.ext.x1 - S.ext.x0; }
 // How far the view zooms. In: to 16 px a sample of the finest product, and along y on until four
 // samples fill the plot, so a few channels can be looked at closely however many there are.
+// Zooming in has no limit short of what numbers can hold (ZOOM_IN pixels for a sample of the finest
+// level); zooming out stops a little past the whole recording.
+const ZOOM_IN = 1e5;
 function clampView() {
   const v = S.view, fine = S.levels[S.levels.length - 1];
   if (!fine || !S.ext) return;
-  v.spp = clamp(v.spp, fine.sx / 16, Math.max(displaySpan() / 50, fine.sx));
-  v.ypp = clamp(v.ypp, Math.min(fine.sy / 16, (4 * fine.sy) / plotRect().h), Math.max((S.ext.y1 - S.ext.y0) / 50, fine.sy));
+  v.spp = clamp(v.spp, fine.sx / ZOOM_IN, Math.max(displaySpan() / 50, fine.sx));
+  v.ypp = clamp(v.ypp, fine.sy / ZOOM_IN, Math.max((S.ext.y1 - S.ext.y0) / 50, fine.sy));
 }
 // Keeps a tenth of the plot over the data, so paging or dragging can't lose it. True if it moved the view.
 function clampPos() {
@@ -215,7 +218,10 @@ function zoomAt(px, py, fx, fy) {
 
 // ------------------------------------------------------------------ products and levels
 function groupKey(p) { return p.attrs.acquisition_key || ""; }
-function levelName(p) { return Object.entries(p.attrs).filter(([k]) => k !== "acquisition_key").map(([, v]) => v).join(" ") || "(untagged)"; }
+// The attrs which say where a recording was made; they name the recording, not one of its products.
+const PLACE = new Set(["acquisition_key", "network", "station"]);
+function levelName(p) { return Object.entries(p.attrs).filter(([k]) => !PLACE.has(k)).map(([, v]) => v).join(" ") || "(untagged)"; }
+// The recording menu: grouped by network (the dataset) and named by station where products state them.
 function buildGroups() {
   S.groups = new Map();
   for (const p of S.products) {
@@ -225,21 +231,54 @@ function buildGroups() {
     S.groups.get(k).push(p);
   }
   const sel = $("selGroup"); sel.innerHTML = ""; sel.hidden = S.groups.size < 2;  // nothing to choose between
-  for (const k of S.groups.keys()) sel.add(new Option(k || "(no acquisition key)", k));
+  const nets = new Map();
+  for (const [k, ps] of S.groups) {
+    const net = ps[0].attrs.network || "";
+    if (!nets.has(net)) nets.set(net, []);
+    nets.get(net).push(new Option(ps[0].attrs.station || k || "(no acquisition key)", k));
+  }
+  for (const [net, opts] of nets) {
+    const box = net ? document.createElement("optgroup") : sel;
+    if (net) { box.label = net; sel.append(box); }
+    for (const o of opts) box.append(o);
+  }
 }
 function groupProducts() {
   const all = S.groups.get(S.group) || [];
   return all.filter((p) => p.x === all[0].x && p.y === all[0].y);
 }
-function ladderKey() { return "dastor.ladder." + S.group; }
-function chosenIds() {
-  try { const ids = JSON.parse(localStorage.getItem(ladderKey())); if (Array.isArray(ids)) return new Set(ids); } catch (e) { /* default below */ }
-  const seen = new Set(), ids = new Set();  // by default one product for each resolution
+// A recording's resolutions, finest first: each one level of the ladder, numbered from 1. Where
+// several products share a resolution (one for each statistic, say), the reader picks one.
+function resKey(p) { return `${p.coords[S.x].step}|${p.coords[S.y].step}`; }
+// Level 0 is the raw data, which the server marks: loaded only when the reader ticks it.
+function rawProduct() { return groupProducts().find((p) => p.raw) || null; }
+function resolutions() {
+  const out = new Map();
   for (const p of groupProducts()) {
-    const k = `${p.coords[p.x].step}|${p.coords[p.y].step}`;
-    if (!seen.has(k)) { seen.add(k); ids.add(p.id); }
+    if (p.raw) continue;
+    const k = resKey(p);
+    if (!out.has(k)) out.set(k, { key: k, sx: p.coords[S.x].step, sy: p.coords[S.y].step, products: [] });
+    out.get(k).products.push(p);
   }
-  return ids;
+  for (const r of out.values()) r.products.sort((a, b) => levelName(a).localeCompare(levelName(b)));
+  return [...out.values()].sort((a, b) => a.sx - b.sx || a.sy - b.sy);
+}
+// The reader's choice, kept in the browser: the product picked at each resolution, and those left out.
+function ladderKey() { return "dastor.levels." + S.group; }
+function ladderChoice() {
+  try { const c = JSON.parse(localStorage.getItem(ladderKey())); if (c && typeof c.pick === "object" && Array.isArray(c.off)) return c; } catch (e) { /* none kept */ }
+  return { pick: {}, off: [], raw: false };
+}
+function keepChoice(c) { try { localStorage.setItem(ladderKey(), JSON.stringify(c)); } catch (e) { /* private mode */ } }
+// The product drawn at a resolution: the one picked, else one whose tag ends with the statistic the
+// tiles take ("... · max" for max), else the one most like the pick of the coarser level (its tag
+// starting the same way: the same band, down the ladder), else one ending with max, else the first.
+// Of several, the last in name order: of fbe(2, 30) and fbe(30, ...), the higher band.
+function levelPick(r, c, coarser) {
+  const tag = (p) => p.attrs.tag || "", ends = (s) => r.products.findLast((p) => tag(p).endsWith(s));
+  const shared = (p) => { const a = tag(p), b = coarser ? tag(coarser) : ""; let n = 0; while (n < a.length && a[n] === b[n]) n++; return n; };
+  const like = coarser && r.products.reduce((best, p) => (shared(p) > shared(best) ? p : best), r.products[0]);
+  return r.products.find((p) => p.id === c.pick[r.key]) || ends(S.disp.stat) || (like && shared(like) ? like : null) || ends("max") || r.products[0];
 }
 async function setGroup(key) {
   await save();  // edits of the recording being left
@@ -254,25 +293,39 @@ async function setGroup(key) {
   await loadSets();
 }
 function buildLadder() {
-  const ids = chosenIds();
-  let chosen = groupProducts().filter((p) => ids.has(p.id));
-  if (!chosen.length) chosen = groupProducts().slice(0, 1);
+  const c = ladderChoice(), all = resolutions();
+  S.resolutions = all;
+  const picks = new Map();  // from the coarsest down, so each level can follow the one above
+  for (let i = all.length - 1; i >= 0; i--) picks.set(all[i].key, levelPick(all[i], c, picks.get(all[i + 1] && all[i + 1].key)));
+  let chosen = all.filter((r) => !c.off.includes(r.key)).map((r) => picks.get(r.key));
+  if (!chosen.length && all.length) chosen = [levelPick(all[0], c)];
+  S.raw = rawProduct();
+  if (S.raw && (c.raw || !chosen.length)) chosen.push(S.raw);
   S.levels = chosen.map((p) => ({ p, sx: p.coords[S.x].step, sy: p.coords[S.y].step }))
     .sort((a, b) => b.sx - a.sx || b.sy - a.sy);
   if (S.pin && !S.levels.some((l) => l.p.id === S.pin)) S.pin = null;
-  // extent and recorded segments: the union over the ladder
+  // extent and recorded segments, as the finest level holds them: a coarser level rounds them out to
+  // its own pixels. What a coarser level covers beyond the finer ones is added where it is more than
+  // one of its pixels: less is that rounding.
   const rd = (v) => xRead(v);
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity; const spans = [];
-  for (const l of S.levels) {
-    const cx = l.p.coords[S.x], cy = l.p.coords[S.y];
-    x0 = Math.min(x0, rd(cx.min)); x1 = Math.max(x1, rd(cx.max) + l.sx);
-    y0 = Math.min(y0, cy.min); y1 = Math.max(y1, cy.max + l.sy);
-    for (const [a, b] of cx.spans) spans.push([rd(a), rd(b) + l.sx]);
+  for (const l of S.levels.slice().reverse()) {
+    const cx = l.p.coords[S.x], cy = l.p.coords[S.y], finer = spans.slice();
+    let used = false;
+    for (const [a0, b0] of cx.spans) {
+      for (const [a, b] of uncovered(rd(a0), rd(b0) + l.sx, finer)) {
+        if (finer.length && b - a <= l.sx * 1.0001) continue;
+        spans.push([a, b]); used = true;
+        x0 = Math.min(x0, a); x1 = Math.max(x1, b);
+      }
+    }
+    if (used) { y0 = Math.min(y0, cy.min); y1 = Math.max(y1, cy.max + l.sy); }
   }
   S.ext = { x0, x1, y0, y1 };
   spans.sort((a, b) => a[0] - b[0]);
   const merged = [];
   for (const [a, b] of spans) { const last = merged[merged.length - 1]; if (last && a <= last[1]) last[1] = Math.max(last[1], b); else merged.push([a, b]); }
+  S.spans = merged;
   const recorded = merged.reduce((n, s) => n + s[1] - s[0], 0);
   S.gapD = recorded * 0.04;
   // gaps no wider than their squeezed width stay as they are
@@ -282,6 +335,12 @@ function buildLadder() {
   S.segs = S.xTime && segs.length > 1 ? segs : [];
   S.autoPending = true;
   renderLevels();
+}
+// The parts of [a, b) which none of `spans` covers.
+function uncovered(a, b, spans) {
+  let out = [[a, b]];
+  for (const [c, d] of spans) out = out.flatMap(([x, y]) => (d <= x || c >= y ? [[x, y]] : [[x, c], [d, y]].filter(([u, v]) => v > u)));
+  return out;
 }
 function zooms(l) {
   return [Math.max(0, Math.round(Math.log2(S.view.spp / l.sx))), Math.max(0, Math.round(Math.log2(S.view.ypp / l.sy)))];
@@ -301,7 +360,7 @@ function overLimits(l) { const c = levelCost(l); return c.tile > S.limits.max_ti
 let levelMemo = { key: "", level: null, blocked: null };
 function activeLevel() {
   const v = S.view, P = plotRect();
-  const key = [v.x0, v.spp, v.y0, v.ypp, P.w, P.h, S.pin, S.refused, ...S.levels.map((l) => l.p.id)].join("|");
+  const key = [v.x0, v.spp, v.y0, v.ypp, P.w, P.h, S.pin, S.refused, S.disp.detail, ...S.levels.map((l) => l.p.id)].join("|");
   if (key !== levelMemo.key) levelMemo = { key, level: pickLevel(), blocked: S.blocked };
   S.blocked = levelMemo.blocked;
   return levelMemo.level;
@@ -309,7 +368,12 @@ function activeLevel() {
 function pickLevel() {
   S.blocked = null;
   if (!S.levels.length) return null;
-  let i = S.levels.findIndex((l) => l.sx <= S.view.spp * 1.0001);
+  // the coarsest level whose samples are at most `detail` pixels across, along both axes (a short
+  // cable is seen zoomed in along it); if none is that fine along distance, along time alone. The
+  // larger `detail`, the less to load.
+  const k = S.disp.detail * 1.0001, inTime = (l) => l.sx <= S.view.spp * k;
+  let i = S.levels.findIndex((l) => inTime(l) && l.sy <= S.view.ypp * k);
+  if (i < 0) i = S.levels.findIndex(inTime);
   if (i < 0) i = S.levels.length - 1;
   const pinned = S.pin ? S.levels.findIndex((l) => l.p.id === S.pin) : -1;
   if (pinned >= 0) i = pinned;
@@ -318,17 +382,52 @@ function pickLevel() {
   return S.levels[i];
 }
 function stepText(p) { return `${fmtStep(p.coords[S.x].step, S.xTime)} × ${fmtNum(p.coords[S.y].step)} ${S.yUnits || S.y}`; }
+// The levels menu: a row for each resolution, finest first and numbered from 1, ticked when it is
+// zoomed through, with a choice where several products share it. The status bar shows the numbers.
+function levelNumber(p) { return p.raw ? 0 : S.resolutions.findIndex((r) => r.key === resKey(p)) + 1; }
 function renderLevels() {
-  const ids = new Set(S.levels.map((l) => l.p.id));
-  const all = groupProducts().slice().sort((a, b) => b.coords[S.x].step - a.coords[S.x].step || levelName(a).localeCompare(levelName(b)));
-  $("levels").innerHTML = all.map((p) =>
-    `<label class="level"><input type="checkbox" data-id="${p.id}" ${ids.has(p.id) ? "checked" : ""}>` +
-    `<span class="name" title="${esc(JSON.stringify(p.attrs))}">${esc(levelName(p))}</span><span class="step">${esc(stepText(p))}</span></label>`).join("");
-  // the status bar's control: auto follows the zoom, a level holds the view on it
+  const c = ladderChoice(), on = new Set(S.levels.map((l) => resKey(l.p)));
+  const tags = [...new Set(S.resolutions.flatMap((r) => r.products.map(levelName)))].sort();
+  $("levelsAll").hidden = tags.length < 2 || S.resolutions.every((r) => r.products.length < 2);
+  $("selLevelsAll").innerHTML = '<option value="">set every level to…</option>' + tags.map((t) => `<option>${esc(t)}</option>`).join("");
+  $("levels").innerHTML = S.resolutions.map((r, i) => [r, i]).reverse().map(([r, i]) => {  // a pyramid: coarsest on top
+    const p = S.levels.find((l) => resKey(l.p) === r.key)?.p || levelPick(r, c), name = r.products.length < 2 ? `<span class="name" title="${esc(JSON.stringify(p.attrs))}">${esc(levelName(p))}</span>`
+      : `<select class="name" data-res="${esc(r.key)}" aria-label="product at level ${i + 1}">${r.products.map((q) => `<option value="${q.id}" ${q.id === p.id ? "selected" : ""}>${esc(levelName(q))}</option>`).join("")}</select>`;
+    return `<label class="level" data-res="${esc(r.key)}"><input type="checkbox" data-res="${esc(r.key)}" ${on.has(r.key) ? "checked" : ""}>` +
+      `<span class="num">${i + 1}</span><span class="step">${esc(stepText(p))}</span>${name}</label>`;
+  }).join("") +
+    `<label class="level raw${S.raw ? "" : " none"}" data-res="${S.raw ? esc(resKey(S.raw)) : ""}"><input type="checkbox" data-raw="1" ${S.raw && S.levels.some((l) => l.p.raw) ? "checked" : ""} ${S.raw ? "" : "disabled"}>` +
+    `<span class="num">0</span><span class="step">${S.raw ? esc(stepText(S.raw)) : ""}</span><span class="name">${S.raw ? "raw data: load it" : "no raw data served for this recording"}</span></label>`;
+  // the status bar's control: auto follows the zoom, a level holds the view on it; finer to the right
+  const rawOff = !S.levels.some((l) => l.p.raw);  // level 0 waits, greyed, until it is ticked
   $("levelBar").innerHTML = '<button data-level="" title="follow the zoom">auto</button>' +
-    S.levels.map((l) => `<button data-level="${l.p.id}" title="hold the view on ${esc(levelName(l.p))} (${esc(stepText(l.p))})">${esc(levelName(l.p))}</button>`).join("");
+    S.levels.map((l) => `<button data-level="${l.p.id}" title="hold the view on ${esc(levelName(l.p))} (${esc(stepText(l.p))})">${levelNumber(l.p)}</button>`).join("") +
+    (rawOff ? `<button class="off" disabled title="${S.raw ? "raw data: tick level 0 under Levels to load it" : "no raw data served for this recording"}">0</button>` : "");
+  $("btnPyramid").hidden = !S.levels.length;
   updateLevelHighlight();
 }
+// A change in the levels menu: a level ticked or not, a product picked at one level or at all.
+function changeLevels(ev) {
+  const t = ev.target, c = ladderChoice();
+  if (t.id === "selLevelsAll") {
+    if (!t.value) return;
+    for (const r of S.resolutions) { const p = r.products.find((q) => levelName(q) === t.value); if (p) c.pick[r.key] = p.id; }
+    t.value = "";
+  } else if (t.matches("select[data-res]")) c.pick[t.dataset.res] = t.value;
+  else if (t.matches("input[data-raw]")) c.raw = t.checked;
+  else if (t.matches("input[data-res]")) {
+    const off = S.resolutions.map((r) => r.key).filter((k) => !$("levels").querySelector(`input[data-res="${CSS.escape(k)}"]`).checked);
+    if (off.length === S.resolutions.length && !c.raw) { t.checked = true; return; }  // a ladder has at least one level
+    c.off = off;
+  } else return;
+  keepChoice(c);
+  if (S.pin && !S.levels.some((l) => l.p.id === S.pin)) S.pin = null;
+  S.autoPending = true;
+  buildLadder(); clampView(); redraw();
+}
+// The pyramid icon opens the menu on the display tab, which holds the levels, and closes it again.
+function showPyramid(open) { showSide(open, "display"); }
+function sideTab() { return document.querySelector("#side [role=tab][aria-selected=true]").dataset.tab; }
 function setPin(id) {
   const level = id && S.levels.find((l) => l.p.id === id);
   if (id && !level) return;
@@ -344,7 +443,7 @@ function setPin(id) {
 }
 function updateLevelHighlight() {
   const shown = S.levels.length ? activeLevel() : null;
-  for (const el of $("levels").children) el.classList.toggle("shown", !!shown && el.querySelector("input").dataset.id === shown.p.id);
+  for (const el of $("levels").children) el.classList.toggle("shown", !!shown && el.dataset.res === resKey(shown.p));
   for (const b of $("levelBar").children) {
     const id = b.dataset.level;
     b.classList.toggle("on", !id && !S.pin);                          // auto: following the zoom
@@ -355,6 +454,37 @@ function updateLevelHighlight() {
 }
 
 // ------------------------------------------------------------------ tiles
+// Tiles come as float16 where their values fit it, half the bytes; turned back into float32 by a
+// table of every float16, which works in any browser.
+const HALF = (() => {
+  const t = new Float32Array(65536);
+  for (let h = 0; h < 65536; h++) {
+    const sign = h & 0x8000 ? -1 : 1, e = (h >> 10) & 31, m = h & 1023;
+    t[h] = e === 0 ? sign * m * 2 ** -24 : e === 31 ? (m ? NaN : sign * Infinity) : sign * (1 + m / 1024) * 2 ** (e - 15);
+  }
+  return t;
+})();
+function fromHalf(u) { const out = new Float32Array(u.length); for (let i = 0; i < u.length; i++) out[i] = HALF[u[i]]; return out; }
+// Each tile's timings, for debugging and profiling: how long from asking to its arrival, how long
+// the server says it took (its Server-Timing), and its size. Kept in window.dastorStats (the last
+// thousand); with `debug` in the address's hash (#...&debug=1) or `dastor.debug` set in the
+// browser's storage, each is also written to the console.
+const DEBUG = (() => { try { return /(^|[#&])debug=1/.test(location.hash) || localStorage.getItem("dastor.debug") === "1"; } catch (e) { return false; } })();
+window.dastorStats = [];
+function note(tile, resp, asked, bytes) {
+  const ms = performance.now() - asked, server = {};
+  for (const part of (resp.headers.get("Server-Timing") || "").split(",")) {
+    const [name, dur] = part.trim().split(";dur="); if (name && dur) server[name] = +dur;
+  }
+  if (bytes === undefined && resp.status === 200) return;  // the body comes next
+  const row = { key: tile.key, status: resp.status, ms: Math.round(ms), server, bytes: bytes || 0, at: Math.round(asked) };
+  window.dastorStats.push(row);
+  if (window.dastorStats.length > 1000) window.dastorStats.shift();
+  if (DEBUG) {
+    const total = Object.values(server).reduce((a, b) => a + b, 0);
+    console.log(`tile ${tile.key} ${resp.status} in ${row.ms} ms (server ${total.toFixed(0)} ms: ${JSON.stringify(server)}, network and queue ${Math.round(ms - total)} ms) ${row.bytes} B`);
+  }
+}
 function tileKey(l, zx, zy, ix, iy) { return `${l.p.id}|${S.disp.stat}|${zx}|${zy}|${ix}|${iy}`; }
 function visibleTiles(l, zx, zy, pc) {
   if (!pc) { const all = []; for (const p of pieces()) for (const t of visibleTiles(l, zx, zy, p)) all.push(t); return all; }
@@ -379,37 +509,55 @@ function requestTiles() {
   const vis = visibleTiles(l, zx, zy), e = viewEnd();
   const xc = untau((S.view.x0 + e.x1) / 2), yc = (S.view.y0 + e.y1) / 2;
   const want = [], keys = new Set();
-  for (const [ix, iy] of vis) {
-    const k = tileKey(l, zx, zy, ix, iy); keys.add(k);
+  const add = (ix, iy, extra) => {
+    const k = tileKey(l, zx, zy, ix, iy);
+    if (keys.has(k)) return;
+    keys.add(k);
     const had = tiles.get(k);
-    if (had && !(had.st === "error" && had.retryAt <= Date.now())) continue;
+    if (had && !(had.st === "error" && had.retryAt <= Date.now())) return;
     if (had) tiles.delete(k);
-    want.push({ k, l, zx, zy, ix, iy, stat: S.disp.stat, tries: had ? had.tries : 0, pri: Math.abs((ix + 0.5) * tx - xc) / tx + Math.abs((iy + 0.5) * ty - yc) / ty });
-  }
+    want.push({ k, l, zx, zy, ix, iy, stat: S.disp.stat, tries: had ? had.tries : 0, pri: extra + Math.abs((ix + 0.5) * tx - xc) / tx + Math.abs((iy + 0.5) * ty - yc) / ty });
+  };
+  for (const [ix, iy] of vis) add(ix, iy, 0);
+  // a ring one tile wide round the screen, where the recording goes on, fetched once the screen
+  // is: a short pan finds its tiles loaded, or on their way
+  const inside = (ix, iy) => (ix + 1) * tx > S.ext.x0 && ix * tx < S.ext.x1 && (iy + 1) * ty > S.ext.y0 && iy * ty < S.ext.y1;
+  for (const [ix, iy] of vis) for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) if (inside(ix + dx, iy + dy)) add(ix + dx, iy + dy, 1000);
   want.sort((a, b) => a.pri - b.pri);
   queue = want;  // requests for tiles which left the view are dropped
-  for (const t of tiles.values()) if (t.st === "loading" && t.ctrl && !keys.has(t.key)) { t.aborted = true; t.ctrl.abort(); }
+  for (const t of tiles.values()) {
+    if (t.st !== "loading" || !t.ctrl || keys.has(t.key)) continue;
+    t.aborted = true; t.ctrl.abort();
+    window.dastorStats.push({ key: t.key, status: "aborted", ms: 0, server: {}, bytes: 0, at: Math.round(performance.now()) });
+  }
   pump();
 }
 function pump() {
   while (inflight < MAX_INFLIGHT && queue.length) {
+    // the ring round the screen waits until the screen's own tiles are in: on a slow link it
+    // would otherwise share the bandwidth with them
+    if (queue[0].pri >= 1000 && [...tiles.values()].some((t) => t.st === "loading" && !t.ring)) break;
     const r = queue.shift();
     if (tiles.has(r.k)) continue;
     const [tx, ty] = tileSpan(r.l, r.zx, r.zy);
-    const tile = { st: "loading", key: r.k, pid: r.l.p.id, stat: r.stat, tries: r.tries, zx: r.zx, zy: r.zy, ix: r.ix, iy: r.iy, tx, ty, used: frameNo };
+    const tile = { st: "loading", key: r.k, pid: r.l.p.id, stat: r.stat, tries: r.tries, zx: r.zx, zy: r.zy, ix: r.ix, iy: r.iy, tx, ty, used: frameNo, ring: r.pri >= 1000 };
     tiles.set(r.k, tile); inflight++;
     const url = `${API}/viewer/tile?` + query({
-      product: r.l.p.id, stat: r.stat, width: TILE, height: TILE,
+      product: r.l.p.id, stat: r.stat, width: TILE, height: TILE, precision: "half",
       [`${S.x}_min`]: xWire(r.ix * tx), [`${S.x}_max`]: xWire((r.ix + 1) * tx),
       [`${S.y}_min`]: r.iy * ty, [`${S.y}_max`]: (r.iy + 1) * ty,
     });
     tile.ctrl = new AbortController();
+    const asked = performance.now();
     fetch(url, { signal: tile.ctrl.signal, headers: AUTH }).then(async (resp) => {
+      note(tile, resp, asked);
       if (resp.status === 204) { tile.st = "empty"; return; }
       if (resp.status === 413) { tile.st = "empty"; S.refused = tile.pid; return; }  // more than the estimate
       if (resp.status === 401) S.session.recheck?.();
       if (!resp.ok) { tile.st = "error"; tile.err = await resp.text(); return; }
-      tile.data = new Float32Array(await resp.arrayBuffer());
+      const buf = await resp.arrayBuffer();
+      note(tile, resp, asked, buf.byteLength);
+      tile.data = resp.headers.get("X-Tile-Dtype") === "float16" ? fromHalf(new Uint16Array(buf)) : new Float32Array(buf);
       tile.st = tile.data.length === TILE * TILE ? "ok" : "error";
       tile.bytes = tile.data.byteLength + 200; tileBytes += tile.bytes;
     }).catch((e) => { tile.st = "error"; tile.err = String(e); })
@@ -432,13 +580,14 @@ function pump() {
 function shade(v) { return S.disp.scale === "log" ? Math.log10(Math.abs(v)) : v; }
 function buildLut() {
   const stops = (CMAPS[S.disp.cmap] || CMAPS.viridis).map((h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)));
-  const lut = new Uint32Array(256), le = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+  const lut = new Uint32Array(256), rgb = new Array(256), le = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
   for (let i = 0; i < 256; i++) {
     const f = (i / 255) * (stops.length - 1), k = Math.min(Math.floor(f), stops.length - 2), w = f - k;
     const [r, g, b] = [0, 1, 2].map((c) => Math.round(stops[k][c] * (1 - w) + stops[k + 1][c] * w));
     lut[i] = le ? (255 << 24) | (b << 16) | (g << 8) | r : (r << 24) | (g << 16) | (b << 8) | 255;
+    rgb[i] = [r, g, b];
   }
-  S.lut = lut; S.lutVer++;
+  S.lut = lut; S.lutRGB = rgb; S.lutVer++;
 }
 // The one place values become colours, so a GPU renderer can replace it.
 function tileCanvas(tile) {
@@ -510,6 +659,52 @@ function drawOutline(l, P) {
   }
   ctx.setLineDash([]);
 }
+// The recording's extent: a dashed outline round each recorded stretch, over its whole distance.
+function drawExtent(P) {
+  const y0 = y2px(S.ext.y1), y1 = y2px(S.ext.y0);
+  ctx.save(); ctx.strokeStyle = C.accent; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+  for (const [a, b] of S.spans) {
+    const xa = x2px(a), xb = x2px(b);
+    if (xb < P.x || xa > P.x + P.w) continue;
+    ctx.strokeRect(xa + 0.75, y0 + 0.75, xb - xa - 1.5, y1 - y0 - 1.5);
+  }
+  ctx.restore();
+}
+// The measure tool: the line between two clicks (to the cursor until the second), with the
+// difference along each axis and the slope, a velocity when x is time.
+function measureText(a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], yu = S.yUnits || S.y;
+  const along = S.xTime ? fmtDuration(Math.abs(dx)) : `${fmtNum(+Math.abs(dx).toPrecision(4))} ${S.xUnits || S.x}`;
+  const lines = [`Δ${S.x} ${along}`, `Δ${S.y} ${fmtNum(+Math.abs(dy).toPrecision(4))} ${yu}`];
+  if (dx !== 0) {
+    const v = dy / dx;
+    lines.push(S.xTime ? `${fmtNum(+v.toPrecision(4))} ${yu}/s` + (yu === "m" ? ` (${fmtNum(+(v * 3.6).toPrecision(4))} km/h)` : "")
+      : `slope ${fmtNum(+v.toPrecision(4))} ${yu}/${S.xUnits || S.x}`);
+  }
+  return lines;
+}
+function drawMeasure(P) {
+  const m = S.measure; if (!m) return;
+  const b = m.b || (S.mouse ? [px2x(S.mouse.x), px2y(S.mouse.y)] : null);
+  const xa = x2px(m.a[0]), ya = y2px(m.a[1]);
+  ctx.save(); ctx.strokeStyle = C.accent; ctx.fillStyle = C.accent; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(xa, ya, 3.5, 0, 2 * Math.PI); ctx.fill();
+  if (b) {
+    const xb = x2px(b[0]), yb = y2px(b[1]);
+    ctx.setLineDash([]); ctx.beginPath(); ctx.moveTo(xa, ya); ctx.lineTo(xb, yb); ctx.stroke();
+    ctx.setLineDash([3, 3]); ctx.lineWidth = 1;  // the two legs
+    ctx.beginPath(); ctx.moveTo(xa, ya); ctx.lineTo(xb, ya); ctx.lineTo(xb, yb); ctx.stroke();
+    ctx.beginPath(); ctx.arc(xb, yb, 3.5, 0, 2 * Math.PI); ctx.fill();
+    const lines = measureText(m.a, b);
+    ctx.font = "13px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "top";
+    const w = Math.max(...lines.map((t) => ctx.measureText(t).width)) + 14, h = lines.length * 17 + 8;
+    const x = clamp(xb + 12, P.x + 4, P.x + P.w - w - 4), y = clamp(yb + 12, P.y + 4, P.y + P.h - h - 4);
+    ctx.fillStyle = C.noteBg; ctx.fillRect(x, y, w, h);
+    ctx.setLineDash([]); ctx.strokeStyle = C.accent; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    ctx.fillStyle = C.noteText; lines.forEach((t, i) => ctx.fillText(t, x + 7, y + 5 + i * 17));
+  }
+  ctx.restore();
+}
 function drawGaps(P) {
   const sg = S.segs;
   for (let k = 0; k + 1 < sg.length; k++) {
@@ -537,16 +732,11 @@ function valueAt(x, y) {
   return v === v ? v : null;
 }
 function autoContrast(quiet) {
-  const l = activeLevel(); if (!l) return false;
-  const [zx, zy] = zooms(l), vals = [];
-  for (const [ix, iy] of visibleTiles(l, zx, zy)) {
-    const t = tiles.get(tileKey(l, zx, zy, ix, iy));
-    if (!t || t.st !== "ok") continue;
-    for (let i = 0; i < t.data.length; i += 7) { const v = shade(t.data[i]); if (Number.isFinite(v)) vals.push(v); }
-  }
+  if (!activeLevel()) return false;
+  const vals = screenValues();
   if (vals.length < 10) { if (!quiet) toast("no data on screen yet"); return false; }
-  vals.sort((a, b) => a - b);
-  let lo = vals[Math.floor(vals.length * 0.01)], hi = vals[Math.floor(vals.length * 0.995)];
+  // 1-99 %: a few glitches (Withy's spikes run to 1e9) do not set the scale
+  let lo = quantile(vals, 0.01), hi = quantile(vals, 0.99);
   // signed data, or a diverging map: centred on zero
   if (S.disp.scale === "linear" && (lo < 0 || DIVERGING.has(S.disp.cmap))) { hi = Math.max(-lo, hi); lo = -hi; }
   if (hi <= lo) hi = lo + 1e-9;
@@ -607,10 +797,18 @@ function draw() {
   const shown = activeLevel().p.id;
   if (shown !== S.autoFor && !S.manual) S.autoPending = true;  // each product has its own range
   S.autoFor = shown;
+  // tiles only where the recording has data: a coarser level, standing in while finer tiles load,
+  // rounds the ends of each stretch out to its own pixels and would paint into the gaps
+  ctx.save(); ctx.beginPath();
+  for (const [a, b] of S.spans) ctx.rect(x2px(a), y2px(S.ext.y1), x2px(b) - x2px(a), y2px(S.ext.y0) - y2px(S.ext.y1));
+  ctx.clip();
   const pending = drawTiles(P);
+  ctx.restore();
   if (!pending && S.autoPending && autoContrast(true)) S.autoPending = false;
   drawGaps(P);
+  drawExtent(P);
   drawAnnotations(P);
+  drawMeasure(P);
   if (S.blocked) drawBlocked(P);
   // notes, top right: what is wrong stays until it is put right; the rest is passing
   const notes = [];
@@ -635,7 +833,7 @@ function draw() {
 // A level the view is too large for: said in the middle of the plot, where the data would be.
 function drawBlocked(P) {
   const lines = [`${levelName(S.blocked.p)} is too much to load at this zoom`,
-    S.pin ? "Zoom in, or set the level (bottom right) to auto." : "Zoom in, or tick a coarser product under Levels."];
+    S.pin ? "Zoom in, or set the level (bottom right) to auto." : "Zoom in, or tick a coarser level in the levels menu (bottom right)."];
   ctx.font = "15px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
   const w = Math.max(...lines.map((t) => ctx.measureText(t).width)) + 28, x = P.x + P.w / 2, y = P.y + P.h / 2;
   ctx.fillStyle = C.noteBg; ctx.fillRect(x - w / 2, y - 30, w, 60);
@@ -643,23 +841,78 @@ function drawBlocked(P) {
   ctx.fillStyle = C.noteText; ctx.fillText(lines[0], x, y - 11);
   ctx.fillStyle = C.noteSub; ctx.fillText(lines[1], x, y + 11);
 }
-// What the colours mean: the map from the high limit (top) to the low (bottom). A click on it
-// sets the limits from what is on screen.
+// What the colours mean: a value axis over what is on screen and the limits, the map drawn between
+// the limits. A triangle at each limit is dragged to move it, the part between them to move both;
+// a click off the triangles takes the limits from what is on screen.
 function barRect(P) { return { x: P.x + P.w + BAR.gap, y: P.y, w: BAR.w, h: P.h }; }
+// The values on screen (a sample of the active level's loaded tiles, shaded), sorted: the one source
+// of both the automatic limits and the colour bar's axis. Worked out again only when the tiles change.
+let screenMemo = { key: "", vals: [] };
+function screenValues() {
+  const l = S.levels.length ? activeLevel() : null, found = [];
+  if (l) {
+    const [zx, zy] = zooms(l);
+    for (const [ix, iy] of visibleTiles(l, zx, zy)) {
+      const t = tiles.get(tileKey(l, zx, zy, ix, iy));
+      if (t && t.st === "ok") found.push(t);
+    }
+  }
+  const key = [l && l.p.id, S.disp.scale, ...found.map((t) => t.key)].join("|");
+  if (key !== screenMemo.key) {
+    const vals = [];
+    for (const t of found) for (let i = 0; i < t.data.length; i += 7) { const v = shade(t.data[i]); if (Number.isFinite(v)) vals.push(v); }
+    screenMemo = { key, vals: vals.sort((a, b) => a - b) };
+  }
+  return screenMemo.vals;
+}
+const quantile = (vals, q) => vals[Math.floor((vals.length - 1) * q)];
+// The range the bar's axis spans: the 1-99 % of the values on screen (where the automatic limits
+// fall), widened by half that span each way, within what is there, with a little room. It follows
+// the data, never the limits, so moving a limit changes only the colours; held while dragged.
+function barRange() {
+  if (S.drag && S.drag.kind === "bar") return S.drag.range;
+  const vals = screenValues();
+  let lo = S.disp.vmin, hi = S.disp.vmax;  // with nothing on screen yet, the limits stand in
+  if (vals.length) {
+    const a = quantile(vals, 0.01), b = quantile(vals, 0.99), w = b - a;
+    lo = Math.max(vals[0], a - w / 2); hi = Math.min(vals[vals.length - 1], b + w / 2);
+  }
+  const pad = (hi - lo || Math.abs(hi) || 1) * 0.04;
+  return { lo: lo - pad, hi: hi + pad };
+}
+function barY(b, r, v) { return clamp(b.y + b.h - ((v - r.lo) / (r.hi - r.lo)) * b.h, b.y, b.y + b.h); }
+function barValue(b, r, y) { return r.lo + ((b.y + b.h - y) / b.h) * (r.hi - r.lo); }
+const HANDLE = 7;  // the triangles' half height, and how near a press takes one
+// The part of the bar a press at y takes: a limit's triangle, the span between them, or none.
+function barPart(b, r, y) {
+  const ya = barY(b, r, S.disp.vmax), yb = barY(b, r, S.disp.vmin), da = Math.abs(y - ya), db = Math.abs(y - yb);
+  if (Math.min(da, db) <= HANDLE + 1) return da <= db ? "max" : "min";
+  return y > ya && y < yb ? "both" : "none";
+}
 function drawColorBar(P) {
-  const b = barRect(P), stops = CMAPS[S.disp.cmap] || CMAPS.viridis, g = ctx.createLinearGradient(0, b.y + b.h, 0, b.y);
-  stops.forEach((c, i) => g.addColorStop(i / (stops.length - 1), c));
-  ctx.fillStyle = g; ctx.fillRect(b.x, b.y, b.w, b.h);
+  const b = barRect(P), r = barRange(), { vmin, vmax } = S.disp, k = 255.999 / (vmax - vmin || 1e-12);
+  S.barRange = r;
+  for (let y = 0; y < b.h; y++) {  // each row the colour of its value
+    const s = (barValue(b, r, b.y + y + 0.5) - vmin) * k, c = S.lutRGB[s < 0 ? 0 : s > 255 ? 255 : s | 0];
+    ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`; ctx.fillRect(b.x, b.y + y, b.w, 1);
+  }
   ctx.strokeStyle = C.tick; ctx.lineWidth = 1; ctx.strokeRect(b.x + 0.5, b.y + 0.5, b.w, b.h);
-  const { vmin, vmax } = S.disp, n = 4;
-  ctx.fillStyle = C.text; ctx.font = "12px system-ui"; ctx.textAlign = "left";
-  for (let i = 0; i <= n; i++) {
-    const y = b.y + b.h - (i / n) * b.h, v = vmin + (i / n) * (vmax - vmin);
+  ctx.fillStyle = C.text; ctx.font = "12px system-ui"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  const step = niceNumber((r.hi - r.lo) / 5);
+  for (let v = Math.ceil(r.lo / step) * step; v <= r.hi; v += step) {
+    const y = barY(b, r, v);
     ctx.beginPath(); ctx.moveTo(b.x + b.w, y); ctx.lineTo(b.x + b.w + 3, y); ctx.stroke();
-    ctx.textBaseline = i === 0 ? "bottom" : i === n ? "top" : "middle";
     ctx.fillText(fmtNum(+v.toPrecision(3)), b.x + b.w + 5, y);
   }
-  ctx.textBaseline = "top"; ctx.fillStyle = C.dim;
+  const ya = barY(b, r, vmax), yb = barY(b, r, vmin);
+  ctx.strokeStyle = C.text; ctx.lineWidth = 1.5;  // what the two limits hold between them
+  ctx.beginPath(); ctx.moveTo(b.x - 4.5, ya); ctx.lineTo(b.x - 4.5, yb); ctx.stroke();
+  for (const y of [ya, yb]) {
+    ctx.beginPath(); ctx.moveTo(b.x - 1, y); ctx.lineTo(b.x + b.w + 1, y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(b.x, y); ctx.lineTo(b.x - 10, y - HANDLE); ctx.lineTo(b.x - 10, y + HANDLE); ctx.closePath();
+    ctx.fillStyle = C.text; ctx.fill(); ctx.strokeStyle = C.bg; ctx.lineWidth = 1; ctx.stroke();
+  }
+  ctx.textBaseline = "top"; ctx.fillStyle = C.dim; ctx.textAlign = "left";
   ctx.fillText(`${S.disp.scale === "log" ? "log10 " : ""}${S.disp.stat}`, b.x - 2, b.y + b.h + 6);
   if (S.manual) ctx.fillText("held", b.x - 2, b.y + b.h + 22);
 }
@@ -789,6 +1042,7 @@ async function loadSets() {
   try { listing = await api("/annotations"); } catch (e) { if (e.status !== 404) S.annError = e.message; }  // 404: this server keeps none
   S.annotations = !!listing || !!S.annError; S.me = listing ? listing.owner : null;
   $("annBox").hidden = !S.annotations;
+  document.querySelector('#side [data-tab="annotations"]').hidden = !S.annotations;
   const dims = new Set([S.x, S.y]), old = new Map(S.sets.map((s) => [setKey(s), s]));
   S.sets = (listing ? listing.sets : []).filter((s) => s.dims.length === 2 && s.dims.every((d) => dims.has(d)) &&
     (!s.acquisition_key || s.acquisition_key === S.group));
@@ -831,19 +1085,18 @@ function renderSets() {
   $("btnDeleteSet").disabled = !activeSet(); $("btnSaveSet").disabled = !activeSet(); $("btnDownloadSet").disabled = !activeSet();
   for (const b of $("tools").children) {  // with nowhere to save, the drawing tools are off, and say why
     if (b.dataset.mode === "select" || b.dataset.mode === "pan") continue;
-    b.disabled = !can; if (!can) b.title = `${b.getAttribute("aria-label")}: annotations can't be saved here`;
+    const off = !can && !S.session.sign_in;  // one who may sign in is asked to, on picking a tool
+    b.disabled = off; if (off) b.title = `${b.getAttribute("aria-label")}: annotations can't be saved here`;
   }
   renderChip();
 }
-// The top bar's chip: the set being edited, and a dot which is hollow while edits are unsaved,
-// filled once they are, and red while a save is failing.
+// Beside the account button, a dot which is hollow while edits are unsaved, filled once they are,
+// and red while a save is failing; the set being edited is in the cog menu's Annotations tab.
 function renderChip() {
-  const s = activeSet(), busy = S.sets.some((x) => x.dirty || x.saving);
-  $("setChip").hidden = !S.annotations;
-  $("chipSwatch").style.background = s ? s.color : "transparent";
-  $("chipName").textContent = s ? setKey(s) : "no set";
-  $("chipDot").className = "dot " + (S.saveError ? "bad" : busy ? "busy" : "ok");
-  $("setChip").title = S.saveError ? `not saved: ${S.saveError}` : busy ? "saving" : s ? "everything is saved" : "no annotation set is being edited";
+  const s = activeSet(), busy = S.sets.some((x) => x.dirty || x.saving), dot = $("saveDot");
+  dot.hidden = !S.annotations || !s;
+  dot.className = "dot " + (S.saveError ? "bad" : busy ? "busy" : "ok");
+  dot.title = S.saveError ? `not saved: ${S.saveError}` : busy ? `saving ${setKey(s)}` : s ? `${setKey(s)}: everything is saved` : "";
 }
 
 // ------------------------------------------------------------------ editing and saving
@@ -925,7 +1178,11 @@ async function newSet(name) {
 // Something to draw into: the set being edited, else a new one made without asking.
 async function ensureSet() {
   if (activeSet()) return true;
-  if (!S.me) { toast("Annotations can't be saved here."); return false; }
+  if (!S.me) {
+    if (S.session.sign_in) S.session.open("Sign in to save annotations.");
+    else toast("Annotations can't be saved here.");
+    return false;
+  }
   try {
     for (let n = 1; n < 50; n++) {
       const key = await createSet(n === 1 ? "annotations" : `annotations_${n}`);
@@ -1248,6 +1505,50 @@ function clusterText(c) {
   const parts = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, n]) => `${n} ${k}`);
   return `${c.feats.length} annotations in ${c.set}: ${parts.join(", ")}${counts.size > 4 ? ", ..." : ""}`;
 }
+// A summary of what the cursor rests on, an annotation or a crowd of them, once it has rested a
+// while: moving on, or pressing, puts it away.
+const HOVER_MS = 700;
+let hoverTimer = 0;
+function hoverTip(p, target) {
+  const tip = $("tip");
+  clearTimeout(hoverTimer); tip.style.display = "none";
+  if (!target) return;
+  hoverTimer = setTimeout(() => {
+    const text = target.feats ? clusterText(target) : featureText(target);
+    if (!text) return;
+    tip.textContent = text; tip.style.display = "block";
+    const box = cv.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
+    tip.style.left = `${Math.min(p.x + 14, box.width - w - 8)}px`; tip.style.top = `${p.y + 14 + h > box.height ? p.y - h - 10 : p.y + 14}px`;
+  }, HOVER_MS);
+}
+// One annotation: its label and kind, its set, where it lies, its other columns and who last edited it.
+function featureText(hit) {
+  const s = findSet(hit.set), f = s && s.feats && s.feats.find((x) => x.id === hit.id);
+  if (!f) return "";
+  const sh = f.kind === "raw" ? rawShapes(f) : null, pts = f.pts || (sh ? sh.pts : []);
+  const boxes = f.kind === "box" ? [f.box] : sh ? sh.boxes : [], xs = [], ys = [];
+  for (const q of pts) { xs.push(q[0]); ys.push(q[1]); }
+  for (const b of boxes) { xs.push(b.x0, b.x1); ys.push(b.y0, b.y1); }
+  const span = (vs, fmt, size) => {
+    const v = vs.filter((x) => x !== null && x !== undefined);
+    if (!v.length) return "all";
+    const lo = Math.min(...v), hi = Math.max(...v);
+    return lo === hi ? fmt(lo) : `${fmt(lo)} – ${fmt(hi)} (${size(hi - lo)})`;
+  };
+  const yu = S.yUnits || "";
+  const lines = [
+    `${f.cols.label || "(no label)"} · ${f.kind}${pts.length > 1 ? `, ${pts.length} points` : ""} · ${hit.set}`,
+    `${S.x}: ${span(xs, fmtX, (w) => (S.xTime ? fmtDuration(w) : fmtNum(+w.toPrecision(4))))}`,
+    `${S.y}: ${span(ys, (v) => `${fmtNum(+v.toPrecision(6))} ${yu}`, (w) => `${fmtNum(+w.toPrecision(4))} ${yu}`)}`,
+  ];
+  for (const [k, v] of Object.entries(f.cols)) {
+    if (k === "label" || HIDDEN_COLS.has(k) || v === null || v === undefined || v === "") continue;
+    lines.push(`${k}: ${String(v).slice(0, 80)}`);
+  }
+  const meta = metaLine(f);
+  if (meta) lines.push(meta);
+  return lines.join("\n");
+}
 function zoomToCluster(c) {
   pushView();
   const P = plotRect(); let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
@@ -1363,14 +1664,15 @@ async function renderArea() {
     '<button class="small" id="btnAreaWindow" title="what is on screen now">window</button>' +
     `<button class="small ${S.mode === "area" ? "on" : ""}" id="btnAreaDraw" title="drag a box over the data (d)">a drawn box</button></div>`;
   if (!a || !S.levels.length) { el.innerHTML = pick; return; }
-  // every product of the recording can be downloaded, in the ladder or not; the finest by default
+  // every product of the recording can be downloaded, in the ladder or not; the raw data by default,
+  // else the finest level
   const all = groupProducts().slice().sort((p, q) => p.coords[S.x].step - q.coords[S.x].step || p.coords[S.y].step - q.coords[S.y].step);
-  if (!S.areaProducts) S.areaProducts = new Set([S.levels[S.levels.length - 1].p.id]);
+  if (!S.areaProducts) S.areaProducts = new Set([(S.raw || S.levels[S.levels.length - 1].p).id]);
   const ids = all.map((p) => p.id).filter((id) => S.areaProducts.has(id));
   const syncTip = S.sync ? "copy this area into the local data directory" : "start the viewer with a local data directory to sync into it: dastor browse <directory or URL> --data-dir <directory>";
   el.innerHTML = pick + `<div class="row"><span class="hint">${areaText(a)}</span>` +
     '<button class="small" id="btnAreaClear" title="forget this area">clear</button></div>' +
-    `<div id="areaProducts" title="the products to download">${all.map((p) => `<label><input type="checkbox" value="${p.id}" ${S.areaProducts.has(p.id) ? "checked" : ""}> ${esc(levelName(p))} <span class="hint">${fmtStep(p.coords[S.x].step, S.xTime)}</span></label>`).join("")}</div>` +
+    `<div id="areaProducts" title="the products to download">${all.map((p) => `<label><input type="checkbox" value="${p.id}" ${S.areaProducts.has(p.id) ? "checked" : ""}> <span class="num">${levelNumber(p)}</span> ${esc(p.raw ? "raw data" : levelName(p))} <span class="hint">${fmtStep(p.coords[S.x].step, S.xTime)}</span></label>`).join("")}</div>` +
     `<div class="row"><span id="areaSize">${ids.length ? "…" : "choose a product"}</span><button id="btnSync" ${S.sync && ids.length ? "" : "disabled"} title="${syncTip}">Sync</button></div>`;
   renderArea.sync = null;
   redraw();
@@ -1405,11 +1707,12 @@ function evPos(ev) { const r = cv.getBoundingClientRect(); return { x: ev.client
 function inPlot(p) { const P = plotRect(); return p.x >= P.x && p.x <= P.x + P.w && p.y >= P.y && p.y <= P.y + P.h; }
 function toolCursor() { return S.mode === "pan" ? "grab" : S.mode === "select" ? "default" : "crosshair"; }
 async function setMode(mode) {
-  if (!["pan", "select", "area"].includes(mode) && !(await ensureSet())) mode = "select";  // drawing needs a set; one is made
+  if (!["pan", "select", "area", "measure"].includes(mode) && !(await ensureSet())) mode = "select";  // drawing needs a set; one is made
   closeLabel(true);
   S.mode = mode; S.draft = null;
   cv.style.cursor = toolCursor();
-  for (const b of $("tools").children) { const on = b.dataset.mode === mode; b.classList.toggle("on", on); b.setAttribute("aria-pressed", String(on)); }
+  for (const b of [...$("tools").children, $("btnMeasure")]) { const on = b.dataset.mode === mode; b.classList.toggle("on", on); b.setAttribute("aria-pressed", String(on)); }
+  if (mode !== "measure") S.measure = null;
   renderArea();
   redraw();
 }
@@ -1427,13 +1730,14 @@ function stripTo(px) {  // the window centred where the strip was pressed
   moved(); S.view.x0 = u - (P.w * S.view.spp) / 2; clampPos(); redraw();
 }
 cv.addEventListener("mousedown", (ev) => {
+  hoverTip(null, null);
   if (S.listError) { location.reload(); return; }
   if (!S.levels.length) return;
   const p = evPos(ev), P = plotRect();
   cv.focus();
-  if (ev.button === 0 && within(p, barRect(P), 4)) {  // the colour bar: dragged to move its limits, clicked to take them from the screen
-    const b = barRect(P), f = clamp((b.y + b.h - p.y) / b.h, 0, 1);
-    S.drag = { kind: "bar", p, moved: false, part: f > 0.75 ? "max" : f < 0.25 ? "min" : "both", f, vmin: S.disp.vmin, vmax: S.disp.vmax };
+  if (ev.button === 0 && onBar(p, P)) {  // the colour bar: dragged to move its limits, clicked to take them from the screen
+    const b = barRect(P), range = S.barRange || barRange();
+    S.drag = { kind: "bar", p, moved: false, part: barPart(b, range, p.y), range, v: barValue(b, range, p.y), vmin: S.disp.vmin, vmax: S.disp.vmax };
     return;
   }
   if (ev.button === 0 && within(p, stripRect(P), 5)) { pushView(); S.drag = { kind: "strip" }; stripTo(p.x); return; }
@@ -1509,20 +1813,18 @@ window.addEventListener("mousemove", (ev) => {
     $("stPos").textContent = `${when}   ${fmtNum(+y.toPrecision(5))} ${S.yUnits || S.y}` + (v === null ? "" : `   ${fmtNum(+v.toPrecision(4))}`);
   } else if (!d) $("stPos").textContent = "";
   if (!d && S.levels.length) {
-    const onBar = within(p, barRect(P), 4), onStrip = within(p, stripRect(P), 5);
-    cv.style.cursor = onBar ? "ns-resize" : onStrip ? "pointer" : S.mouse ? hoverCursor(p) : "default";
-    cv.title = onBar ? "drag an end to move that colour limit, the middle to move both; click to take them from what is on screen (a)" : onStrip ? "the whole recording: click or drag to move the window" : "";
+    const bar = onBar(p, P) && barPart(barRect(P), S.barRange || barRange(), p.y), onStrip = within(p, stripRect(P), 5);
+    cv.style.cursor = bar === "max" || bar === "min" ? "ns-resize" : bar === "both" ? "grab" : bar ? "pointer" : onStrip ? "pointer" : S.mouse ? hoverCursor(p) : "default";
+    cv.title = bar ? "drag a triangle to move that colour limit, between them to move both; click off the triangles to take them from what is on screen (a)" : onStrip ? "the whole recording: click or drag to move the window" : "";
   }
-  const crowd = S.mouse && !d ? hitCluster(p.x, p.y) : null, tip = $("tip");
-  tip.style.display = crowd ? "block" : "none";
-  if (crowd) { tip.textContent = clusterText(crowd); tip.style.left = `${p.x + 14}px`; tip.style.top = `${p.y + 14}px`; }
-  if (d || S.draft) redraw();
+  hoverTip(p, S.mouse && !d ? hitCluster(p.x, p.y) || hitFeature(p.x, p.y) : null);
+  if (d || S.draft || (S.measure && !S.measure.b)) redraw();
 });
 window.addEventListener("mouseup", (ev) => {
   const d = S.drag; if (!d) return;
   S.drag = null;
   const p = evPos(ev);
-  if (d.kind === "bar") { if (!d.moved) { S.manual = false; autoContrast(); } }
+  if (d.kind === "bar") { if (!d.moved && (d.part === "both" || d.part === "none")) { S.manual = false; autoContrast(); } }
   else if (d.kind === "pan") { cv.style.cursor = toolCursor(); if (d.click && !d.moved) click(p, d.shift); }
   else if (d.kind === "vertex" || d.kind === "move") {
     if (d.moved) { S.undo.push(d.before); S.redo = []; touch(); }
@@ -1538,20 +1840,23 @@ window.addEventListener("mouseup", (ev) => {
   } else if ((d.kind === "click" || d.kind === "band") && !d.moved) click(p, d.shift);
   redraw();
 });
-// The colour bar dragged: the value which was under the cursor stays under it. An end moves
-// its own limit, the middle moves both.
+// The colour bar dragged along its held axis: a triangle moves its limit, the span between them
+// both, so the value which was under the cursor stays under it.
 function dragBar(d, p) {
-  const b = barRect(plotRect()), span = d.vmax - d.vmin, v = d.vmin + d.f * span;
-  const f = (b.y + b.h - p.y) / b.h;
+  const b = barRect(plotRect()), r = d.range, v = clamp(barValue(b, r, p.y), r.lo, r.hi), least = (r.hi - r.lo) * 1e-3;
   let { vmin, vmax } = d;
-  if (d.part === "max") vmax = vmin + (v - vmin) / clamp(f, 0.05, 1);
-  else if (d.part === "min") vmin = vmax - (vmax - v) / (1 - clamp(f, 0, 0.95));
-  else { vmin -= (f - d.f) * span; vmax -= (f - d.f) * span; }
-  if (!(vmax > vmin)) return;
+  if (d.part === "max") vmax = Math.max(v, vmin + least);
+  else if (d.part === "min") vmin = Math.min(v, vmax - least);
+  else if (d.part === "both") {  // both stay on the bar (or move no further off it)
+    const dv = clamp(v - d.v, Math.min(0, r.lo - d.vmin), Math.max(0, r.hi - d.vmax)); vmin += dv; vmax += dv;
+  }
+  else return;
   S.disp.vmin = vmin; S.disp.vmax = vmax;
   $("inpVmin").value = +vmin.toPrecision(6); $("inpVmax").value = +vmax.toPrecision(6);
   S.autoPending = false; S.manual = true; S.lutVer++;
 }
+// The bar and the triangles left of it.
+function onBar(p, P) { const b = barRect(P); return p.x >= b.x - 12 && p.x <= b.x + b.w + 4 && p.y >= b.y - HANDLE && p.y <= b.y + b.h + HANDLE; }
 // The annotations of the visible sets a window catches: any vertex inside it, or a box overlapping it.
 function inWindow(b) {
   const P = plotRect(), r = boxPx(b, P), x0 = r[0], x1 = r[0] + r[2], y0 = r[1], y1 = r[1] + r[3], out = [];
@@ -1575,6 +1880,10 @@ function mergePicked(refs) {
 }
 function click(p, shift) {
   const pt = [px2x(p.x), px2y(p.y)];
+  if (S.mode === "measure") {  // two clicks make a measurement; a third starts the next
+    S.measure = !S.measure || S.measure.b ? { a: pt, b: null } : { a: S.measure.a, b: pt };
+    return;
+  }
   if (S.mode === "point") { addFeature({ id: newId(), kind: "point", cols: {}, pts: [pt] }, true); return; }
   if (S.mode === "path" || S.mode === "polygon") {
     if (!S.draft) S.draft = { kind: S.mode, pts: [] };
@@ -1614,6 +1923,7 @@ cv.addEventListener("dblclick", (ev) => {
 });
 cv.addEventListener("wheel", (ev) => {
   ev.preventDefault();
+  hoverTip(null, null);  // what it summed up moves
   if (!S.levels.length) return;
   const p = evPos(ev), f = Math.exp(clamp(ev.deltaY || ev.deltaX, -300, 300) * 0.0015);  // Shift can turn the wheel sideways
   zoomAt(p.x, p.y, ev.ctrlKey ? 1 : f, ev.shiftKey ? 1 : f);
@@ -1641,7 +1951,10 @@ window.addEventListener("keydown", (ev) => {
     redraw();
   }
   else if (k === "Escape") {
-    if (S.draft) S.draft = null;
+    if (!$("side").hidden) showSide(false);
+    else if (S.measure) S.measure = null;
+    else if (S.mode === "measure") setMode("pan");  // measuring is no drawing: back to where one starts
+    else if (S.draft) S.draft = null;
     else if (S.conflict) S.conflict = null;
     else if (S.mode === "pan") setPicked([]);
     else if (S.mode === "select") { if (picked().length) setPicked([]); else setMode("pan"); }  // first the selection, then the tool
@@ -1663,6 +1976,8 @@ window.addEventListener("keydown", (ev) => {
   else if (k === "b") backView();
   else if (k === "?") $("help").showModal();
   else if (k === "p") showSide($("side").hidden);
+  else if (k === "l") showPyramid($("side").hidden || sideTab() !== "display");
+  else if (k === "m") setMode(S.mode === "measure" ? "pan" : "measure");
   else if (k === "w") { pushView(); wholeView(); }
   else if (k === "a") { S.manual = false; autoContrast(); }
   else if (k.startsWith("Arrow")) {  // a tenth of the view; half with Shift
@@ -1683,25 +1998,39 @@ window.addEventListener("keydown", (ev) => {
 });
 
 // ------------------------------------------------------------------ controls
-// Folding the panel gives its width to the plot: the same span of the recording, drawn wider.
-function showSide(show) {
-  const handle = $("sideHandle"), what = `${show ? "Hide" : "Show"} the side panel (p)`, was = plotRect().w;
-  $("side").hidden = !show; handle.textContent = show ? "\u203a" : "\u2039"; handle.title = what; handle.setAttribute("aria-label", what);
-  try { localStorage.setItem("dastor.side", show ? "shown" : "hidden"); } catch (e) { /* private mode */ }
-  resize();
-  if (S.levels.length && was > 10) { S.view.spp *= was / plotRect().w; clampView(); }
+// The menu under the cog, over the plot: a tab each for display (with the levels), annotations and download.
+function showSide(show, tab) {
+  if (tab) for (const b of document.querySelectorAll("#side [role=tab]")) {
+    const on = b.dataset.tab === tab; b.setAttribute("aria-selected", String(on));
+    document.querySelector(`#side [data-pane="${b.dataset.tab}"]`).hidden = !on;
+  }
+  $("side").hidden = !show;
+  $("btnMenu").classList.toggle("on", show);
+  $("btnMenu").setAttribute("aria-expanded", String(show));
+  const levels = show && sideTab() === "display";
+  $("btnPyramid").classList.toggle("on", levels); $("btnPyramid").setAttribute("aria-expanded", String(levels));
 }
 function saveDisp() { try { localStorage.setItem("dastor.display", JSON.stringify(S.disp)); } catch (e) { /* private mode */ } }
 function initControls() {
   try { Object.assign(S.disp, JSON.parse(localStorage.getItem("dastor.display")) || {}); } catch (e) { /* defaults */ }
   for (const name of Object.keys(CMAPS)) $("selCmap").add(new Option(name, name));
-  $("selCmap").value = S.disp.cmap; $("selStat").value = S.disp.stat; $("selScale").value = S.disp.scale; $("chkSmooth").checked = S.disp.smooth;
+  $("selCmap").value = S.disp.cmap; $("selStat").value = S.disp.stat; $("selDetail").value = String(S.disp.detail); $("selScale").value = S.disp.scale; $("chkSmooth").checked = S.disp.smooth;
   $("selGroup").onchange = (ev) => setGroup(ev.target.value);
+  $("btnPyramid").onclick = () => showPyramid($("side").hidden || sideTab() !== "display");
+  document.querySelector("#side .tabs").onclick = (ev) => { const b = ev.target.closest("[role=tab]"); if (b) showSide(true, b.dataset.tab); };
+  document.addEventListener("mousedown", (ev) => {  // a press anywhere else closes a menu
+    if (!$("side").hidden && !ev.target.closest("#side, #btnMenu, #btnPyramid, #labelBox")) showSide(false);
+  });
   $("btnWhole").onclick = () => { pushView(); wholeView(); };
+  $("btnMeasure").onclick = () => setMode(S.mode === "measure" ? "pan" : "measure");
   $("btnTheme").onclick = () => setTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light", true);
   $("tools").onclick = (ev) => { const b = ev.target.closest("button"); if (b && b.dataset.mode) setMode(b.dataset.mode); };
-  $("setChip").onclick = () => showSide(true);
-  $("selStat").onchange = (ev) => { S.disp.stat = ev.target.value; S.autoPending = true; saveDisp(); redraw(); };
+  $("selDetail").onchange = (ev) => { S.disp.detail = +ev.target.value; saveDisp(); redraw(); };
+  $("selStat").onchange = (ev) => {  // levels not picked by hand follow it (hi_max for max)
+    S.disp.stat = ev.target.value; S.autoPending = true; saveDisp();
+    if (S.levels.length) { buildLadder(); clampView(); }
+    redraw();
+  };
   $("selScale").onchange = (ev) => { S.disp.scale = ev.target.value; S.autoPending = true; saveDisp(); redraw(); };
   $("selCmap").onchange = (ev) => {
     S.disp.cmap = ev.target.value; buildLut(); saveDisp();
@@ -1714,13 +2043,7 @@ function initControls() {
   }
   $("btnAuto").onclick = () => { S.manual = false; autoContrast(); };
   $("levelBar").onclick = (ev) => { const b = ev.target.closest("button"); if (b) { pushView(); setPin(b.dataset.level || null); } };
-  $("levels").onchange = (ev) => {
-    const t = ev.target; if (!t.dataset.id) return;
-    const ids = [...$("levels").querySelectorAll("input:checked")].map((x) => x.dataset.id);
-    if (!ids.length) { t.checked = true; return; }  // a ladder has at least one level
-    try { localStorage.setItem(ladderKey(), JSON.stringify(ids)); } catch (e) { /* private mode */ }
-    buildLadder(); clampView(); redraw();
-  };
+  $("pyrMenu").onchange = changeLevels;
   $("sets").onclick = async (ev) => {
     const t = ev.target;
     if (t.dataset.show) {
@@ -1737,8 +2060,7 @@ function initControls() {
   $("btnHelp").onclick = () => $("help").showModal();
   $("btnHelpClose").onclick = () => $("help").close();
   $("help").onclick = (ev) => { if (ev.target === $("help")) $("help").close(); };  // a click outside it
-  $("sideHandle").onclick = () => showSide($("side").hidden);
-  try { showSide(localStorage.getItem("dastor.side") !== "hidden"); } catch (e) { /* private mode */ }
+  $("btnMenu").onclick = () => showSide($("side").hidden);
   $("btnNewSet").onclick = () => newSet(); $("btnDeleteSet").onclick = deleteSet;
   $("inpNewSet").onkeydown = (ev) => {
     if (ev.key === "Enter" && ev.target.value.trim()) newSet(ev.target.value.trim());

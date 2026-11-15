@@ -8,6 +8,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import dascore as dc
+import numpy as np
+import pandas as pd
 from dascore.io.index.backend import get_backend
 
 from dastor.acl import (
@@ -18,7 +20,53 @@ from dastor.acl import (
     whole_acquisitions,
 )
 from dastor.auth import Principal
-from dastor.config import Rule, Settings
+from dastor.config import RawConfig, Rule, Settings
+
+# The tag raw rows take: the product the viewer offers as level 0.
+RAW_TAG = "raw DAS"
+_LINKED = ("acquisition_key", "network", "station")
+
+
+def read_links(config: RawConfig) -> pd.DataFrame:
+    """
+    Return the links table, indexed by `source_path`.
+
+    Its columns are text, read as written (a station "0012" stays so, a
+    blank stays blank); a row naming no file or no acquisition is refused.
+    """
+    path, columns = str(config.links), ("source_path", *_LINKED)
+    if path.endswith(".parquet"):
+        table = pd.read_parquet(path)
+    else:
+        table = pd.read_csv(path, dtype=str, keep_default_na=False)
+    if missing := [x for x in columns if x not in table.columns]:
+        raise ValueError(f"{path} lacks the columns {missing}")
+    table = table[list(columns)].fillna("").astype(str)
+    if (table["source_path"] == "").any() or (table["acquisition_key"] == "").any():
+        raise ValueError(f"{path} has a row naming no file or no acquisition_key")
+    return table.drop_duplicates("source_path").set_index("source_path")
+
+
+def linked(contents: pd.DataFrame, links: pd.DataFrame) -> np.ndarray:
+    """Return a mask of the raw rows whose files `links` names."""
+    return contents["source_path"].astype(str).isin(links.index).to_numpy()
+
+
+def link(contents: pd.DataFrame, links: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return raw contents joined to their recordings.
+
+    Rows `links` names take its attributes and the raw tag; the others are
+    dropped. The joined attributes say which product a row is in, never who
+    may read it: access is judged on the raw files' own attributes.
+    """
+    out = contents.loc[linked(contents, links)].copy()
+    paths = out["source_path"].astype(str)
+    for name in _LINKED:
+        out[name] = paths.map(links[name]).to_numpy()
+    out["tag"] = RAW_TAG
+    return out
+
 
 log = logging.getLogger(__name__)
 
@@ -44,15 +92,56 @@ class View:
     principal: Principal
     # The acquisition keys ("" for none) all of whose files are visible.
     acquisitions: frozenset[str] = frozenset()
+    # Raw data as level 0 (see `RawConfig`): its spool, links and visible files.
+    raw: dc.BaseSpool | None = None
+    links: pd.DataFrame | None = None
+    raw_files: frozenset[str] = frozenset()
 
-    def select(self, **kwargs) -> dc.BaseSpool:
-        """Return the visible patches matching a selection."""
+    def select(self, keep=None, /, **kwargs) -> dc.BaseSpool:
+        """
+        Return the visible patches matching a selection.
+
+        `keep`, given the selection's contents, returns a mask of the rows
+        wanted besides (a product, say): applied with the access mask, the
+        selection is narrowed once.
+        """
         spool = self.spool.select(**kwargs) if kwargs else self.spool
         contents = spool.get_contents()
         if contents.empty:
             return spool
         in_files = contents["source_path"].astype(str).isin(self.files).to_numpy()
-        return spool[in_files & matching_rows(contents, self.rules, self.principal)]
+        mask = in_files & matching_rows(contents, self.rules, self.principal)
+        if keep is not None:
+            mask &= keep(contents)
+        return spool[mask]
+
+    def raw_contents(self) -> pd.DataFrame:
+        """Return the visible raw rows, joined to their recordings."""
+        if self.raw is None:
+            return pd.DataFrame()
+        contents = link(self.raw.get_contents(), self.links)
+        return contents[contents["source_path"].astype(str).isin(self.raw_files)]
+
+    def select_raw(self, keep, **kwargs) -> dc.BaseSpool:
+        """
+        Return the visible raw patches of the rows `keep` picks.
+
+        `kwargs` (coordinate bounds) narrow the index first; `keep` is then
+        given the rows joined to their recordings, and returns a mask.
+        """
+        assert self.raw is not None, "only a raw product routes here"
+        spool = self.raw.select(**kwargs) if kwargs else self.raw
+        contents = spool.get_contents()
+        if contents.empty:
+            return spool
+        rows = linked(contents, self.links)
+        joined = link(contents, self.links)
+        own = contents.loc[rows]  # the rows as the files state them, for the rules
+        visible = own["source_path"].astype(str).isin(self.raw_files).to_numpy()
+        allowed = matching_rows(own, self.rules, self.principal)
+        mask = np.zeros(len(contents), dtype=bool)
+        mask[np.flatnonzero(rows)] = visible & allowed & keep(joined)
+        return spool[mask]
 
     def export_index(self, path: str) -> None:
         """
@@ -92,7 +181,10 @@ class Catalog:
         self._source = spool
         self._rules = tuple(self.config.rules)
         self._spool: dc.BaseSpool | None = None
-        self._seen: dict[Principal, tuple[frozenset[str], frozenset[str]]] = {}
+        self._raw: dc.BaseSpool | None = None
+        self._links: pd.DataFrame | None = None
+        self._seen: dict[Principal, tuple] = {}
+        self.generation = 0
         self._lock = threading.Lock()
 
     def refresh(self) -> None:
@@ -110,9 +202,18 @@ class Catalog:
         contents = spool.get_contents()
         if len(contents) and (missing := missing_columns(contents, self._rules)):
             raise ValueError(f"rules name columns the contents lack: {missing}")
+        raw = links = None
+        if (rc := cfg.raw) is not None:
+            raw = dc.spool(rc.path, index=rc.index)
+            raw = raw.update() if rc.update else raw
+            links = read_links(rc)
+            log.info(
+                "raw: %d patches, %d linked files", len(raw.get_contents()), len(links)
+            )
         with self._lock:
-            self._spool = spool
+            self._spool, self._raw, self._links = spool, raw, links
             self._seen = {}
+            self.generation += 1  # what was worked out from the last contents is stale
         log.info("indexed %d patches", len(contents))
 
     def view(self, principal: Principal) -> View:
@@ -122,12 +223,53 @@ class Catalog:
         Every request reads through here, so access control has one choke
         point.
         """
-        with self._lock:
-            spool = self._spool
+        with self._lock:  # one generation: the spools, links and what they show
+            spool, raw, links = self._spool, self._raw, self._links
             assert spool is not None, "refresh() runs before requests are served"
             if (seen := self._seen.get(principal)) is None:
-                contents = spool.get_contents()
-                files = visible_files(contents, self._rules, principal)
-                seen = files, whole_acquisitions(contents, files)
+                seen = self._visible(spool, raw, links, principal)
                 self._seen[principal] = seen
-        return View(spool, seen[0], self._rules, principal, seen[1])
+        files, acquisitions, raw_files = seen
+        return View(
+            spool,
+            files,
+            self._rules,
+            principal,
+            acquisitions,
+            raw=raw,
+            links=links,
+            raw_files=raw_files,
+        )
+
+    def _visible(self, spool, raw, links, principal: Principal) -> tuple:
+        """
+        Return what a principal may read: files, acquisitions, raw files.
+
+        An acquisition is theirs to read about when every file of it is,
+        the raw files linked to it among them.
+        """
+        contents = spool.get_contents()
+        files = visible_files(contents, self._rules, principal)
+        if raw is None:
+            return files, whole_acquisitions(contents, files), frozenset()
+        rows = raw.get_contents()
+        own = rows.loc[linked(rows, links)]  # judged on the files' own attributes
+        raw_files = visible_files(own, self._rules, principal)
+        # a raw file belongs to the recording it is linked to (kept apart by a prefix)
+        joined = link(rows, links)
+        both = pd.concat(
+            [
+                contents[["source_path", "acquisition_key"]]
+                if "acquisition_key" in contents
+                else contents[["source_path"]].assign(acquisition_key=""),
+                pd.DataFrame(
+                    {
+                        "source_path": "raw:" + joined["source_path"].astype(str),
+                        "acquisition_key": joined["acquisition_key"].to_numpy(),
+                    }
+                ),
+            ],
+            ignore_index=True,
+        )
+        seen = files | {f"raw:{x}" for x in raw_files}
+        return files, whole_acquisitions(both, seen), raw_files

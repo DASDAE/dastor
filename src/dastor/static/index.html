@@ -21,43 +21,23 @@
     <button class="tool" data-mode="box" title="Box: drag a box (4)" aria-label="box" aria-pressed="false"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="13" height="10" rx="1"/></svg></button>
   </span>
   <button id="btnWhole" class="tool" title="Fit the whole recording (w)" aria-label="fit the whole recording"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5V3h4.5M12.5 3H17v4.5M17 12.5V17h-4.5M7.5 17H3v-4.5"/></svg></button>
+  <button id="btnMeasure" class="tool" data-mode="measure" title="Measure: click two points for the distance along each axis and the slope, a velocity along time (m)" aria-label="measure" aria-pressed="false"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 13.5 13.5 2.5l4 4-11 11z"/><path d="M5.5 10.5l1.6 1.6M8 8l2 2M10.5 5.5l1.6 1.6"/></svg></button>
   <span class="spacer"></span>
-  <button id="setChip" hidden><span id="chipSwatch" class="swatch"></span><span id="chipName"></span><span id="chipDot" class="dot ok"></span></button>
+  <span id="saveDot" class="dot ok" hidden></span>
   <button id="btnAccount" hidden></button>
   <button id="btnTheme" class="tool" title="Light mode" aria-label="light or dark mode"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="10" cy="10" r="6.500"/><path d="M10 3.500a6.500 6.500 0 0 0 0 13z" fill="currentColor"/></svg></button>
   <button id="btnHelp" class="tool" title="Help: keys and mouse (?)" aria-label="help"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M7.6 7.8a2.5 2.5 0 1 1 3.6 2.3c-.8.5-1.2 1-1.2 2"/><circle cx="10" cy="14.6" r=".6" fill="currentColor"/></svg></button>
+  <button id="btnMenu" class="tool" title="Menu: display and levels, annotations, download (p)" aria-label="more" aria-expanded="false" aria-controls="side"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.6 2.5h2.8l.4 2.1 1.5.9 2-.8 1.4 2.4-1.6 1.4v1.7l1.6 1.4-1.4 2.4-2-.8-1.5.9-.4 2.1H8.6l-.4-2.1-1.5-.9-2 .8-1.4-2.4 1.6-1.4V9.3L3.3 7.9l1.4-2.4 2 .8 1.5-.9z"/><circle cx="10" cy="10" r="2.4"/></svg></button>
 </div>
 <div id="main">
   <div id="view"><canvas id="cv" tabindex="0"></canvas><div id="toast" role="status" aria-live="polite"></div><div id="tip"></div>
-    <input id="labelBox" type="text" list="labelList" placeholder="label" aria-label="label" hidden><datalist id="labelList"></datalist>
-    <button id="sideHandle" title="Hide the side panel (p)" aria-label="hide the side panel">&rsaquo;</button></div>
-  <div id="side">
-    <details id="selBox" hidden open><summary>Selected</summary>
-      <div id="selected"></div>
-    </details>
-    <details open id="annBox"><summary>Annotation sets</summary>
-      <div id="sets"></div>
-      <div class="row" id="newSetRow" hidden><input type="text" id="inpNewSet" placeholder="name of the new set, then Enter" maxlength="64" aria-label="name of the new set"></div>
+    <input id="labelBox" type="text" list="labelList" placeholder="label" aria-label="label" hidden><datalist id="labelList"></datalist></div>
+  <div id="side" role="dialog" aria-label="more" hidden>
+    <div class="tabs" role="tablist">
+      <button role="tab" data-tab="display" aria-selected="true">Display</button><button role="tab" data-tab="annotations" aria-selected="false">Annotations</button><button role="tab" data-tab="download" aria-selected="false">Download</button>
+    </div>
+    <section class="pane" data-pane="display" id="pyrMenu">
       <div class="row">
-        <button class="small" id="btnNewSet" title="a new, empty set">new</button>
-        <button class="small" id="btnLoadSet" title="a set from a file: a zip of a DASCore annotation set, or a .parquet or .csv table">load</button>
-        <button class="small" id="btnSaveSet" title="write the set being edited to the server's annotation directory now (edits are also saved as you go)">save</button>
-        <button class="small" id="btnDownloadSet" title="the set being edited, as a file: a zip of a DASCore annotation set">download</button>
-        <button class="small" id="btnDeleteSet" title="delete the set being edited">delete set</button>
-        <input type="file" id="fileSet" accept=".zip,.parquet,.csv" hidden>
-      </div>
-      <div class="hint" id="annNote"></div>
-    </details>
-    <details id="areaBox" open><summary>Download</summary>
-      <div id="area"></div>
-    </details>
-    <details><summary>Levels</summary>
-      <div id="levels" title="The products to zoom through. The control at the bottom right holds the view on one."></div>
-    </details>
-    <details><summary>Display</summary>
-      <div class="row">
-        <label>statistic <select id="selStat" title="what a pixel shows when it covers many samples">
-          <option value="max">max</option><option value="mean">mean</option><option value="absmax">max of |value|</option></select></label>
         <label>scale <select id="selScale"><option value="linear">linear</option><option value="log">log10</option></select></label>
       </div>
       <div class="row">
@@ -69,7 +49,36 @@
         <label>map <select id="selCmap"></select></label>
         <label><input type="checkbox" id="chkSmooth"> smooth</label>
       </div>
+  <div class="pyrSub"><b>Levels</b> <span class="info" tabindex="0" role="note" aria-label="The resolutions to zoom through. 1 is the finest, at the bottom, and numbers rise as pixels grow. Ticked levels are zoomed through; where several products share a level, pick one. 0 is the raw data, loaded only when ticked." data-tip="The resolutions to zoom through. 1 is the finest, at the bottom, and numbers rise as pixels grow. Ticked levels are zoomed through; where several products share a level, pick one. 0 is the raw data, loaded only when ticked.">?</span></div>
+  <div class="row" id="levelsAll" hidden><select id="selLevelsAll" aria-label="set every level to one product"></select></div>
+  <div id="levels"></div>
+  <div class="pyrSub"><b>Pixels</b> <span class="info" tabindex="0" role="note" aria-label="statistic: what a screen pixel shows when it covers several samples of the level drawn (max, mean, or max of |value|), worked out on the server. switch finer at: auto draws the coarsest level whose samples along time are at most this wide, so a wider setting loads less and looks blockier." data-tip="statistic: what a screen pixel shows when it covers several samples of the level drawn (max, mean, or max of |value|), worked out on the server. switch finer at: auto draws the coarsest level whose samples along time are at most this wide, so a wider setting loads less and looks blockier.">?</span></div>
+  <div class="row"><label>statistic <select id="selStat">
+    <option value="max">max</option><option value="mean">mean</option><option value="absmax">max of |value|</option></select></label>
+  <label>switch finer at <select id="selDetail">
+    <option value="1">1 pixel</option><option value="2">2 pixels</option><option value="4">4 pixels</option></select> per sample</label></div>
+    </section>
+    <section class="pane" data-pane="annotations" hidden>
+    <details id="selBox" hidden open><summary>Selected</summary>
+      <div id="selected"></div>
     </details>
+    <div id="annBox">
+      <div id="sets"></div>
+      <div class="row" id="newSetRow" hidden><input type="text" id="inpNewSet" placeholder="name of the new set, then Enter" maxlength="64" aria-label="name of the new set"></div>
+      <div class="row">
+        <button class="small" id="btnNewSet" title="a new, empty set">new</button>
+        <button class="small" id="btnLoadSet" title="a set from a file: a zip of a DASCore annotation set, or a .parquet or .csv table">load</button>
+        <button class="small" id="btnSaveSet" title="write the set being edited to the server's annotation directory now (edits are also saved as you go)">save</button>
+        <button class="small" id="btnDownloadSet" title="the set being edited, as a file: a zip of a DASCore annotation set">download</button>
+        <button class="small" id="btnDeleteSet" title="delete the set being edited">delete set</button>
+        <input type="file" id="fileSet" accept=".zip,.parquet,.csv" hidden>
+      </div>
+      <div class="hint" id="annNote"></div>
+    </div>
+    </section>
+    <section class="pane" data-pane="download" hidden id="areaBox">
+      <div id="area"></div>
+    </section>
   </div>
 </div>
 <dialog id="help">
@@ -101,14 +110,18 @@
     <tr><td><b>Snap</b></td><td>a click near the first corner closes a polygon; near any vertex on show, the new point joins it</td></tr>
     <tr><td><b>Label box</b></td><td>appears at a new annotation with the last label: Enter keeps it, typing replaces it, Esc leaves none</td></tr>
     <tr><td><b>d</b></td><td>drag an area to download</td></tr>
+    <tr><td><b>m</b></td><td>measure: two clicks give the distance along each axis and the slope (a velocity along time); a third starts again; Esc clears it, then returns to pan</td></tr>
     <tr class="group"><th colspan="2">View</th></tr>
     <tr><td><b>a</b></td><td>colour limits from what is on screen (also a click on the colour bar)</td></tr>
-    <tr><td><b>Colour bar</b></td><td>drag its top or bottom to move that limit, its middle to move both</td></tr>
-    <tr><td><b>p</b></td><td>show or hide the side panel</td></tr>
+    <tr><td><b>Colour bar</b></td><td>drag a triangle to move that limit, between them to move both</td></tr>
+    <tr><td><b>l</b></td><td>the levels menu (also the pyramid, bottom right): which resolutions to zoom through, which product at each, and how a pixel is made; 1 2 &hellip; beside it hold the view on a level, 1 the finest</td></tr>
+    <tr><td><b>p</b></td><td>the menu under the cog, top right: display and levels, annotations, download</td></tr>
     <tr><td><b>?</b></td><td>this help</td></tr>
   </table>
 </dialog>
-<div id="status"><span id="stPos"></span><span class="spacer"></span><span id="levelBar" title="The level drawn. auto follows the zoom; a level holds the view on it."></span></div>
+<div id="status"><span id="stPos"></span><span class="spacer"></span>
+  <button id="btnPyramid" title="Levels: the resolutions to zoom through, and how pixels are made (l)" aria-label="levels" aria-expanded="false" aria-controls="side"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M10 2.5 2.5 16.5h15z"/><path d="M6.3 9.5h7.4M4.4 13h11.2"/></svg></button>
+  <span id="levelBar" title="The level drawn: 1, on the right, is the finest. auto follows the zoom; a level holds the view on it."></span></div>
 <script src="session.js"></script>
 <script src="app.js"></script>
 </body>

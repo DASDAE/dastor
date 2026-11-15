@@ -7,7 +7,7 @@
  *
  *   const session = await dastorSession.start({ api: "../v1", headers, button, busy, toast });
  *   session.user, session.sign_in      // who the server takes the page for; whether it offers sign-in
- *   session.open(why)                  // ask for a key
+ *   session.open(why)                  // ask who the user is: a key, or on a trusting server a name
  *   session.recheck(why)               // after a 401 or 403: ask again if the sign-in has ended
  *
  * `required: true` is for the sign-in page: the dialog can't be dismissed, and `signedIn()` is
@@ -17,7 +17,7 @@
 
 window.dastorSession = (() => {
   const CHANNEL = "dastor.session";
-  const state = { user: null, sign_in: false, open, recheck, signOut };
+  const state = { user: null, sign_in: false, trusting: false, users: [], open, recheck, signOut };
   let opt = { api: "../v1", headers: {}, button: null, busy: () => false, required: false, signedIn: () => location.reload() };
   let dialog = null, channel = null, checking = false;
 
@@ -32,37 +32,69 @@ window.dastorSession = (() => {
     return j;
   }
 
+  // The dialog: a key alone, or on a trusting server (`trusting` from GET /v1/session) the users to
+  // pick from, a new name, and a key only for a user who has one. Signed in, it also signs out.
   function build() {
     dialog = document.createElement("dialog");
     dialog.id = "signIn"; dialog.setAttribute("aria-labelledby", "signInTitle");
     dialog.innerHTML = `<form id="signInForm">
       <b id="signInTitle">Sign in</b>
-      <p class="hint">Your API key for this server. It is checked and not kept: this browser is signed in to the server's pages until you sign out, the sign-in expires, or the server restarts.</p>
-      <input id="inpKey" type="password" autocomplete="off" spellcheck="false" placeholder="API key" aria-label="API key" required>
+      <p class="hint" id="signInHint"></p>
+      <div id="signInUsers" role="listbox" aria-label="users"></div>
+      <input id="inpUser" type="text" autocomplete="off" spellcheck="false" maxlength="64" placeholder="or a new name" aria-label="user name">
+      <input id="inpKey" type="password" autocomplete="off" spellcheck="false" placeholder="API key" aria-label="API key">
       <div id="signInError" role="alert"></div>
-      <div class="row"><button id="btnSignIn" type="submit">Sign in</button><button id="btnSignInCancel" type="button">Cancel</button></div>
+      <div class="row"><button id="btnSignIn" type="submit">Sign in</button><button id="btnSignOut" type="button" hidden>Sign out</button><button id="btnSignInCancel" type="button">Cancel</button></div>
     </form>`;
     document.body.append(dialog);
-    const key = dialog.querySelector("#inpKey"), error = dialog.querySelector("#signInError"), go = dialog.querySelector("#btnSignIn");
-    const cancel = dialog.querySelector("#btnSignInCancel");
-    cancel.hidden = opt.required;
-    cancel.onclick = () => dialog.close();
+    const $d = (id) => dialog.querySelector("#" + id);
+    const key = $d("inpKey"), name = $d("inpUser"), error = $d("signInError"), go = $d("btnSignIn");
+    $d("btnSignInCancel").hidden = opt.required;
+    $d("btnSignInCancel").onclick = () => dialog.close();
+    $d("btnSignOut").onclick = () => signOut().catch((e) => { error.textContent = e.message; });
     dialog.addEventListener("cancel", (ev) => { if (opt.required) ev.preventDefault(); });  // Esc
+    $d("signInUsers").onclick = (ev) => {
+      const b = ev.target.closest("button[data-user]"); if (!b) return;
+      name.value = b.dataset.user; pick();
+      if (key.hidden) dialog.querySelector("form").requestSubmit(); else key.focus();
+    };
+    name.oninput = pick;
     dialog.querySelector("form").onsubmit = async (ev) => {
       ev.preventDefault();
-      if (!key.value.trim()) return;
+      const who = name.value.trim(), k = key.value.trim();
+      if (state.trusting ? !who : !k) return;
       go.disabled = true;
-      try { await call("POST", { key: key.value.trim() }); key.value = ""; changed(opt.signedIn); }
-      catch (e) { error.textContent = e.message; key.select(); }
+      try {
+        await call("POST", state.trusting ? { user: who, ...(k ? { key: k } : {}) } : { key: k });
+        key.value = ""; changed(opt.signedIn);
+      } catch (e) { error.textContent = e.message; (key.hidden ? name : key).select(); }
       finally { go.disabled = false; }
     };
+  }
+  // The key field shows only where one is needed: always without trust, else for a user with a key.
+  function pick() {
+    const name = dialog.querySelector("#inpUser").value.trim();
+    const user = (state.users || []).find((u) => u.name === name);
+    dialog.querySelector("#inpKey").hidden = state.trusting && !(user && user.key);
+    for (const b of dialog.querySelectorAll("#signInUsers button")) b.setAttribute("aria-selected", String(b.dataset.user === name));
   }
 
   function open(why) {
     if (!state.sign_in || dialog.open) return;
-    dialog.querySelector("#signInError").textContent = typeof why === "string" ? why : "";
-    dialog.querySelector("#inpKey").value = "";
-    dialog.showModal(); dialog.querySelector("#inpKey").focus();
+    const $d = (id) => dialog.querySelector("#" + id), esc = (t) => String(t).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+    $d("signInError").textContent = typeof why === "string" ? why : "";
+    $d("signInTitle").textContent = state.user ? `Signed in as ${state.user}` : "Sign in";
+    $d("signInHint").textContent = state.trusting
+      ? "Pick who you are, or type a new name. Only a user with a key needs it."
+      : "Your API key for this server. It is checked and not kept: this browser is signed in to the server's pages until you sign out, the sign-in expires, or the server restarts.";
+    $d("signInUsers").hidden = $d("inpUser").hidden = !state.trusting;
+    $d("signInUsers").innerHTML = (state.users || []).map((u) =>
+      `<button type="button" data-user="${esc(u.name)}" role="option">${esc(u.name)}${u.key ? ' <span class="hint">key</span>' : ""}</button>`).join("");
+    $d("btnSignOut").hidden = !state.user;
+    $d("btnSignIn").textContent = state.user ? "Switch" : "Sign in";
+    $d("inpUser").value = ""; $d("inpKey").value = "";
+    pick();
+    dialog.showModal(); (state.trusting ? $d("inpUser") : $d("inpKey")).focus();
   }
 
   // The server refused a request. A sign-in may have ended (expired, or the server restarted): ask
@@ -97,7 +129,7 @@ window.dastorSession = (() => {
     b.textContent = state.user || "Sign in";
     b.disabled = !state.sign_in;
     b.title = !state.sign_in ? `Reading the server as ${state.user}`
-      : state.user ? `Signed in as ${state.user}: click to sign out` : "Sign in with your API key";
+      : state.user ? `Signed in as ${state.user}: click to switch user or sign out` : "Sign in, to save annotations as yourself";
   }
 
   async function start(options) {
@@ -106,7 +138,7 @@ window.dastorSession = (() => {
     try { Object.assign(state, await call("GET")); } catch (e) { /* a server from before sign-in */ }
     render();
     const tell = opt.toast || console.warn;
-    if (opt.button) opt.button.onclick = () => (state.user ? signOut().catch((e) => tell(e.message)) : open());
+    if (opt.button) opt.button.onclick = () => open();
     if ("BroadcastChannel" in window) {
       channel = new BroadcastChannel(CHANNEL);
       channel.onmessage = async () => {

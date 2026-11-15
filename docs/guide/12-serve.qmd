@@ -49,7 +49,7 @@ annotations:                    # optional: turns on annotations
 dastor serve config.yaml --host 0.0.0.0 --port 8000
 ```
 
-The server runs as one process. It indexes the directory at start, and again every `refresh_seconds`, and loads patches in a thread pool. The viewer is at `/viewer/`; users sign in there with their key.
+The server runs as one process. It indexes the directory at start, and again every `refresh_seconds`, and loads patches in a thread pool; with `limits.tile_workers`, viewer tiles are loaded and reduced in that many worker processes besides. The viewer is at `/viewer/`; users sign in there with their key, or on a trusting server by picking their name.
 
 ## Let only users in
 
