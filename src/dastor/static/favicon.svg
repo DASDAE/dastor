@@ -31,6 +31,8 @@
        id="red-rays"
        d="M1014 347 768 482 1017 414 M1017 482H768L1017 550 M1014 623 768 482" />
   </defs>
+  <!-- narrower and taller than the logo, to sit better in a square tab icon -->
+  <g transform="translate(768 428) scale(0.92 1.15) translate(-768 -428)">
   <g
      fill="url(#steel)"
      stroke="#232426"
@@ -99,4 +101,5 @@
      stroke="#232426"
      stroke-width="10"
      id="path8-6" />
+  </g>
 </svg>

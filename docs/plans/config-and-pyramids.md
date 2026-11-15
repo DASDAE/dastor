@@ -113,6 +113,8 @@ pyramid:
 
 ## 4. Viewer
 
+The recording menu is grouped by dataset: `/v1/viewer/products` returns the dataset each product belongs to, and the menu lists each dataset's recordings under it. A product's dataset is the one its rows match, so levels built elsewhere (stored beside the data, matched by `source_path`) fall under their dataset like any other rows. Until config v1, the viewer groups by the products' `network` attr.
+
 The Levels panel is removed. A pyramid button beside the level control opens a pop-up listing the recording's products by reduction and resolution, with stale ones marked; the user picks the reduction to zoom through and which of its levels. Each level switches in at one sample per pixel (today's rule); other thresholds sit under "advanced", in seconds per screen. The choice is kept in the browser per recording; nothing is written to the server. The tile statistic defaults to the level's `reduce`. With no pyramid, the button is hidden, and the "too much to load" message names `dastor build-pyramid`. `/v1/viewer/products` returns `pyramid_input`, `reduce` and `stale` per product, and for each recording how many of its levels the reader can't see, so the page can say levels are hidden rather than show nothing.
 
 ## Examples

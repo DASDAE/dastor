@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import logging
 import os
 import re
 import socket
@@ -45,6 +46,7 @@ def browse_settings(path: str, annotations: str | None = None) -> dict:
             "refresh_seconds": 300,
         },
         "annotations": {"path": str(store), "anonymous_owner": local_owner()},
+        "trusting": False,  # one user, on their own machine: no one to sign in as
     }
 
 
@@ -93,6 +95,12 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("config", help="path to the YAML config")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument(
+        "--log-level",
+        default="info",
+        choices=["debug", "info", "warning", "error"],
+        help="debug also logs each viewer tile's timings",
+    )
     browse = commands.add_parser(
         "browse", help="open the viewer on a directory of DAS files, or on a server"
     )
@@ -147,8 +155,13 @@ def main(argv: list[str] | None = None) -> int:
                 # A daemon: it ends with the command if the server never starts.
                 waiter = (args.host, args.port, url)
                 threading.Thread(target=_open_when_up, args=waiter, daemon=True).start()
+        level = getattr(args, "log_level", "info")
+        logging.basicConfig(
+            level=level.upper(),
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
         # One process: each would otherwise index and refresh the spool itself.
-        uvicorn.run(app, host=args.host, port=args.port)
+        uvicorn.run(app, host=args.host, port=args.port, log_level=level)
     return 0
 
 

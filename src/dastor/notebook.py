@@ -116,7 +116,11 @@ class Viewer:
                 limits = _IN_MEMORY | (limits or {})
             store = _scratch().name if annotations is None else annotations
             owner = {"path": str(store), "anonymous_owner": local_owner()}
-            config = {"spool": {"rules": [OPEN_RULE]}, "annotations": owner}
+            config = {
+                "spool": {"rules": [OPEN_RULE]},
+                "annotations": owner,
+                "trusting": False,
+            }
         settings = Settings.model_validate(config | {"limits": limits or {}})
         self._store = AnnotationStore(settings.annotations.path)
         if port is not None:

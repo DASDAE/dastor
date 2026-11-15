@@ -49,7 +49,8 @@ class TestSessions:
 
 class TestSignIn:
     def test_without_users_there_is_no_sign_in(self, viewer):
-        assert viewer.get("/v1/session").json() == {"user": None, "sign_in": False}
+        reply = viewer.get("/v1/session").json()
+        assert reply == {"user": None, "sign_in": False, "trusting": False}
         assert viewer.post("/v1/session", json={"key": "x"}).status_code == 404
         # a cookie from elsewhere on the host changes nothing
         viewer.cookies.set(SESSION_COOKIE, "anything")
@@ -58,7 +59,12 @@ class TestSignIn:
 
     def test_signing_in_and_out(self, settings):
         with TestClient(create_app(settings)) as client:
-            assert client.get("/v1/session").json() == {"user": None, "sign_in": True}
+            assert client.get("/v1/session").json() == {
+                "user": None,
+                "sign_in": True,
+                "trusting": True,
+                "users": [{"name": "alice", "key": True}, {"name": "bob", "key": True}],
+            }
             anonymous = _patches(client)
             cookie = _signed_in(client).headers["set-cookie"]
             # the cookie names a session, not the key
@@ -99,7 +105,32 @@ class TestSignIn:
             response = client.post("/v1/session", json={"key": "wrong"})
             assert response.status_code == 401
             assert "set-cookie" not in response.headers
-            assert client.post("/v1/session", json={"key": ""}).status_code == 422
+            assert client.post("/v1/session", json={"key": ""}).status_code == 401
+
+    def test_a_trusting_server_signs_in_by_name(self, settings):
+        """Pick a user or a new name; one with a key still needs it."""
+        with TestClient(create_app(settings)) as client:
+            reply = client.post("/v1/session", json={"user": "carol"})
+            assert reply.status_code == 200 and reply.json()["user"] == "carol"
+            assert client.get("/v1/session").json()["user"] == "carol"
+            # alice has a key: by name alone, no; with her key, yes
+            assert client.post("/v1/session", json={"user": "alice"}).status_code == 401
+            wrong = {"user": "alice", "key": "wrong"}
+            assert client.post("/v1/session", json=wrong).status_code == 401
+            right = {"user": "alice", "key": ALICE_KEY}
+            assert client.post("/v1/session", json=right).json()["user"] == "alice"
+            # a new name must be a plain word, as owners of sets are
+            odd = {"user": "../etc"}
+            assert client.post("/v1/session", json=odd).status_code == 401
+
+    def test_an_untrusting_server_signs_in_only_with_keys(self, settings):
+        config = settings.model_dump(mode="json") | {"trusting": False}
+        with TestClient(create_app(Settings.model_validate(config))) as client:
+            session = client.get("/v1/session").json()
+            assert session["trusting"] is False and "users" not in session
+            assert client.post("/v1/session", json={"user": "carol"}).status_code == 401
+            right = {"user": "alice", "key": ALICE_KEY}
+            assert client.post("/v1/session", json=right).json()["user"] == "alice"
 
     def test_the_header_wins_over_the_session(self, settings):
         with TestClient(create_app(settings)) as client:
@@ -252,7 +283,7 @@ class TestClosedServer:
             reply = closed.get(path)
             assert reply.status_code == 401
             assert reply.json()["detail"] == "sign in to use this server"
-        assert closed.get("/v1/session").json() == {"user": None, "sign_in": True}
+        assert closed.get("/v1/session").json()["sign_in"] is True
         assert closed.get("/health").status_code == 200
 
     def test_the_viewer_sends_visitors_to_sign_in(self, closed):

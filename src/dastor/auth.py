@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import secrets
 import threading
 import time
@@ -12,7 +13,7 @@ from urllib.parse import parse_qsl, urlencode
 
 from starlette.responses import JSONResponse
 
-from dastor.config import User
+from dastor.config import SET_NAME, User
 
 
 @dataclass(frozen=True)
@@ -64,10 +65,34 @@ def new_key() -> tuple[str, str]:
 class Authenticator:
     """Map `Authorization: Bearer <key>` headers to principals."""
 
-    def __init__(self, users: Iterable[User]):
+    def __init__(self, users: Iterable[User], trusting: bool = False):
+        users = list(users)
         self._by_digest = {
-            x.key_sha256: Principal(x.name, frozenset(x.groups), True) for x in users
+            x.key_sha256: Principal(x.name, frozenset(x.groups), True)
+            for x in users
+            if x.key_sha256
         }
+        self._by_name = {x.name: x for x in users}
+        self.trusting = trusting
+
+    def named(self, name: str, key: str | None = None) -> Principal:
+        """
+        Return the principal signing in by name.
+
+        A user with a key must give it. A user with none, or a new name (a
+        plain word, as annotation owners are), signs in only on a trusting
+        server.
+        """
+        user = self._by_name.get(name)
+        if user is not None and user.key_sha256:
+            if not key or not hmac.compare_digest(hash_key(key), user.key_sha256):
+                raise InvalidKeyError(f"wrong key for {name}")
+            return Principal(user.name, frozenset(user.groups), True)
+        if not self.trusting:
+            raise InvalidKeyError("this server signs in only with a key")
+        if user is None and not SET_NAME.fullmatch(name):
+            raise InvalidKeyError(f"{name!r} is not a plain word")
+        return Principal(name, frozenset(user.groups if user else ()), True)
 
     def __call__(self, authorization: str | None) -> Principal:
         """Return the principal for a header; no header is anonymous."""

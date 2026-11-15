@@ -3,11 +3,15 @@
 import asyncio
 import contextlib
 import gzip
+import json
 import logging
+import multiprocessing
 import os
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path as FilePath
 from typing import Annotated, Literal
 from urllib.parse import urlencode
@@ -28,6 +32,7 @@ from fastapi import (
     Query,
     Request,
 )
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import (
     FileResponse,
     JSONResponse,
@@ -54,8 +59,8 @@ from dastor.auth import (
     Sessions,
     TokenGate,
 )
-from dastor.catalog import Catalog, ChangedFileError, View
-from dastor.config import Settings
+from dastor.catalog import RAW_TAG, Catalog, ChangedFileError, View
+from dastor.config import SET_NAME, Settings
 from dastor.query import QueryError, selection
 from dastor.sync import SyncNameError, check_name, refuse_elsewhere, synced_file
 from dastor.tiles import (
@@ -250,18 +255,30 @@ def create_app(
     any of them.
     """
     catalog = Catalog(settings, spool)
-    authenticate = Authenticator(settings.users)
+    authenticate = Authenticator(settings.users, settings.trusting)
+    signs_in = bool(settings.users) or settings.trusting
     sessions = Sessions()
     loads = threading.BoundedSemaphore(settings.limits.max_concurrent_loads)
+
+    pool: list[ProcessPoolExecutor | None] = [None]  # tile workers, while serving
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         await anyio.to_thread.run_sync(catalog.refresh)
         seconds = settings.spool.refresh_seconds
         task = seconds and asyncio.create_task(_refresh_forever(catalog, seconds))
-        yield
-        if task:
-            task.cancel()
+        try:  # however serving ends, the refresh stops and the workers go
+            if workers := settings.limits.tile_workers:
+                pool[0] = await anyio.to_thread.run_sync(_tile_pool, workers)
+            yield
+        finally:
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            if pool[0] is not None:
+                pool[0].shutdown(cancel_futures=True)
+                pool[0] = None
 
     app = FastAPI(title="dastor", version=__version__, lifespan=lifespan)
     app.state.catalog = catalog
@@ -282,7 +299,7 @@ def create_app(
         that session's cookie. The header wins.
         """
         session_id = _session_id(request, settings.https)
-        if authorization or not (session_id and settings.users):
+        if authorization or not (session_id and signs_in):
             try:
                 return authenticate(authorization)
             except InvalidKeyError as exc:
@@ -350,24 +367,47 @@ def create_app(
         """
         kwargs = selection(request.query_params.multi_items(), reserved)
         wanted = [decode_product(p) for p in request.query_params.getlist("product")]
-        first = wanted[0]["attrs"] if wanted else {}
-        shared = {
-            k: v
-            for k, v in first.items()
-            if all(w["attrs"].get(k) == v for w in wanted)
-        }
-        kwargs.update({k: v for k, v in shared.items() if k not in kwargs})
         view = catalog.view(who)
+
+        def rows_of(chosen):
+            def keep(contents):
+                mask = np.zeros(len(contents), dtype=bool)
+                for product in chosen:
+                    mask |= product_rows(contents, product)
+                return mask
+
+            return keep
+
+        # level 0 is read from the raw data, whose rows carry their recording
+        # only through the links; the other products from the spool
+        raw = [w for w in wanted if w["attrs"].get("tag") == RAW_TAG]
+        rest = [w for w in wanted if w["attrs"].get("tag") != RAW_TAG]
         try:
-            spool = view.select(**kwargs, **extra)
+            parts = []
+            if raw and view.raw is not None:
+                parts.append(view.select_raw(rows_of(raw), **kwargs, **extra))
+            if rest or not wanted:
+                shared = (
+                    {
+                        k: v
+                        for k, v in rest[0]["attrs"].items()
+                        if all(w["attrs"].get(k) == v for w in rest)
+                    }
+                    if rest
+                    else {}
+                )
+                kwargs.update({k: v for k, v in shared.items() if k not in kwargs})
+                # the products narrow the selection with the access check, once
+                keep = rows_of(rest) if rest else None
+                parts.append(view.select(keep, **kwargs, **extra))
+            if not parts:  # raw asked for where none is served
+                parts.append(view.select(lambda c: np.zeros(len(c), dtype=bool)))
         except (TypeError, ValueError) as exc:
             # e.g. a malformed time, or text bounding a numeric coordinate
             raise QueryError(str(exc)) from exc
-        if wanted and len(contents := spool.get_contents()):
-            keep = np.zeros(len(contents), dtype=bool)
-            for product in wanted:
-                keep |= product_rows(contents, product)
-            spool = spool[keep]
+        spool = parts[0]
+        for part in parts[1:]:
+            spool = spool + part
         return view, spool
 
     def selected(request: Request, who: Principal) -> dc.BaseSpool:
@@ -411,7 +451,8 @@ def create_app(
     def sign_in(
         request: Request,
         response: Response,
-        key: Annotated[str, Body(embed=True, min_length=1)],
+        key: Annotated[str | None, Body(embed=True)] = None,
+        user: Annotated[str | None, Body(embed=True)] = None,
     ) -> dict:
         """
         Sign the browser in with an API key, for every page of this server.
@@ -421,14 +462,22 @@ def create_app(
         is `HttpOnly` (the pages' scripts don't see it) and `SameSite=Strict`
         (other websites' pages don't send it); over HTTPS it is also
         `Secure` and `__Host-`, as always when the config says `https`.
-        Only on a server with users.
+        Only on a server with users, or a trusting one. Given `user`, it
+        signs in as that user: with the user's key if it has one; with none,
+        or as a new name, only on a trusting server.
         """
-        if not settings.users:
+        if not signs_in:
             raise HTTPException(404, "this server has no users to sign in as")
+        key = key.strip() if key else None
         try:
-            who = authenticate(f"Bearer {key.strip()}")
-        except InvalidKeyError:
-            raise HTTPException(401, "unknown API key") from None
+            if user:
+                who = authenticate.named(user.strip(), key)
+            elif key:
+                who = authenticate(f"Bearer {key}")
+            else:
+                raise InvalidKeyError("give a key, or a user to sign in as")
+        except InvalidKeyError as exc:
+            raise HTTPException(401, str(exc) if user else "unknown API key") from None
         if old := _session_id(request, settings.https):
             sessions.end(old)
         secure = _secure(request, settings.https)
@@ -604,8 +653,10 @@ def create_app(
             body = encode_patch(next(_checked_patches(view, spool[:1], limit)))
         return Response(bytes(body), media_type=PATCH_MEDIA_TYPE)
 
+    listed: dict[tuple, list] = {}  # product listings, by caller and spool generation
+
     @app.get("/v1/viewer/products")
-    def products(who: Who) -> dict:
+    def products(request: Request, who: Who) -> Response:
         """
         Return the products the caller may read, for the viewer.
 
@@ -615,16 +666,32 @@ def create_app(
         and `sync` says whether areas can be synced into a local data
         directory (not on a server; see `dastor browse`).
         """
-        contents = _shown(catalog.view(who).select().get_contents())
+        # worked out once for each caller until the spool is indexed again
+        key = (who, catalog.generation)
+        if (found := listed.get(key)) is None:
+            view = catalog.view(who)
+            contents = _shown(view.select().get_contents())
+            raw = _shown(view.raw_contents())
+            found = list_products(contents) + [
+                {**p, "raw": True}
+                for p in list_products(raw)
+                if p["attrs"].get("tag") == RAW_TAG
+            ]
+            if len(listed) > 256:
+                listed.clear()
+            listed[key] = found
         limits = settings.limits
-        return {
-            "products": list_products(contents),
-            "sync": sync_dir is not None,
-            "limits": {
-                "max_tile_bytes": limits.max_tile_bytes,
-                "max_view_bytes": limits.max_view_bytes,
+        return _json_maybe_gzip(
+            request,
+            {
+                "products": found,
+                "sync": sync_dir is not None,
+                "limits": {
+                    "max_tile_bytes": limits.max_tile_bytes,
+                    "max_view_bytes": limits.max_view_bytes,
+                },
             },
-        }
+        )
 
     @app.get("/v1/viewer/tile")
     def tile(
@@ -634,6 +701,7 @@ def create_app(
         width: Annotated[int, Query(ge=1, le=1024)] = 256,
         height: Annotated[int, Query(ge=1, le=1024)] = 256,
         stat: Annotated[Stat, Query()] = "max",
+        precision: Annotated[Literal["single", "half"], Query()] = "single",
     ):
         """
         Return one image tile of a product, reduced to `height` x `width`.
@@ -644,16 +712,21 @@ def create_app(
         data is 204, and one needing too many samples is 413 (zoom in, or
         use a coarser product).
         """
+        clock = time.perf_counter
+        start = clock()
+        if anyio.from_thread.run(request.is_disconnected):  # given up while queued
+            return Response(status_code=204)
         wanted = decode_product(product)
         x, y = product_axes(wanted["dims"])
-        reserved = _RESERVED | {"width", "height", "stat"}
+        reserved = _RESERVED | {"width", "height", "stat", "precision"}
         kwargs = selection(request.query_params.multi_items(), reserved)
         if len(wanted["dims"]) != 2 or not {x, y} <= set(kwargs):
             raise QueryError("a tile needs a product of two dims and bounds on both")
         view, spool = selected_with_view(request, who, reserved)
         contents = spool.get_contents()
+        picked = clock()
         if not len(contents):
-            return Response(status_code=204)
+            return Response(status_code=204, headers=_timing(select=picked - start))
         ranges = [
             tile_range(kwargs[dim], contents[f"{dim}_min"].dtype.kind in "Mm")
             for dim in (x, y)
@@ -663,14 +736,52 @@ def create_app(
             msg = f"tile would read about {size} bytes; the limit is {limit}"
             raise HTTPException(413, msg)
         with _load_errors(), loads:
-            patches = _checked_patches(view, spool, limit)
-            values = render_tile(patches, x, y, *ranges, (height, width), stat)
+            # a tile the page gave up on while it waited (a quick zoom) is not
+            # worked out: the work would only delay the tiles still wanted
+            if anyio.from_thread.run(request.is_disconnected):
+                log.debug("tile abandoned before loading: %s", _tile_name(wanted))
+                return Response(status_code=204)
+            waited = clock()
+            # checked here, where the rules are; loaded and reduced in a worker
+            # when there are some: the patches go to it lazy, a few kB each
+            patches = list(_checked_patches(view, spool, limit))
+            args = (x, y, *ranges, (height, width), stat)
+            if pool[0] is None:
+                values = render_tile(patches, *args)
+            else:
+                values = pool[0].submit(render_tile, patches, *args).result()
+        drawn = clock()
         if values is None:
-            return Response(status_code=204)
-        body, headers = encode_tile(values), {"Vary": "Accept-Encoding"}
+            timing = _timing(
+                select=picked - start, wait=waited - picked, load=drawn - waited
+            )
+            return Response(status_code=204, headers=timing)
+        body, dtype = encode_tile(values, half=precision == "half")
+        headers = {"Vary": "Accept-Encoding", "X-Tile-Dtype": dtype}
         if "gzip" in request.headers.get("accept-encoding", ""):
             body = gzip.compress(body, compresslevel=1)
             headers["Content-Encoding"] = "gzip"
+        done = clock()
+        # how long each part took, for the browser's network panel and the profiler
+        headers |= _timing(
+            select=picked - start,
+            wait=waited - picked,
+            load=drawn - waited,
+            encode=done - drawn,
+        )
+        log.debug(
+            "tile %s: %d patches, select %.0f ms, wait %.0f ms, load %.0f ms,"
+            " encode %.0f ms, %d bytes %s%s",
+            _tile_name(wanted),
+            len(patches),
+            1000 * (picked - start),
+            1000 * (waited - picked),
+            1000 * (drawn - waited),
+            1000 * (done - drawn),
+            len(body),
+            dtype,
+            " in a worker" if pool[0] is not None else "",
+        )
         return Response(body, media_type="application/octet-stream", headers=headers)
 
     store = settings.annotations and AnnotationStore(settings.annotations.path)
@@ -828,16 +939,98 @@ def create_app(
         """Return the page which signs the browser in, then goes on to `?next=`."""
         return FileResponse(_STATIC / "signin.html")
 
-    app.mount("/viewer", StaticFiles(directory=_STATIC, html=True), name="viewer")
+    app.mount("/viewer", _Revalidated(directory=_STATIC, html=True), name="viewer")
     return app
 
 
-def _session(who: Principal, settings: Settings) -> dict:
-    """Return who a caller is, as `/v1/session` gives it."""
+def _tile_pool(workers: int) -> ProcessPoolExecutor:
+    """
+    Start the tile workers, warm.
+
+    They fork from a server which has imported what tiles need, and all
+    start now rather than on a first tile.
+    """
+    context = multiprocessing.get_context("forkserver")
+    context.set_forkserver_preload(["dascore", "dastor.tiles"])
+    pool = ProcessPoolExecutor(workers, mp_context=context)
+    try:
+        for future in [pool.submit(os.getpid) for _ in range(workers)]:
+            future.result()
+    except BaseException:
+        pool.shutdown(cancel_futures=True)
+        raise
+    return pool
+
+
+def _timing(**parts: float) -> dict:
+    """Return a `Server-Timing` header of named durations, given in seconds."""
     return {
-        "user": who.name if who.authenticated else None,
-        "sign_in": bool(settings.users),
+        "Server-Timing": ", ".join(f"{k};dur={1000 * v:.1f}" for k, v in parts.items())
     }
+
+
+def _tile_name(product: dict) -> str:
+    """Return how a log line names a product: its tag and steps."""
+    steps = ",".join(f"{k}={v}" for k, v in product["steps"].items())
+    return f"{product['attrs'].get('tag', '')!r} [{steps}]"
+
+
+def _json_maybe_gzip(request: Request, content) -> Response:
+    """
+    Return JSON, gzipped for a client which takes it.
+
+    The viewer's product listing runs to hundreds of kilobytes, which gzip
+    makes a tenth of; done here rather than by middleware, which would also
+    squeeze the binary data responses.
+    """
+    body = json.dumps(
+        jsonable_encoder(content),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode()
+    headers = {"Vary": "Accept-Encoding"}
+    if "gzip" in request.headers.get("accept-encoding", ""):
+        body = gzip.compress(body, compresslevel=5)
+        headers["Content-Encoding"] = "gzip"
+    return Response(body, media_type="application/json", headers=headers)
+
+
+class _Revalidated(StaticFiles):
+    """
+    The viewer's files, which browsers ask after on every load.
+
+    `no-cache` keeps them cached but checked (a 304 when unchanged), so a
+    page is never a mix of an old script and a new one after an update.
+    """
+
+    def file_response(self, *args, **kwargs):
+        """Return a file, marked to be checked before it is used again."""
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+def _session(who: Principal, settings: Settings) -> dict:
+    """
+    Return who a caller is, as `/v1/session` gives it.
+
+    A trusting server also lists the users one may sign in as: those of the
+    config (`key` says one is needed) and the owners of annotation sets.
+    """
+    out = {
+        "user": who.name if who.authenticated else None,
+        "sign_in": bool(settings.users) or settings.trusting,
+        "trusting": settings.trusting,
+    }
+    if settings.trusting:
+        users = {x.name: bool(x.key_sha256) for x in settings.users}
+        if settings.annotations and settings.annotations.path.is_dir():
+            for path in settings.annotations.path.iterdir():
+                if path.is_dir() and SET_NAME.fullmatch(path.name):
+                    users.setdefault(path.name, False)
+        out["users"] = [{"name": k, "key": v} for k, v in sorted(users.items())]
+    return out
 
 
 # Clients of the server's own machine, which sign in over plain HTTP unremarked.

@@ -348,3 +348,131 @@ class TestViewerPage:
         """A path which is no directory ends the command."""
         with pytest.raises(SystemExit, match="not a directory"):
             browse_settings(str(tmp_path / "missing"))
+
+
+def test_the_page_is_checked_on_every_load(viewer):
+    """The viewer's files are kept by browsers but checked, never stale."""
+    for name in ("", "app.js", "session.js", "style.css"):
+        reply = viewer.get(f"/viewer/{name}")
+        assert reply.status_code == 200
+        assert reply.headers["cache-control"] == "no-cache"
+
+
+def test_steps_a_last_digit_apart_are_one_product():
+    """Files stating one spacing to slightly different floats are one product."""
+    import pandas as pd
+
+    rows = []
+    for step in (1.5952381342006605, 1.5952381342006603):
+        rows.append(
+            {
+                "dims": "time,distance",
+                "acquisition_key": "",
+                "tag": "x",
+                "time_step": pd.Timedelta(250, "ms"),
+                "distance_step": step,
+                "time_min": pd.Timestamp("2025-11-05"),
+                "time_max": pd.Timestamp("2025-11-05T01"),
+                "distance_min": 0.0,
+                "distance_max": 100.0,
+                "dtype": "float32",
+            }
+        )
+    found = list_products(pd.DataFrame(rows))
+    assert len(found) == 1
+    assert product_rows(pd.DataFrame(rows), found[0]).all()
+
+
+def test_half_precision_only_where_values_fit():
+    """float16 halves a tile when its values fit; else it stays float32."""
+    from dastor.tiles import encode_tile
+
+    fits = np.array([[0.001, 1.5], [np.nan, 6000.0]], dtype="float32")
+    body, dtype = encode_tile(fits, half=True)
+    assert dtype == "float16" and len(body) == fits.size * 2
+    back = np.frombuffer(body, "<f2").reshape(fits.shape)
+    assert np.allclose(back, fits, rtol=1e-3, equal_nan=True)
+    for value in (1e-9, 1e6):  # too fine, too large
+        _, dtype = encode_tile(np.array([[value, 1.0]], dtype="float32"), half=True)
+        assert dtype == "float32"
+    assert encode_tile(fits)[1] == "float32"  # only when asked
+
+
+def test_tile_says_its_dtype(viewer):
+    """A tile asked for at half precision says which it got."""
+    product = _products(viewer)["max_100ms"]["id"]
+    params = {"product": product, "width": 20, "height": 8, **FIRST_BLOCK}
+    single = viewer.get("/v1/viewer/tile", params=params)
+    half = viewer.get("/v1/viewer/tile", params={**params, "precision": "half"})
+    assert single.headers["x-tile-dtype"] == "float32" and len(single.content) == 640
+    assert half.headers["x-tile-dtype"] in ("float16", "float32")
+    width = 2 if half.headers["x-tile-dtype"] == "float16" else 4
+    assert len(half.content) == 160 * width
+
+
+def test_the_product_listing_is_gzipped(viewer):
+    """The listing, hundreds of kilobytes on a real server, comes compressed."""
+    reply = viewer.get("/v1/viewer/products", headers={"Accept-Encoding": "gzip"})
+    assert reply.headers["content-encoding"] == "gzip"
+    assert reply.json()["products"]
+
+
+def test_the_listing_is_worked_out_again_after_a_refresh(tmp_path):
+    """The listing is kept for each caller, until the spool is indexed again."""
+    from fastapi.testclient import TestClient
+
+    from dastor.app import create_app
+    from dastor.config import Settings
+
+    data = tmp_path / "data"
+    data.mkdir()
+    patch = dc.get_example_patch()
+    dc.write(patch.update_attrs(tag="first"), data / "first.h5", "DASDAE")
+    settings = Settings.model_validate(browse_settings(str(data), str(tmp_path / "a")))
+    with TestClient(create_app(settings)) as client:
+
+        def tags():
+            products = client.get("/v1/viewer/products").json()["products"]
+            return {x["attrs"].get("tag") for x in products}
+
+        assert tags() == {"first"}
+        dc.write(patch.update_attrs(tag="second"), data / "second.h5", "DASDAE")
+        assert tags() == {"first"}  # kept until the next refresh
+        client.app.state.catalog.refresh()
+        assert tags() == {"first", "second"}
+
+
+def test_tile_workers_draw_the_same_tile(viewer_settings):
+    """Tiles loaded and reduced in worker processes are the same as in-process."""
+    from fastapi.testclient import TestClient
+
+    from dastor.app import create_app
+
+    pooled = viewer_settings.model_copy(
+        update={"limits": viewer_settings.limits.model_copy(update={"tile_workers": 2})}
+    )
+    tiles = []
+    for settings in (viewer_settings, pooled):
+        with TestClient(create_app(settings)) as client:
+            product = _products(client)["raw"]["id"]
+            params = {"product": product, "width": 60, "height": 16, **FIRST_BLOCK}
+            reply = client.get("/v1/viewer/tile", params=params)
+            assert reply.status_code == 200
+            tiles.append(reply.content)
+    assert tiles[0] == tiles[1]
+
+
+def test_a_tile_says_how_long_its_parts_took(viewer, caplog):
+    """`Server-Timing` splits a tile's time; at debug level it is logged too."""
+    import logging
+
+    product = _products(viewer)["raw"]["id"]
+    params = {"product": product, "width": 20, "height": 8, **FIRST_BLOCK}
+    with caplog.at_level(logging.DEBUG, logger="dastor.app"):
+        reply = viewer.get("/v1/viewer/tile", params=params)
+    parts = dict(
+        x.strip().split(";dur=") for x in reply.headers["server-timing"].split(",")
+    )
+    assert set(parts) == {"select", "wait", "load", "encode"}
+    assert all(float(v) >= 0 for v in parts.values())
+    assert any("tile 'raw'" in r.getMessage() for r in caplog.records)
