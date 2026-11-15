@@ -352,7 +352,12 @@ function levelCost(l) {
   const tile = (TILE * 2 ** zx + 1) * (TILE * 2 ** zy + 1) * item;  // the server counts both ends
   return { tile, view: tile * visibleTiles(l, zx, zy).length };
 }
-function overLimits(l) { const c = levelCost(l); return c.tile > S.limits.max_tile_bytes || c.view > S.limits.max_view_bytes; }
+// Over what the server allows, or for raw data over the time one screen of it may span (its files
+// read every channel of a time span, so the span, not the distance, sets the cost).
+function overLimits(l) {
+  if (l.p.max_view_seconds && S.xTime && plotRect().w * S.view.spp > l.p.max_view_seconds) return true;
+  const c = levelCost(l); return c.tile > S.limits.max_tile_bytes || c.view > S.limits.max_view_bytes;
+}
 // The level drawn: the pinned one, else the coarsest with at least one sample for each screen
 // pixel along x (the finest if none has). If the view would read more of it than the limits
 // allow, the nearest coarser level within them stands in; with none, S.blocked is the level

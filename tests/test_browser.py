@@ -820,6 +820,11 @@ class TestViewing:
         )
         assert page.js("S.levels.map(l => levelNumber(l.p))") == [2, 1, 0]
         assert page.js(f"[{zero}.textContent, {zero}.disabled]") == ["0", False]
+        # zoomed in far it is drawn, unless the screen spans more time than raw may
+        deep = "S.view.spp = 1e-5; S.view.ypp = 0.1; levelMemo.key = '';"
+        assert page.js(f"{deep} levelNumber(activeLevel().p)") == 0
+        page.js("S.raw.max_view_seconds = 1e-6")
+        assert page.js(f"{deep} levelNumber(activeLevel().p)") == 1
         # and an area downloads the raw data unless asked otherwise
         page.js("S.area = windowBounds(); S.areaProducts = null; renderArea()")
         ticked = "[...document.querySelectorAll('#areaProducts input:checked')]"

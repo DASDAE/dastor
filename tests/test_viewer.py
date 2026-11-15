@@ -476,3 +476,117 @@ def test_a_tile_says_how_long_its_parts_took(viewer, caplog):
     assert set(parts) == {"select", "wait", "load", "encode"}
     assert all(float(v) >= 0 for v in parts.values())
     assert any("tile 'raw'" in r.getMessage() for r in caplog.records)
+
+
+def test_a_worker_reads_the_index_again_after_a_refresh(tmp_path):
+    """A product indexed after the workers started is drawn by them."""
+    from fastapi.testclient import TestClient
+
+    from dastor.app import create_app
+    from dastor.config import Settings
+
+    data = tmp_path / "data"
+    data.mkdir()
+    patch = dc.get_example_patch()
+    dc.write(patch.update_attrs(tag="first"), data / "first.h5", "DASDAE")
+    config = browse_settings(str(data), str(tmp_path / "a"))
+    config["limits"] = {"tile_workers": 1}
+    with TestClient(create_app(Settings.model_validate(config))) as client:
+        dc.write(patch.update_attrs(tag="second"), data / "second.h5", "DASDAE")
+        client.app.state.catalog.refresh()
+        products = client.get("/v1/viewer/products").json()["products"]
+        second = next(x for x in products if x["attrs"]["tag"] == "second")
+        time = second["coords"]["time"]
+        params = {
+            "product": second["id"],
+            "time_min": time["min"],
+            "time_max": time["max"],
+            "distance_min": 0,
+            "distance_max": 300,
+            "width": 16,
+            "height": 8,
+        }
+        reply = client.get("/v1/viewer/tile", params=params)
+        assert reply.status_code == 200 and len(reply.content) == 16 * 8 * 4
+
+
+def test_a_tile_drawn_after_a_refresh_sees_it(tmp_path, monkeypatch):
+    """A tile asked for before a refresh and drawn after it uses the new index."""
+    import multiprocessing
+
+    from dastor import tilework
+    from dastor.auth import ANONYMOUS
+    from dastor.catalog import Catalog
+    from dastor.config import Settings
+
+    data = tmp_path / "data"
+    data.mkdir()
+    patch = dc.get_example_patch()
+    dc.write(patch.update_attrs(tag="public"), data / "a.h5", "DASDAE")
+    config = browse_settings(str(data), str(tmp_path / "notes"))
+    config["spool"]["rules"] = [
+        {"column": "tag", "pattern": "^public$", "allow": ["*"]}
+    ]
+    settings = Settings.model_validate(config)
+    server = Catalog(settings)
+    server.refresh()
+    current = multiprocessing.Value("q", server.generation, lock=False)
+    server.listeners.append(lambda g: setattr(current, "value", g))
+    for name in ("_catalog", "_generation", "_current"):  # this process as a worker
+        monkeypatch.setattr(tilework, name, getattr(tilework, name))
+    tilework.start(settings.model_dump(mode="json"), dc.get_config(), current)
+
+    contents = server.view(ANONYMOUS).select().get_contents()
+    product = list_products(contents)[0]
+    bounds = {
+        d: (contents[f"{d}_min"].min(), contents[f"{d}_max"].max())
+        for d in ("time", "distance")
+    }
+    job = (product, bounds, "time", "distance", (8, 16), "max", 10**9)
+    assert tilework.in_worker(ANONYMOUS, *job)[0] is not None
+    # the file gains a secret patch, and the server indexes it again
+    secret = patch.update_attrs(tag="secret")
+    dc.write(
+        dc.spool([patch.update_attrs(tag="public"), secret]), data / "a.h5", "DASDAE"
+    )
+    server.refresh()
+    # the whole file is now hidden: not every row of it is granted
+    assert tilework.in_worker(ANONYMOUS, *job)[0] is None
+
+
+def _start_worker(settings: dict, config, current) -> None:
+    from dastor import tilework
+
+    tilework.start(settings, config, current)
+
+
+def test_a_worker_reads_the_index_as_the_server_wrote_it(tmp_path):
+    """A worker, a fresh process, takes the server's DASCore config: no rebuild."""
+    import multiprocessing
+    import sqlite3
+
+    from dastor.catalog import Catalog
+    from dastor.config import Settings
+
+    data = tmp_path / "data"
+    data.mkdir()
+    dc.write(dc.get_example_patch(), data / "a.h5", "DASDAE")
+    config = browse_settings(str(data), str(tmp_path / "notes"))
+    config["spool"]["index"] = str(tmp_path / "index.sqlite3")
+    settings = Settings.model_validate(config)
+
+    def stored():
+        with sqlite3.connect(tmp_path / "index.sqlite3") as db:
+            return db.execute("select max_shift from meta_data").fetchone()[0]
+
+    with dc.config_context(max_shift=0.1):
+        Catalog(settings).refresh()
+        assert stored() == 0.1
+        context = multiprocessing.get_context("spawn")  # nothing inherited
+        current = context.Value("q", 1, lock=False)
+        args = (settings.model_dump(mode="json"), dc.get_config(), current)
+        worker = context.Process(target=_start_worker, args=args)
+        worker.start()
+        worker.join(60)
+        assert worker.exitcode == 0
+    assert stored() == 0.1  # read as written, not rebuilt with the default

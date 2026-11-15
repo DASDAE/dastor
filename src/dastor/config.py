@@ -90,12 +90,17 @@ class RawConfig(_Model):
     update
         Index the directory again at start; off, the index is read as it is
         (build it beforehand: a large remote directory takes hours).
+    max_view_seconds
+        The most time one screen of raw data may span. Raw files are often
+        laid out so that any window reads every channel of its time span,
+        whatever its distance; wider than this, a coarser level stands in.
     """
 
     path: Path
     index: Path | None = None
     links: Path
     update: bool = False
+    max_view_seconds: float | None = Field(default=None, gt=0)
 
 
 class SpoolConfig(_Model):

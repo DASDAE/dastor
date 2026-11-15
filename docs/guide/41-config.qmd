@@ -50,6 +50,7 @@ Optional: raw data shown as level 0 of the recordings it belongs to.
 | `index` | in the directory | Its DASCore index. |
 | `links` | required | A table (Parquet or CSV) of `source_path` (relative to `path`) and the recording's `acquisition_key`, `network` and `station`. Rows it doesn't name aren't served. |
 | `update` | `false` | Index the directory again at start. Off, the index is read as it is: build it beforehand, as a large remote directory takes hours. |
+| `max_view_seconds` | none | The most time one screen of raw data may span; wider, a coarser level stands in. Raw files are often stored so that any window reads every channel for its time, so the span, not the distance, sets the cost. |
 
 The raw rows pass the same access rules as the others, matched against the raw files' own attributes.
 

@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import dascore as dc
+import dascore.exceptions as dce
 import numpy as np
 import pandas as pd
 from dascore.io.index.backend import get_backend
@@ -21,6 +22,8 @@ from dastor.acl import (
 )
 from dastor.auth import Principal
 from dastor.config import RawConfig, Rule, Settings
+from dastor.query import QueryError
+from dastor.tiles import product_rows
 
 # The tag raw rows take: the product the viewer offers as level 0.
 RAW_TAG = "raw DAS"
@@ -75,6 +78,10 @@ class ChangedFileError(RuntimeError):
     """Raised when a file no longer matches the rules that granted it."""
 
 
+class TooLargeError(Exception):
+    """Raised when loaded patches exceed the request limit."""
+
+
 @dataclass(frozen=True)
 class View:
     """
@@ -114,6 +121,75 @@ class View:
         if keep is not None:
             mask &= keep(contents)
         return spool[mask]
+
+    def products(self, wanted: list[dict], **kwargs) -> dc.BaseSpool:
+        """
+        Return the visible patches of the products `wanted` matching a selection.
+
+        Products are those of `/v1/viewer/products` (none: every patch). The
+        attributes they share go into the selection, so the index narrows
+        before any rows are read; dims, steps and the other attributes are
+        matched on what is left. Level 0 is read from the raw data, whose rows
+        carry their recording only through the links.
+        """
+
+        def rows_of(chosen):
+            def keep(contents):
+                mask = np.zeros(len(contents), dtype=bool)
+                for product in chosen:
+                    mask |= product_rows(contents, product)
+                return mask
+
+            return keep
+
+        raw = [w for w in wanted if w["attrs"].get("tag") == RAW_TAG]
+        rest = [w for w in wanted if w["attrs"].get("tag") != RAW_TAG]
+        try:
+            parts = []
+            if raw and self.raw is not None:
+                parts.append(self.select_raw(rows_of(raw), **kwargs))
+            if rest or not wanted:
+                shared = {}
+                if rest:
+                    first = rest[0]["attrs"]
+                    shared = {
+                        k: v
+                        for k, v in first.items()
+                        if all(w["attrs"].get(k) == v for w in rest)
+                    }
+                kwargs = {**shared, **kwargs}
+                # the products narrow the selection with the access check, once
+                parts.append(self.select(rows_of(rest) if rest else None, **kwargs))
+            if not parts:  # raw asked for where none is served
+                parts.append(self.select(lambda c: np.zeros(len(c), dtype=bool)))
+        except (TypeError, ValueError) as exc:
+            # e.g. a malformed time, or text bounding a numeric coordinate
+            raise QueryError(str(exc)) from exc
+        spool = parts[0]
+        for part in parts[1:]:
+            spool = spool + part
+        return spool
+
+    def checked(self, spool, limit: int):
+        """
+        Yield a spool's patches, checking each against the rules and the limit.
+
+        A patch whose file changed to fall outside the rules, or patches whose
+        real size passes the limit the estimate missed, end the response.
+        """
+        total = 0
+        for index, row in enumerate(spool.get_contents().to_dict("records")):
+            try:
+                patch = self.check(spool[index], row)
+            except dce.MissingPatchError as exc:
+                # The file no longer holds the indexed patch.
+                msg = f"{row.get('source_path')} changed since it was indexed"
+                raise ChangedFileError(msg) from exc
+            total += int(np.prod(patch.shape)) * np.dtype(patch.dtype).itemsize
+            if total > limit:
+                msg = f"request returns more than the limit of {limit} bytes"
+                raise TooLargeError(msg)
+            yield patch
 
     def raw_contents(self) -> pd.DataFrame:
         """Return the visible raw rows, joined to their recordings."""
@@ -185,27 +261,32 @@ class Catalog:
         self._links: pd.DataFrame | None = None
         self._seen: dict[Principal, tuple] = {}
         self.generation = 0
+        # told the new generation after each refresh (the tile workers' signal)
+        self.listeners: list = []
         self._lock = threading.Lock()
 
-    def refresh(self) -> None:
+    def refresh(self, update: bool = True) -> None:
         """
         Index the directory again, if one is served, and forget what was visible.
 
-        Refuses rules naming columns the contents lack.
+        Without `update`, the index is read as it is (a tile worker does so,
+        the server keeping it current). Refuses rules naming columns the
+        contents lack.
         """
         cfg = self.config
         # A spool handed in is served as it is: it may be a selection or
         # another server's, which can't be indexed again.
         spool = self._source
         if spool is None:
-            spool = dc.spool(cfg.path, index=cfg.index).update()
+            spool = dc.spool(cfg.path, index=cfg.index)
+            spool = spool.update() if update else spool
         contents = spool.get_contents()
         if len(contents) and (missing := missing_columns(contents, self._rules)):
             raise ValueError(f"rules name columns the contents lack: {missing}")
         raw = links = None
         if (rc := cfg.raw) is not None:
             raw = dc.spool(rc.path, index=rc.index)
-            raw = raw.update() if rc.update else raw
+            raw = raw.update() if rc.update and update else raw
             links = read_links(rc)
             log.info(
                 "raw: %d patches, %d linked files", len(raw.get_contents()), len(links)
@@ -214,6 +295,9 @@ class Catalog:
             self._spool, self._raw, self._links = spool, raw, links
             self._seen = {}
             self.generation += 1  # what was worked out from the last contents is stale
+            generation = self.generation
+        for listener in self.listeners:
+            listener(generation)
         log.info("indexed %d patches", len(contents))
 
     def view(self, principal: Principal) -> View:
