@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import gzip
+import itertools
 import json
 import logging
 import multiprocessing
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent import futures
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path as FilePath
 from typing import Annotated, Literal
@@ -76,6 +78,12 @@ log = logging.getLogger(__name__)
 
 # Query parameters the endpoints use themselves rather than select on.
 _RESERVED = frozenset({"format", "dim", "product"})
+
+# The gzipped annotation sets kept in memory, at most (all but the last sent).
+_SENT_BYTES = 256 * 2**20
+
+# How often a request whose tile is being drawn asks if the page has gone.
+_POLL_SECONDS = 0.1
 
 # The viewer's page, scripts and styles.
 _STATIC = FilePath(__file__).parent / "static"
@@ -206,6 +214,8 @@ def create_app(
     loads = threading.BoundedSemaphore(settings.limits.max_concurrent_loads)
 
     pool: list[ProcessPoolExecutor | None] = [None]  # tile workers, while serving
+    abandoned: list = [None]  # their slots marking tiles given up on
+    numbers = itertools.count(1)  # each tile's, by which it is marked
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -215,7 +225,8 @@ def create_app(
         try:  # however serving ends, the refresh stops and the workers go
             if (workers := settings.limits.tile_workers) and spool is None:
                 args = (workers, settings, catalog.generation)
-                pool[0], current = await anyio.to_thread.run_sync(_tile_pool, *args)
+                started = await anyio.to_thread.run_sync(_tile_pool, *args)
+                pool[0], current, abandoned[0] = started
                 # the workers read the server's refresh as they draw each tile
                 catalog.listeners.append(lambda g: setattr(current, "value", g))
             yield
@@ -629,6 +640,23 @@ def create_app(
         kwargs = selection(request.query_params.multi_items(), reserved)
         if len(wanted["dims"]) != 2 or not {x, y} <= set(kwargs):
             raise QueryError("a tile needs a product of two dims and bounds on both")
+
+        def _in_worker(workers, slots, number: int):
+            """
+            Draw the tile in a worker, marking it abandoned if the page goes.
+
+            The page drops a tile it no longer shows (a quick zoom); its worker
+            stops at the next patch rather than read the rest, which only
+            delays the tiles still wanted.
+            """
+            work = workers.submit(tilework.in_worker, who, number, *job)
+            marked = False
+            while not futures.wait([work], timeout=_POLL_SECONDS).done:
+                if not marked and anyio.from_thread.run(request.is_disconnected):
+                    slots[number % len(slots)] = number
+                    marked = True
+            return work.result()
+
         job = (
             wanted,
             kwargs,
@@ -647,11 +675,14 @@ def create_app(
             waited = clock()
             # selected through the reader's view, checked, loaded and reduced:
             # here, or in a worker, which reads the same index
-            if pool[0] is None:
-                values, info = tilework.draw(catalog.view(who), *job)
-            else:
-                work = pool[0].submit(tilework.in_worker, who, *job)
-                values, info = work.result()
+            try:
+                if pool[0] is None:
+                    values, info = tilework.draw(catalog.view(who), *job)
+                else:
+                    values, info = _in_worker(pool[0], abandoned[0], next(numbers))
+            except tilework.Abandoned:
+                log.debug("tile abandoned while drawn: %s", _tile_name(wanted))
+                return Response(status_code=204)
         drawn = clock()
         timing = {
             "wait": waited - start,
@@ -743,18 +774,57 @@ def create_app(
             entry["editable"] = entry["owner"] == name
         return {"owner": name, "sets": sets}
 
+    # Each set as last sent, gzipped JSON, with the state of its files and its
+    # acquisition: reading a large set with DASCore takes seconds, and its
+    # JSON is many times the size gzipped. The oldest go past _SENT_BYTES.
+    # A set is read by one request at a time, so those asking for it meanwhile
+    # (after a save, or a restart) wait for that reading rather than repeat it.
+    sent: dict[tuple[str, str], tuple[tuple, str, bytes]] = {}
+    sent_lock = threading.Lock()
+    reading = [threading.Lock() for _ in range(16)]  # by set, a few sharing one
+
+    def packed_set(store: AnnotationStore, owner: str, name: str) -> tuple:
+        """Return a set's state, acquisition and gzipped JSON, read if changed."""
+        key = (owner, name)
+        with reading[hash(key) % len(reading)]:
+            state = store.state(owner, name)  # before reading, so a change wins
+            with sent_lock:
+                found = sent.pop(key, None)
+            if found is None or found[0] != state:
+                document = store.document(owner, name)
+                body = json.dumps(
+                    document, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+                )
+                packed = gzip.compress(body.encode(), compresslevel=5)
+                found = (state, document["acquisition_key"], packed)
+            with sent_lock:
+                sent[key] = found  # the most recent last
+                while sum(len(x[2]) for x in sent.values()) > _SENT_BYTES:
+                    if len(sent) == 1:
+                        break
+                    sent.pop(next(iter(sent)))
+        return found
+
     @app.get("/v1/annotations/{owner}/{name}")
-    def annotation_set(owner: str, name: str, who: Who, store: Store) -> dict:
+    def annotation_set(
+        owner: str, name: str, request: Request, who: Who, store: Store
+    ) -> Response:
         """
         Return one annotation set as its annotations and features tables.
 
         Both are JSON records of a DASCore annotation set, with times in
         ISO 8601; `revision` is what a save must be based on.
         """
-        document = store.document(owner, name)
-        if not readable(who)(owner, document["acquisition_key"]):
+        found = packed_set(store, owner, name)
+        if not readable(who)(owner, found[1]):
             raise MissingSetError(f"no annotation set {owner}/{name}")
-        return document
+        headers = {"Vary": "Accept-Encoding"}
+        body = found[2]
+        if "gzip" in request.headers.get("accept-encoding", ""):
+            headers["Content-Encoding"] = "gzip"
+        else:
+            body = gzip.decompress(body)
+        return Response(body, media_type="application/json", headers=headers)
 
     @app.put("/v1/annotations/{owner}/{name}")
     def save_annotation_set(
@@ -852,11 +922,17 @@ def _tile_pool(workers: int, settings: Settings, generation: int) -> tuple:
     context = multiprocessing.get_context("forkserver")
     context.set_forkserver_preload(["dascore", "dastor.tilework"])
     current = context.Value("q", generation, lock=False)  # the server's refresh
+    abandoned = tilework.abandoned_slots(context)
     pool = ProcessPoolExecutor(
         workers,
         mp_context=context,
         initializer=tilework.start,
-        initargs=(settings.model_dump(mode="json"), dc.get_config(), current),
+        initargs=(
+            settings.model_dump(mode="json"),
+            dc.get_config(),
+            current,
+            abandoned,
+        ),
     )
     try:
         for future in [pool.submit(os.getpid) for _ in range(workers)]:
@@ -864,7 +940,7 @@ def _tile_pool(workers: int, settings: Settings, generation: int) -> tuple:
     except BaseException:
         pool.shutdown(cancel_futures=True)
         raise
-    return pool, current
+    return pool, current, abandoned
 
 
 def _timing(**parts: float) -> dict:

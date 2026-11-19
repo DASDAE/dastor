@@ -7,7 +7,7 @@ Press `?` in the viewer for every key and mouse action.
 
 ## Move around
 
-The wheel zooms (with Shift time only, with Ctrl distance only), and the arrows pan. In the pan tool a drag moves the view; in any tool the middle button, or Space and drag, does. Tab moves on by a screen in time, and Shift+Tab back. The strip under the time axis is the whole recording: click or drag on it to move the window, and press `b` to go back to the view before a jump. `w` fits the whole recording.
+The wheel zooms (with Shift time only, with Ctrl distance only), and the arrows pan. In the pan tool a drag moves the view; in any tool the middle button, or Space and drag, does. Tab moves on by a screen in time, and Shift+Tab back. Both skip gaps in the recording: the view stops where the data ends, so the screen stays full of it, and the next press goes to where it starts again. The strip under the time axis is the whole recording: click or drag on it to move the window, and press `b` to go back to the view before a jump. `w` fits the whole recording.
 
 ## Set the colours
 
@@ -25,7 +25,7 @@ Sign in first with the button at the top right, if the server asks you to: on a 
 2. Click to place points. End a path or polygon with Enter, a double-click or a right-click.
 3. Type a label in the box that opens, or press Enter to keep the last one.
 
-Drawings go into the set being edited and are saved as you go; the dot beside your name is filled once they are. The cog menu's Annotations tab lists the sets. Rest the mouse on an annotation, or on a counted group, for a summary of it. To edit, switch to the select tool (`v`, or double-click): drag an annotation or a vertex to move it, double-click a side to add a vertex, and press Delete to remove.
+Drawings go into the set being edited and are saved as you go; the dot beside your name is filled once they are. The cog menu's Annotations tab lists the sets. Rest the mouse on an annotation, or on a counted group, for a summary of it. With thousands of a set's annotations on screen, the set is shaded by how many cover each pixel; zoom in to see them one by one. To edit, switch to the select tool (`v`, or double-click): drag an annotation or a vertex to move it, double-click a side to add a vertex, and press Delete to remove.
 
 ## Correct someone else's annotations
 
