@@ -497,27 +497,149 @@ class TestViewing:
     def test_tab_pages_through_time(self, page):
         """Tab moves on by a screen less a small overlap; Shift+Tab goes back."""
         x, y = _pixel(page, "2024-05-01T00:00:10", 60)
-        for _ in range(
-            6
-        ):  # a few screens of the recording, so there is somewhere to page to
+        for _ in range(6):  # a few screens of the recording, to page through
             page.wheel(x, y, -200)
         page.settle()
-        page.js(
-            "document.getElementById('btnAuto').focus()"
-        )  # Tab pages wherever the focus is
-        before, spp = page.js("[S.view.x0, S.view.spp]")
-        width = page.js("plotRect().w")
+        page.js("document.getElementById('btnAuto').focus()")  # wherever the focus is
+        before, width = page.js("[S.view.x0, plotRect().w * S.view.spp]")
+        near = {"rel": 0, "abs": width * 1e-4}  # times are large: a part of a screen
         page.key("Tab", 9)
-        assert page.js("S.view.x0") == pytest.approx(before + width * spp * 0.97)
+        assert page.js("S.view.x0") == pytest.approx(before + width * 0.97, **near)
         page.key("Tab", 9, modifiers=8)
-        assert page.js("S.view.x0") == pytest.approx(before)
+        assert page.js("S.view.x0") == pytest.approx(before, **near)
         for _ in range(40):  # paging stops at the end of the recording, and says so
             page.key("Tab", 9)
         end = page.js("tau(S.ext.x0) + displaySpan()")
-        assert page.js("S.view.x0") < end < page.js("viewEnd().x1")
+        assert page.js("viewEnd().x1") == pytest.approx(end, **near)
         assert "end of the recording" in page.js(
             "document.getElementById('toast').textContent"
         )
+
+    def test_tab_skips_gaps(self, page):
+        """Tab fills the screen with data: it stops where data ends, then goes on
+        to where it starts again; Shift+Tab does the same backwards."""
+        x, y = _pixel(page, "2024-05-01T00:00:10", 60)
+        for _ in range(6):
+            page.wheel(x, y, -200)
+        page.settle()
+        runs = page.js("S.spans.map(([a, b]) => [tau(a), tau(b)])")
+        assert len(runs) == 2
+        (_, end), (start, _) = runs
+        width = page.js("plotRect().w * S.view.spp")
+        near = {"rel": 0, "abs": width * 1e-4}
+        assert start - end > 0.05 * width  # a gap worth skipping at this zoom
+        page.js("S.view.y0 = S.ext.y1 - 10 * S.view.ypp")  # mostly off the data
+        page.settle()
+        seen = [page.js("[S.view.x0, viewEnd().x1]")]
+        for _ in range(40):  # through the first block, to where it ends
+            page.key("Tab", 9)
+            seen.append(page.js("[S.view.x0, viewEnd().x1]"))
+            if seen[-1][1] >= end - 1e-6 * width:
+                break
+        # each press moves on, leaving nothing between two screens unseen
+        for (a0, a1), (b0, _) in zip(seen, seen[1:], strict=False):
+            assert a0 < b0 <= a1
+        assert seen[-1][1] == pytest.approx(end, **near)  # its end at the right edge
+        # along distance it came back over the data, its top at the data's
+        assert page.js("viewEnd().y1 - S.view.y0 < S.ext.y1 - S.ext.y0")
+        assert page.js("viewEnd().y1") == pytest.approx(page.js("S.ext.y1"))
+        page.key("Tab", 9)  # over the gap, to the next block's start
+        assert page.js("S.view.x0") == pytest.approx(start - 0.03 * width, **near)
+        page.key("Tab", 9, modifiers=8)  # and back: the first block's end
+        assert page.js("viewEnd().x1") == pytest.approx(end + 0.03 * width, **near)
+        for _ in range(40):
+            page.key("Tab", 9, modifiers=8)
+        assert page.js("S.view.x0") == pytest.approx(runs[0][0], **near)
+        assert "start of the recording" in page.js(
+            "document.getElementById('toast').textContent"
+        )
+
+    def test_shapes_are_simplified_and_many_are_shaded(self, page):
+        """
+        A shape of a set not being edited is drawn with the vertices that
+        show at this zoom, kept until it changes; past `DENSE` on screen a
+        set is shaded by how many cover each pixel.
+        """
+        page.settle()
+        straight = (
+            "(() => { const f = {pts: Array.from({length: 50}, (_, i) =>"
+            " [i * S.view.spp / 10, i * S.view.ypp / 10])}, a = simplified(f);"
+            " return [a.length, a === simplified(f), a[0] === f.pts[0],"
+            " a.at(-1) === f.pts.at(-1)]; })()"
+        )
+        assert page.js(straight) == [3, True, True, True]
+        # a square of 100 pixels a side, ten vertices to a side, keeps its corners
+        square = (
+            "(() => { const u = 100 * S.view.spp, v = 100 * S.view.ypp, pts = [];"
+            " for (const [ax, ay, bx, by] of [[0, 0, u, 0], [u, 0, u, v], [u, v, 0, v],"
+            " [0, v, 0, 0]]) for (let i = 0; i < 10; i++)"
+            " pts.push([ax + (bx - ax) * i / 10, ay + (by - ay) * i / 10]);"
+            " const f = {pts}, first = simplified(f);"
+            " const kept = first.map(p => pts.indexOf(p));"
+            " S.view.spp *= 4; const again = simplified(f) !== first;"
+            " S.view.spp /= 4; return [kept, again]; })()"
+        )
+        kept, again = page.js(square)
+        assert {0, 10, 20, 30} <= set(kept) and len(kept) <= 6
+        assert again is True  # worked out again for the new zoom
+        # a stretch doubling back is kept: its turn is far from the segment
+        back = (
+            "(() => { const pts = [[0, 0], [100, 100], [80, 0], [20, 0], [40, 0]]"
+            ".map(([x, y]) => [untau(S.view.x0 + x * S.view.spp), y * S.view.ypp]);"
+            " return simplified({pts}).map(p => pts.indexOf(p)); })()"
+        )
+        assert 3 in page.js(back)
+        # drawn as part of the set being edited, a feature forgets what was kept
+        edited = (
+            "(() => { const f = {kind: 'path', cols: {}, pts: [[1, 1], [2, 2],"
+            " [3, 3], [4, 4], [5, 5]]}; simplified(f); const had = !!f.lod;"
+            " drawFeature(f, '#ffffff', 0, plotRect(), true); return [had, f.lod]; })()"
+        )
+        assert page.js(edited) == [True, None]
+        # two points of a group far apart are shaded each, not what lies between
+        parts = (
+            "featureParts({kind: 'group', pts: [[S.view.x0, S.view.y0],"
+            " [px2x(plotRect().x + 300), S.view.y0]]}, null, plotRect()).length"
+        )
+        assert page.js(parts) == 2
+        count = (
+            "window.shaded = 0; const d1 = drawDensity;"
+            " drawDensity = (...a) => { window.shaded++; return d1(...a); }"
+        )
+        page.js(count)
+        page.js("annLayer.key = ''; lastMove = 0; draw()")
+        assert page.js("window.shaded") == 0
+        page.js("DENSE = 0; annLayer.key = ''; draw()")
+        assert page.js("window.shaded") >= 1
+
+    def test_sets_not_being_edited_are_drawn_once(self, page):
+        """
+        On a still view the sets not being edited are drawn once, and that
+        reused; a change to what is shown, or a move, draws them again.
+        """
+        page.settle()
+        count = (
+            "window.drawn = 0; const d0 = drawSet;"
+            " drawSet = (...a) => { window.drawn++; return d0(...a); }"
+        )
+        page.js(count)
+        page.js("annLayer.key = ''; lastMove = 0; draw(); draw(); draw()")
+        assert page.js("S.active") is None
+        assert page.js("window.drawn") == 2  # the two sets, once each
+        assert page.js("S.clusters.length") == 1  # the crowd, still there to click
+        page.js("S.sets.find(s => s.name === 'many').visible = false; draw(); draw()")
+        assert page.js("window.drawn") == 3  # the one left
+        assert page.js("S.clusters.length") == 0
+        page.js("moved(); S.view.x0 += 10 * S.view.spp; draw()")  # moving: quickly
+        assert page.js("window.drawn") == 4
+        page.js("lastMove = 0; draw(); draw()")  # settled: once more, in full
+        assert page.js("window.drawn") == 5
+        page.js("moved(); draw(); lastMove = 0; draw()")  # back where it was drawn
+        assert page.js("window.drawn") == 6
+        # a set read again is drawn again, though as many features as before
+        page.js("const s = S.sets.find(s => s.name === 'auto'); s.feats = [...s.feats]")
+        page.js("draw()")
+        assert page.js("window.drawn") == 7
 
     def test_level_bar_holds_a_level_and_back_returns(self, page):
         """The status bar's control holds the view on a level; `b` goes back."""
@@ -820,6 +942,11 @@ class TestViewing:
         )
         assert page.js("S.levels.map(l => levelNumber(l.p))") == [2, 1, 0]
         assert page.js(f"[{zero}.textContent, {zero}.disabled]") == ["0", False]
+        # zoomed in far it is drawn, unless the screen spans more time than raw may
+        deep = "S.view.spp = 1e-5; S.view.ypp = 0.1; levelMemo.key = '';"
+        assert page.js(f"{deep} levelNumber(activeLevel().p)") == 0
+        page.js("S.raw.max_view_seconds = 1e-6")
+        assert page.js(f"{deep} levelNumber(activeLevel().p)") == 1
         # and an area downloads the raw data unless asked otherwise
         page.js("S.area = windowBounds(); S.areaProducts = null; renderArea()")
         ticked = "[...document.querySelectorAll('#areaProducts input:checked')]"

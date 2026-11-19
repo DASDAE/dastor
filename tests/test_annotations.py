@@ -1,7 +1,9 @@
 """Tests for stored annotation sets and their API."""
 
 import io
+import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import dascore as dc
@@ -342,6 +344,43 @@ class TestApi:
         assert reply.status_code == 400
         assert viewer.get("/v1/annotations").json()["sets"] == []
 
+    def test_reads_are_gzipped_and_follow_changes(self, viewer, viewer_settings):
+        """
+        A set is sent gzipped to a client which takes it, plain otherwise,
+        and as it now is after a save here or a write by anything else.
+        """
+        viewer.put("/v1/annotations/me/picks", json=_document())
+        url = "/v1/annotations/me/picks"
+        packed = viewer.get(url, headers={"Accept-Encoding": "gzip"})
+        assert packed.headers["content-encoding"] == "gzip"
+        plain = viewer.get(url, headers={"Accept-Encoding": "identity"})
+        assert "content-encoding" not in plain.headers
+        assert plain.json() == packed.json()
+        assert packed.json()["revision"] == 1
+        viewer.put(url, json=_document(1))
+        assert viewer.get(url).json()["revision"] == 2
+        store = AnnotationStore(viewer_settings.annotations.path)
+        store.save("me", "picks", _document(2), "elsewhere")
+        assert viewer.get(url).json()["revision"] == 3
+
+    def test_a_set_is_read_once_for_many_asking(self, viewer, monkeypatch):
+        """Requests arriving together for a changed set wait for one reading."""
+        url = "/v1/annotations/me/picks"
+        viewer.put(url, json=_document())
+        reads = []
+        document = AnnotationStore.document
+
+        def slow(self, owner, name):
+            reads.append(name)
+            time.sleep(0.2)
+            return document(self, owner, name)
+
+        monkeypatch.setattr(AnnotationStore, "document", slow)
+        with ThreadPoolExecutor(4) as pool:
+            replies = list(pool.map(lambda _: viewer.get(url).status_code, range(4)))
+        assert replies == [200] * 4
+        assert reads == ["picks"]
+
     def test_only_the_owner_writes(self, viewer, viewer_settings):
         """Another owner's set can be read but not changed or deleted."""
         store = AnnotationStore(viewer_settings.annotations.path)
@@ -412,6 +451,9 @@ class TestApiWithUsers:
         assert seen == {"alice": ["alice", "bob"], "bob": ["bob"], "anonymous": []}
         theirs = client.get("/v1/annotations/bob/picks", headers=auth(ALICE_KEY))
         assert theirs.status_code == 200
+        # one who may read a set having had it sent is no licence for another
+        mine = client.get("/v1/annotations/alice/picks", headers=auth(ALICE_KEY))
+        assert mine.status_code == 200
         hidden = client.get("/v1/annotations/alice/picks", headers=auth(BOB_KEY))
         assert hidden.status_code == 404
         assert client.get("/v1/annotations/bob/picks").status_code == 404

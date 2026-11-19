@@ -174,6 +174,17 @@ def test_links_read_as_written(tmp_path):
         read_links(config)
 
 
+def test_raw_states_how_much_time_a_screen_may_span(raw_settings):
+    """The raw product carries the configured span, for the viewer to keep to."""
+    with TestClient(create_app(raw_settings)) as client:
+        assert _raw_products(client)[0]["max_view_seconds"] is None
+    config = raw_settings.model_dump(mode="json")
+    config["spool"]["raw"]["max_view_seconds"] = 2
+    settings = type(raw_settings).model_validate(config)
+    with TestClient(create_app(settings)) as client:
+        assert _raw_products(client)[0]["max_view_seconds"] == 2
+
+
 def test_no_raw_configured_lists_none(viewer):
     """Without a raw directory no product is raw."""
     listing = viewer.get("/v1/viewer/products").json()["products"]

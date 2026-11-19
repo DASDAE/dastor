@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import gzip
+import itertools
 import json
 import logging
 import multiprocessing
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent import futures
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path as FilePath
 from typing import Annotated, Literal
@@ -42,7 +44,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
-from dastor import __version__
+from dastor import __version__, tilework
 from dastor.annotations import (
     AnnotationError,
     AnnotationStore,
@@ -59,9 +61,9 @@ from dastor.auth import (
     Sessions,
     TokenGate,
 )
-from dastor.catalog import RAW_TAG, Catalog, ChangedFileError, View
+from dastor.catalog import RAW_TAG, Catalog, ChangedFileError, TooLargeError, View
 from dastor.config import SET_NAME, Settings
-from dastor.query import QueryError, selection
+from dastor.query import QueryError, estimated_bytes, selection
 from dastor.sync import SyncNameError, check_name, refuse_elsewhere, synced_file
 from dastor.tiles import (
     Stat,
@@ -69,9 +71,6 @@ from dastor.tiles import (
     encode_tile,
     list_products,
     product_axes,
-    product_rows,
-    render_tile,
-    tile_range,
 )
 from dastor.wire import FRAMED_MEDIA_TYPE, PATCH_MEDIA_TYPE, encode_patch, frame
 
@@ -79,6 +78,12 @@ log = logging.getLogger(__name__)
 
 # Query parameters the endpoints use themselves rather than select on.
 _RESERVED = frozenset({"format", "dim", "product"})
+
+# The gzipped annotation sets kept in memory, at most (all but the last sent).
+_SENT_BYTES = 256 * 2**20
+
+# How often a request whose tile is being drawn asks if the page has gone.
+_POLL_SECONDS = 0.1
 
 # The viewer's page, scripts and styles.
 _STATIC = FilePath(__file__).parent / "static"
@@ -93,58 +98,6 @@ _CLIENT_ERRORS = (
     dce.UnknownCoordinateError,
     dce.CoordError,
 )
-
-
-def _numbers(column: pd.Series) -> np.ndarray:
-    """Return a contents column as floats (times in ns), NaN where it has none."""
-    if column.dtype.kind in "Mm":
-        return np.where(column.isna(), np.nan, column.astype("int64").astype(float))
-    if column.dtype.kind in "iufb":
-        return column.to_numpy(dtype=float, na_value=np.nan)
-    # Mixed columns (dims which are times in some files, numbers in others)
-    out = np.full(len(column), np.nan)
-    for number, value in enumerate(column):
-        if isinstance(value, pd.Timestamp | pd.Timedelta):
-            out[number] = value.value
-        elif isinstance(value, int | float | np.number) and not pd.isna(value):
-            out[number] = float(value)
-    return out
-
-
-def estimated_bytes(contents: pd.DataFrame) -> int:
-    """
-    Estimate the array bytes the rows of a selected spool hold.
-
-    Each row's samples are counted from its dims' bounds and steps; a dim
-    without a usable step falls back to the row's stored size, which a
-    trimmed row may lack. The estimate rejects requests before any loading;
-    the limit is enforced again on the patches as they load.
-    """
-    if contents.empty:
-        return 0
-    count = np.ones(len(contents))
-    counted = np.ones(len(contents), dtype=bool)
-    dims = contents["dims"].astype("string").fillna("").astype(str)
-    for names, rows in dims.groupby(dims.to_numpy(), sort=False).indices.items():
-        for dim in names.split(","):
-            columns = [f"{dim}_min", f"{dim}_max", f"{dim}_step"]
-            if not set(columns) <= set(contents.columns):
-                counted[rows] = False
-                break
-            low, high, step = (_numbers(contents[x].iloc[rows]) for x in columns)
-            with np.errstate(invalid="ignore", divide="ignore"):
-                samples = np.round((high - low) / step) + 1
-            usable = np.isfinite(samples) & (samples >= 1)
-            count[rows] *= np.where(usable, samples, 1)
-            counted[rows] &= usable
-    if not counted.all():
-        stored = contents.get("data_size", pd.Series(0, index=contents.index))
-        stored = pd.to_numeric(stored, errors="coerce").fillna(0).to_numpy(dtype=float)
-        count = np.where(counted, count, stored)
-    kinds = contents.get("dtype", pd.Series("float64", index=contents.index))
-    kinds = kinds.astype("string").fillna("").astype(str)
-    sizes = {x: np.dtype(x or "float64").itemsize for x in kinds.unique()}
-    return int((count * kinds.map(sizes).to_numpy(dtype=float)).sum())
 
 
 def _json_frame(df: pd.DataFrame) -> Response:
@@ -261,6 +214,8 @@ def create_app(
     loads = threading.BoundedSemaphore(settings.limits.max_concurrent_loads)
 
     pool: list[ProcessPoolExecutor | None] = [None]  # tile workers, while serving
+    abandoned: list = [None]  # their slots marking tiles given up on
+    numbers = itertools.count(1)  # each tile's, by which it is marked
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -268,8 +223,12 @@ def create_app(
         seconds = settings.spool.refresh_seconds
         task = seconds and asyncio.create_task(_refresh_forever(catalog, seconds))
         try:  # however serving ends, the refresh stops and the workers go
-            if workers := settings.limits.tile_workers:
-                pool[0] = await anyio.to_thread.run_sync(_tile_pool, workers)
+            if (workers := settings.limits.tile_workers) and spool is None:
+                args = (workers, settings, catalog.generation)
+                started = await anyio.to_thread.run_sync(_tile_pool, *args)
+                pool[0], current, abandoned[0] = started
+                # the workers read the server's refresh as they draw each tile
+                catalog.listeners.append(lambda g: setattr(current, "value", g))
             yield
         finally:
             if task:
@@ -368,47 +327,7 @@ def create_app(
         kwargs = selection(request.query_params.multi_items(), reserved)
         wanted = [decode_product(p) for p in request.query_params.getlist("product")]
         view = catalog.view(who)
-
-        def rows_of(chosen):
-            def keep(contents):
-                mask = np.zeros(len(contents), dtype=bool)
-                for product in chosen:
-                    mask |= product_rows(contents, product)
-                return mask
-
-            return keep
-
-        # level 0 is read from the raw data, whose rows carry their recording
-        # only through the links; the other products from the spool
-        raw = [w for w in wanted if w["attrs"].get("tag") == RAW_TAG]
-        rest = [w for w in wanted if w["attrs"].get("tag") != RAW_TAG]
-        try:
-            parts = []
-            if raw and view.raw is not None:
-                parts.append(view.select_raw(rows_of(raw), **kwargs, **extra))
-            if rest or not wanted:
-                shared = (
-                    {
-                        k: v
-                        for k, v in rest[0]["attrs"].items()
-                        if all(w["attrs"].get(k) == v for w in rest)
-                    }
-                    if rest
-                    else {}
-                )
-                kwargs.update({k: v for k, v in shared.items() if k not in kwargs})
-                # the products narrow the selection with the access check, once
-                keep = rows_of(rest) if rest else None
-                parts.append(view.select(keep, **kwargs, **extra))
-            if not parts:  # raw asked for where none is served
-                parts.append(view.select(lambda c: np.zeros(len(c), dtype=bool)))
-        except (TypeError, ValueError) as exc:
-            # e.g. a malformed time, or text bounding a numeric coordinate
-            raise QueryError(str(exc)) from exc
-        spool = parts[0]
-        for part in parts[1:]:
-            spool = spool + part
-        return view, spool
+        return view, view.products(wanted, **kwargs, **extra)
 
     def selected(request: Request, who: Principal) -> dc.BaseSpool:
         """Return the visible patches matching the query."""
@@ -572,7 +491,7 @@ def create_app(
         if (size := estimated_bytes(spool.get_contents())) > limit:
             msg = f"request would return about {size} bytes; the limit is {limit}"
             raise HTTPException(413, msg)
-        patches = _checked_patches(view, spool, limit)
+        patches = view.checked(spool, limit)
         if format == "arrow":
             stream = _framed(patches, loads)
             return StreamingResponse(stream, media_type=FRAMED_MEDIA_TYPE)
@@ -604,7 +523,7 @@ def create_app(
                 msg = f"request would copy about {size} bytes; the limit is {limit}"
                 raise HTTPException(413, msg)
             with _load_errors(), loads, synced_file(sync_dir, name) as out:
-                patches = list(_checked_patches(view, spool, limit))
+                patches = list(view.checked(spool, limit))
                 dc.write(dc.spool(patches), out["path"], "DASDAE")
             return {"name": out["name"], "bytes": out["bytes"]}
 
@@ -650,10 +569,11 @@ def create_app(
             raise HTTPException(404, f"no patch {data_id!r}")
         limit = settings.limits.max_request_bytes
         with _load_errors(), loads:
-            body = encode_patch(next(_checked_patches(view, spool[:1], limit)))
+            body = encode_patch(next(view.checked(spool[:1], limit)))
         return Response(bytes(body), media_type=PATCH_MEDIA_TYPE)
 
     listed: dict[tuple, list] = {}  # product listings, by caller and spool generation
+    raw_seconds = settings.spool.raw and settings.spool.raw.max_view_seconds
 
     @app.get("/v1/viewer/products")
     def products(request: Request, who: Who) -> Response:
@@ -673,7 +593,7 @@ def create_app(
             contents = _shown(view.select().get_contents())
             raw = _shown(view.raw_contents())
             found = list_products(contents) + [
-                {**p, "raw": True}
+                {**p, "raw": True, "max_view_seconds": raw_seconds}
                 for p in list_products(raw)
                 if p["attrs"].get("tag") == RAW_TAG
             ]
@@ -714,70 +634,78 @@ def create_app(
         """
         clock = time.perf_counter
         start = clock()
-        if anyio.from_thread.run(request.is_disconnected):  # given up while queued
-            return Response(status_code=204)
         wanted = decode_product(product)
         x, y = product_axes(wanted["dims"])
         reserved = _RESERVED | {"width", "height", "stat", "precision"}
         kwargs = selection(request.query_params.multi_items(), reserved)
         if len(wanted["dims"]) != 2 or not {x, y} <= set(kwargs):
             raise QueryError("a tile needs a product of two dims and bounds on both")
-        view, spool = selected_with_view(request, who, reserved)
-        contents = spool.get_contents()
-        picked = clock()
-        if not len(contents):
-            return Response(status_code=204, headers=_timing(select=picked - start))
-        ranges = [
-            tile_range(kwargs[dim], contents[f"{dim}_min"].dtype.kind in "Mm")
-            for dim in (x, y)
-        ]
-        limit = settings.limits.max_tile_bytes
-        if (size := estimated_bytes(contents)) > limit:
-            msg = f"tile would read about {size} bytes; the limit is {limit}"
-            raise HTTPException(413, msg)
+
+        def _in_worker(workers, slots, number: int):
+            """
+            Draw the tile in a worker, marking it abandoned if the page goes.
+
+            The page drops a tile it no longer shows (a quick zoom); its worker
+            stops at the next patch rather than read the rest, which only
+            delays the tiles still wanted.
+            """
+            work = workers.submit(tilework.in_worker, who, number, *job)
+            marked = False
+            while not futures.wait([work], timeout=_POLL_SECONDS).done:
+                if not marked and anyio.from_thread.run(request.is_disconnected):
+                    slots[number % len(slots)] = number
+                    marked = True
+            return work.result()
+
+        job = (
+            wanted,
+            kwargs,
+            x,
+            y,
+            (height, width),
+            stat,
+            settings.limits.max_tile_bytes,
+        )
         with _load_errors(), loads:
             # a tile the page gave up on while it waited (a quick zoom) is not
             # worked out: the work would only delay the tiles still wanted
             if anyio.from_thread.run(request.is_disconnected):
-                log.debug("tile abandoned before loading: %s", _tile_name(wanted))
+                log.debug("tile abandoned before drawing: %s", _tile_name(wanted))
                 return Response(status_code=204)
             waited = clock()
-            # checked here, where the rules are; loaded and reduced in a worker
-            # when there are some: the patches go to it lazy, a few kB each
-            patches = list(_checked_patches(view, spool, limit))
-            args = (x, y, *ranges, (height, width), stat)
-            if pool[0] is None:
-                values = render_tile(patches, *args)
-            else:
-                values = pool[0].submit(render_tile, patches, *args).result()
+            # selected through the reader's view, checked, loaded and reduced:
+            # here, or in a worker, which reads the same index
+            try:
+                if pool[0] is None:
+                    values, info = tilework.draw(catalog.view(who), *job)
+                else:
+                    values, info = _in_worker(pool[0], abandoned[0], next(numbers))
+            except tilework.Abandoned:
+                log.debug("tile abandoned while drawn: %s", _tile_name(wanted))
+                return Response(status_code=204)
         drawn = clock()
+        timing = {
+            "wait": waited - start,
+            "select": info["select"],
+            "load": info["load"],
+        }
         if values is None:
-            timing = _timing(
-                select=picked - start, wait=waited - picked, load=drawn - waited
-            )
-            return Response(status_code=204, headers=timing)
+            return Response(status_code=204, headers=_timing(**timing))
         body, dtype = encode_tile(values, half=precision == "half")
         headers = {"Vary": "Accept-Encoding", "X-Tile-Dtype": dtype}
         if "gzip" in request.headers.get("accept-encoding", ""):
             body = gzip.compress(body, compresslevel=1)
             headers["Content-Encoding"] = "gzip"
-        done = clock()
         # how long each part took, for the browser's network panel and the profiler
-        headers |= _timing(
-            select=picked - start,
-            wait=waited - picked,
-            load=drawn - waited,
-            encode=done - drawn,
-        )
+        headers |= _timing(**timing, encode=clock() - drawn)
         log.debug(
-            "tile %s: %d patches, select %.0f ms, wait %.0f ms, load %.0f ms,"
-            " encode %.0f ms, %d bytes %s%s",
+            "tile %s: %d patches, wait %.0f ms, select %.0f ms, load %.0f ms,"
+            " %d bytes %s%s",
             _tile_name(wanted),
-            len(patches),
-            1000 * (picked - start),
-            1000 * (waited - picked),
-            1000 * (drawn - waited),
-            1000 * (done - drawn),
+            info["patches"],
+            1000 * timing["wait"],
+            1000 * timing["select"],
+            1000 * timing["load"],
             len(body),
             dtype,
             " in a worker" if pool[0] is not None else "",
@@ -846,18 +774,57 @@ def create_app(
             entry["editable"] = entry["owner"] == name
         return {"owner": name, "sets": sets}
 
+    # Each set as last sent, gzipped JSON, with the state of its files and its
+    # acquisition: reading a large set with DASCore takes seconds, and its
+    # JSON is many times the size gzipped. The oldest go past _SENT_BYTES.
+    # A set is read by one request at a time, so those asking for it meanwhile
+    # (after a save, or a restart) wait for that reading rather than repeat it.
+    sent: dict[tuple[str, str], tuple[tuple, str, bytes]] = {}
+    sent_lock = threading.Lock()
+    reading = [threading.Lock() for _ in range(16)]  # by set, a few sharing one
+
+    def packed_set(store: AnnotationStore, owner: str, name: str) -> tuple:
+        """Return a set's state, acquisition and gzipped JSON, read if changed."""
+        key = (owner, name)
+        with reading[hash(key) % len(reading)]:
+            state = store.state(owner, name)  # before reading, so a change wins
+            with sent_lock:
+                found = sent.pop(key, None)
+            if found is None or found[0] != state:
+                document = store.document(owner, name)
+                body = json.dumps(
+                    document, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+                )
+                packed = gzip.compress(body.encode(), compresslevel=5)
+                found = (state, document["acquisition_key"], packed)
+            with sent_lock:
+                sent[key] = found  # the most recent last
+                while sum(len(x[2]) for x in sent.values()) > _SENT_BYTES:
+                    if len(sent) == 1:
+                        break
+                    sent.pop(next(iter(sent)))
+        return found
+
     @app.get("/v1/annotations/{owner}/{name}")
-    def annotation_set(owner: str, name: str, who: Who, store: Store) -> dict:
+    def annotation_set(
+        owner: str, name: str, request: Request, who: Who, store: Store
+    ) -> Response:
         """
         Return one annotation set as its annotations and features tables.
 
         Both are JSON records of a DASCore annotation set, with times in
         ISO 8601; `revision` is what a save must be based on.
         """
-        document = store.document(owner, name)
-        if not readable(who)(owner, document["acquisition_key"]):
+        found = packed_set(store, owner, name)
+        if not readable(who)(owner, found[1]):
             raise MissingSetError(f"no annotation set {owner}/{name}")
-        return document
+        headers = {"Vary": "Accept-Encoding"}
+        body = found[2]
+        if "gzip" in request.headers.get("accept-encoding", ""):
+            headers["Content-Encoding"] = "gzip"
+        else:
+            body = gzip.decompress(body)
+        return Response(body, media_type="application/json", headers=headers)
 
     @app.put("/v1/annotations/{owner}/{name}")
     def save_annotation_set(
@@ -943,23 +910,37 @@ def create_app(
     return app
 
 
-def _tile_pool(workers: int) -> ProcessPoolExecutor:
+def _tile_pool(workers: int, settings: Settings, generation: int) -> tuple:
     """
     Start the tile workers, warm.
 
-    They fork from a server which has imported what tiles need, and all
-    start now rather than on a first tile.
+    They fork from a server which has imported what tiles need, each opens
+    its catalog from the settings, and all start now rather than on a first
+    tile. A spool handed to the app in memory can't be shared with them, so
+    it never has workers.
     """
     context = multiprocessing.get_context("forkserver")
-    context.set_forkserver_preload(["dascore", "dastor.tiles"])
-    pool = ProcessPoolExecutor(workers, mp_context=context)
+    context.set_forkserver_preload(["dascore", "dastor.tilework"])
+    current = context.Value("q", generation, lock=False)  # the server's refresh
+    abandoned = tilework.abandoned_slots(context)
+    pool = ProcessPoolExecutor(
+        workers,
+        mp_context=context,
+        initializer=tilework.start,
+        initargs=(
+            settings.model_dump(mode="json"),
+            dc.get_config(),
+            current,
+            abandoned,
+        ),
+    )
     try:
         for future in [pool.submit(os.getpid) for _ in range(workers)]:
             future.result()
     except BaseException:
         pool.shutdown(cancel_futures=True)
         raise
-    return pool
+    return pool, current, abandoned
 
 
 def _timing(**parts: float) -> dict:
@@ -1070,34 +1051,8 @@ def _load_errors():
         yield
     except ChangedFileError as exc:
         raise HTTPException(409, f"{exc}; retry after the next refresh") from None
-    except _TooLargeError as exc:
+    except TooLargeError as exc:
         raise HTTPException(413, str(exc)) from None
-
-
-class _TooLargeError(Exception):
-    """Raised when loaded patches exceed the request limit."""
-
-
-def _checked_patches(view: View, spool, limit: int) -> Iterator[dc.Patch]:
-    """
-    Yield a spool's patches, checking each against the rules and the limit.
-
-    A patch whose file changed to fall outside the rules, or patches whose
-    real size passes the limit the estimate missed, end the response.
-    """
-    total = 0
-    for index, row in enumerate(spool.get_contents().to_dict("records")):
-        try:
-            patch = view.check(spool[index], row)
-        except dce.MissingPatchError as exc:
-            # The file no longer holds the indexed patch.
-            msg = f"{row.get('source_path')} changed since it was indexed"
-            raise ChangedFileError(msg) from exc
-        total += int(np.prod(patch.shape)) * np.dtype(patch.dtype).itemsize
-        if total > limit:
-            msg = f"request returns more than the limit of {limit} bytes"
-            raise _TooLargeError(msg)
-        yield patch
 
 
 def _framed(patches: Iterator[dc.Patch], loads) -> Iterator:

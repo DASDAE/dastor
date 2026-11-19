@@ -70,7 +70,7 @@ const S = {
   me: null, annotations: false, sets: [], active: null,
   sel: null,                      // {set, id}: the one annotation being edited
   many: [],                       // [{set, id}]: several picked together, by a selection window
-  mode: "select", draft: null, area: null, space: false,
+  mode: "pan", draft: null, area: null, space: false,
   undo: [], redo: [],
   lastLabel: "",                  // the label last given, offered for the next annotation
   history: [],                    // views left by a jump (fit, a crowd, the strip, a pin), for "back"
@@ -83,7 +83,8 @@ const tiles = new Map();          // key -> {st, data, cv, ver, key, ...}
 let queue = [], inflight = 0, tileBytes = 0, frameNo = 0;
 
 const $ = (id) => document.getElementById(id);
-const cv = $("cv"), ctx = cv.getContext("2d");
+const cv = $("cv");
+let ctx = cv.getContext("2d");  // pointed for a moment at the layer of annotations (drawAnnotations)
 
 // ------------------------------------------------------------------ utilities
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
@@ -352,7 +353,12 @@ function levelCost(l) {
   const tile = (TILE * 2 ** zx + 1) * (TILE * 2 ** zy + 1) * item;  // the server counts both ends
   return { tile, view: tile * visibleTiles(l, zx, zy).length };
 }
-function overLimits(l) { const c = levelCost(l); return c.tile > S.limits.max_tile_bytes || c.view > S.limits.max_view_bytes; }
+// Over what the server allows, or for raw data over the time one screen of it may span (its files
+// read every channel of a time span, so the span, not the distance, sets the cost).
+function overLimits(l) {
+  if (l.p.max_view_seconds && S.xTime && plotRect().w * S.view.spp > l.p.max_view_seconds) return true;
+  const c = levelCost(l); return c.tile > S.limits.max_tile_bytes || c.view > S.limits.max_view_bytes;
+}
 // The level drawn: the pinned one, else the coarsest with at least one sample for each screen
 // pixel along x (the finest if none has). If the view would read more of it than the limits
 // allow, the nearest coarser level within them stands in; with none, S.blocked is the level
@@ -1338,23 +1344,33 @@ function rawShapes(f) {  // what a raw feature's rows can show: points and boxes
   }
   return out;
 }
-function strokePts(pts, close) {
+function strokePts(pts, close, px = 1) {
   ctx.beginPath();
-  pts.forEach((p, i) => { const x = x2px(p[0]), y = y2px(p[1]); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+  // a vertex less than a pixel (`px`) from the last one drawn adds nothing to see, and costs as much
+  const n = pts.length;
+  let lx = 0, ly = 0;
+  for (let i = 0; i < n; i++) {
+    const x = x2px(pts[i][0]), y = y2px(pts[i][1]);
+    if (!i) ctx.moveTo(x, y);
+    else if (i === n - 1 || Math.abs(x - lx) + Math.abs(y - ly) >= px) ctx.lineTo(x, y);
+    else continue;
+    lx = x; ly = y;
+  }
   if (close) ctx.closePath();
 }
 function dot(p, r) { ctx.beginPath(); ctx.arc(x2px(p[0]), y2px(p[1]), r, 0, 6.2832); ctx.fill(); ctx.stroke(); }
 // `sel`: 1 the one being edited (with handles), 2 one of several selected. `own`: of the set
 // being edited; the others are dashed, so what can be changed is told apart without colour.
 function drawFeature(f, color, sel, P, own) {
+  if (own) f.lod = null;  // its vertices may be moving
   const dash = own ? [] : [6, 4];
   ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = sel ? 2.5 : 1.5; ctx.setLineDash([]);
   const fill = () => { ctx.globalAlpha = sel ? 0.3 : 0.12; ctx.fill(); ctx.globalAlpha = 1; };
   // each line over a wider one, so it reads on any colour of the image: dark, or gold when picked
   const edge = sel ? THEME.gold : "rgba(0,0,0,0.75)";
   const line = () => { const w = ctx.lineWidth; ctx.strokeStyle = edge; ctx.lineWidth = w + (sel ? 4 : 2.5); ctx.stroke(); ctx.strokeStyle = color; ctx.lineWidth = w; ctx.setLineDash(dash); ctx.stroke(); ctx.setLineDash([]); };
-  if (f.kind === "path") { strokePts(f.pts); line(); }
-  else if (f.kind === "polygon") { strokePts(f.pts, true); fill(); line(); }
+  if (f.kind === "path") { strokePts(own ? f.pts : simplified(f)); line(); }
+  else if (f.kind === "polygon") { strokePts(own ? f.pts : simplified(f), true); fill(); line(); }
   else if (f.kind === "box") { const r = boxPx(f.box, P); ctx.beginPath(); ctx.rect(...r); fill(); line(); }
   else if (f.kind === "raw") {
     const sh = rawShapes(f);
@@ -1389,34 +1405,38 @@ function featureBounds(f, P) {
 // Features too small to tell apart at this zoom are drawn as one marker for each crowded patch
 // of screen, with their number; hovering it says what it holds and clicking it zooms to them.
 const CROWD_SIZE = 14, CROWD_CELL = 30;
+// Sets not being edited change only when read again, so on a still view they are drawn once into
+// a layer of their own, reused while tiles arrive or the mouse moves: thousands of annotations
+// take far longer to draw than the tiles. While the view moves they are drawn as plain lines,
+// several times quicker, and in full once it settles.
+const annLayer = { key: "", cv: document.createElement("canvas"), crowds: [], timer: 0 };
+const objectIds = new WeakMap();
+let lastObjectId = 0;
+function oid(o) { if (o && !objectIds.has(o)) objectIds.set(o, ++lastObjectId); return o ? objectIds.get(o) : 0; }
 function drawAnnotations(P) {
   const many = new Set(S.many.map((r) => `${r.set}|${r.id}`));
+  const shown = S.sets.filter((s) => s.visible && s.feats), still = shown.filter((s) => setKey(s) !== S.active);
+  const moving = performance.now() - lastMove < SETTLE_MS;
   S.clusters = [];
-  for (const s of S.sets) {
-    if (!s.visible || !s.feats) continue;
-    const key = setKey(s), cells = new Map(), plain = [];
-    for (const f of s.feats) {
-      const b = featureBounds(f, P), picked = S.sel && S.sel.set === key && S.sel.id === f.id ? 1 : many.has(`${key}|${f.id}`) ? 2 : 0;
-      if (!b || b.x1 < P.x || b.x0 > P.x + P.w || b.y1 < P.y || b.y0 > P.y + P.h) continue;
-      if (picked || Math.max(b.x1 - b.x0, b.y1 - b.y0) > CROWD_SIZE) { plain.push([f, picked]); continue; }
-      const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2, cell = `${Math.floor(cx / CROWD_CELL)},${Math.floor(cy / CROWD_CELL)}`;
-      if (!cells.has(cell)) cells.set(cell, { set: key, color: s.color, feats: [], x: 0, y: 0 });
-      const c = cells.get(cell); c.feats.push(f); c.x += cx; c.y += cy;
+  if (moving) {
+    for (const s of still) S.clusters.push(...drawSet(s, P, many, true));
+    clearTimeout(annLayer.timer); annLayer.timer = setTimeout(redraw, SETTLE_MS);  // in full once settled
+  } else if (still.length) {
+    const v = S.view, sel = S.sel ? `${S.sel.set}|${S.sel.id}` : "";
+    const key = [v.x0, v.spp, v.y0, v.ypp, P.x, P.y, P.w, P.h, cv.width, cv.height, oid(C), oid(S.segs), S.active, sel, [...many].join(","),
+      ...still.map((s) => `${oid(s)}:${oid(s.feats)}:${s.feats.length}:${s.color}`)].join("|");
+    if (key !== annLayer.key) {
+      const L = annLayer.cv, main = ctx;
+      L.width = cv.width; L.height = cv.height;  // which also clears it
+      ctx = L.getContext("2d"); ctx.setTransform(main.getTransform());
+      ctx.beginPath(); ctx.rect(P.x, P.y, P.w, P.h); ctx.clip();
+      try { annLayer.crowds = still.flatMap((s) => drawSet(s, P, many, false)); } finally { ctx = main; }
+      annLayer.key = key;
     }
-    const crowds = [];
-    for (const c of cells.values()) {
-      if (c.feats.length === 1) { plain.push([c.feats[0], 0]); continue; }
-      c.x /= c.feats.length; c.y /= c.feats.length;
-      // a crowd split by the grid is one crowd
-      const near = crowds.find((o) => Math.hypot(o.x - c.x, o.y - c.y) < CROWD_CELL);
-      if (!near) { crowds.push(c); continue; }
-      const n = near.feats.length, m = c.feats.length;
-      near.x = (near.x * n + c.x * m) / (n + m); near.y = (near.y * n + c.y * m) / (n + m);
-      near.feats.push(...c.feats);
-    }
-    for (const c of crowds) { c.r = 9 + Math.min(8, Math.log2(c.feats.length) * 1.5); S.clusters.push(c); }
-    for (const [f, picked] of plain) drawFeature(f, s.color, picked, P, key === S.active);
+    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(annLayer.cv, 0, 0); ctx.restore();
+    S.clusters.push(...annLayer.crowds);
   }
+  for (const s of shown) if (setKey(s) === S.active) S.clusters.push(...drawSet(s, P, many, false));
   for (const c of S.clusters) {
     ctx.beginPath(); ctx.roundRect(c.x - c.r, c.y - c.r * 0.8, c.r * 2, c.r * 1.6, 5);  // a tag, not a point
     ctx.fillStyle = c.color; ctx.globalAlpha = 0.9; ctx.fill(); ctx.globalAlpha = 1;
@@ -1424,6 +1444,121 @@ function drawAnnotations(P) {
     ctx.fillStyle = "#000"; ctx.font = "bold 13px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.fillText(c.feats.length > 999 ? "999+" : String(c.feats.length), c.x, c.y + 0.5);
   }
+  drawEditing(P);
+}
+// A set's features on screen, drawn (`quick`: those not picked as plain lines), and its crowds
+// returned, to be drawn over every set.
+function drawSet(s, P, many, quick) {
+  const key = setKey(s), cells = new Map(), plain = [];
+  for (const f of s.feats) {
+    const b = featureBounds(f, P), picked = S.sel && S.sel.set === key && S.sel.id === f.id ? 1 : many.has(`${key}|${f.id}`) ? 2 : 0;
+    if (!b || b.x1 < P.x || b.x0 > P.x + P.w || b.y1 < P.y || b.y0 > P.y + P.h) continue;
+    if (picked || Math.max(b.x1 - b.x0, b.y1 - b.y0) > CROWD_SIZE) { plain.push([f, picked, b]); continue; }
+    const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2, cell = `${Math.floor(cx / CROWD_CELL)},${Math.floor(cy / CROWD_CELL)}`;
+    if (!cells.has(cell)) cells.set(cell, { set: key, color: s.color, feats: [], bounds: [], x: 0, y: 0 });
+    const c = cells.get(cell); c.feats.push(f); c.bounds.push(b); c.x += cx; c.y += cy;
+  }
+  const crowds = [];
+  for (const c of cells.values()) {
+    if (c.feats.length === 1) { plain.push([c.feats[0], 0, c.bounds[0]]); continue; }
+    c.x /= c.feats.length; c.y /= c.feats.length;
+    // a crowd split by the grid is one crowd
+    const near = crowds.find((o) => Math.hypot(o.x - c.x, o.y - c.y) < CROWD_CELL);
+    if (!near) { crowds.push(c); continue; }
+    const n = near.feats.length, m = c.feats.length;
+    near.x = (near.x * n + c.x * m) / (n + m); near.y = (near.y * n + c.y * m) / (n + m);
+    near.feats.push(...c.feats);
+  }
+  for (const c of crowds) c.r = 9 + Math.min(8, Math.log2(c.feats.length) * 1.5);
+  if (key !== S.active && plain.length > DENSE) {  // too many to draw one by one: how many cover each pixel
+    drawDensity(plain.filter(([, picked]) => !picked).flatMap(([f, , b]) => featureParts(f, b, P)), s.color, P);
+    for (const [f, picked] of plain) if (picked) drawFeature(f, s.color, picked, P, false);
+    return crowds;
+  }
+  for (const [f, picked] of plain) {
+    if (quick && !picked && (f.kind === "path" || f.kind === "polygon")) {
+      ctx.strokeStyle = s.color; ctx.lineWidth = 1.5; ctx.setLineDash([]); strokePts(simplified(f), f.kind === "polygon", 4); ctx.stroke();
+    } else drawFeature(f, s.color, picked, P, key === S.active);
+  }
+  return crowds;
+}
+// The screen boxes a feature covers, for shading: each side of a path or polygon (as simplified),
+// each point and each box, so what lies between them is not counted. One under two pixels across
+// is its own box.
+function featureParts(f, b, P) {
+  if (b && Math.min(b.x1 - b.x0, b.y1 - b.y0) < 2) return [b];  // a line on screen: its box is it
+  if (f.kind === "path" || f.kind === "polygon") {
+    const pts = simplified(f), out = [], n = pts.length;
+    for (let i = 0; i < n - (f.kind === "polygon" ? 0 : 1); i++) {
+      const [ax, ay] = [x2px(pts[i][0]), y2px(pts[i][1])], q = pts[(i + 1) % n], [bx, by] = [x2px(q[0]), y2px(q[1])];
+      out.push({ x0: Math.min(ax, bx), x1: Math.max(ax, bx), y0: Math.min(ay, by), y1: Math.max(ay, by) });
+    }
+    return out.length ? out : [b];
+  }
+  if (f.kind === "group") return f.pts.map((p) => { const x = x2px(p[0]), y = y2px(p[1]); return { x0: x, x1: x, y0: y, y1: y }; });
+  if (f.kind === "raw") { const sh = rawShapes(f); return [...sh.boxes.map((x) => { const r = boxPx(x, P); return { x0: r[0], x1: r[0] + r[2], y0: r[1], y1: r[1] + r[3] }; }), ...sh.pts.map((p) => { const x = x2px(p[0]), y = y2px(p[1]); return { x0: x, x1: x, y0: y, y1: y }; })]; }
+  return [b];  // a point or a box: its own
+}
+// More features of a set than this on screen are shaded by how many cover each pixel, not drawn.
+let DENSE = 3000;
+const densityCanvas = document.createElement("canvas");
+function drawDensity(boxes, color, P) {
+  const w = Math.max(1, Math.ceil(P.w)), h = Math.max(1, Math.ceil(P.h));
+  const grid = new Float32Array((w + 1) * (h + 1));  // corners added, then summed: each box in O(1)
+  for (const b of boxes) {
+    if (b.x1 < P.x || b.x0 > P.x + P.w || b.y1 < P.y || b.y0 > P.y + P.h) continue;  // off the plot
+    const x0 = clamp(Math.floor(b.x0 - P.x), 0, w - 1), x1 = clamp(Math.floor(b.x1 - P.x), 0, w - 1) + 1;
+    const y0 = clamp(Math.floor(b.y0 - P.y), 0, h - 1), y1 = clamp(Math.floor(b.y1 - P.y), 0, h - 1) + 1;
+    grid[y0 * (w + 1) + x0]++; grid[y0 * (w + 1) + x1]--; grid[y1 * (w + 1) + x0]--; grid[y1 * (w + 1) + x1]++;
+  }
+  for (let y = 0; y <= h; y++) for (let x = 1; x <= w; x++) grid[y * (w + 1) + x] += grid[y * (w + 1) + x - 1];
+  for (let y = 1; y <= h; y++) for (let x = 0; x <= w; x++) grid[y * (w + 1) + x] += grid[(y - 1) * (w + 1) + x];
+  let most = 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) most = Math.max(most, grid[y * (w + 1) + x]);
+  if (!most) return;
+  const [r, g, bl] = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16));
+  const img = new ImageData(w, h), px = img.data, scale = 1 / Math.log1p(most);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const n = grid[y * (w + 1) + x];
+    if (n <= 0) continue;
+    const i = 4 * (y * w + x);
+    px[i] = r; px[i + 1] = g; px[i + 2] = bl; px[i + 3] = 90 + 165 * Math.log1p(n) * scale;  // seen at one, solid at the most
+  }
+  densityCanvas.width = w; densityCanvas.height = h;
+  densityCanvas.getContext("2d").putImageData(img, 0, 0);
+  ctx.drawImage(densityCanvas, P.x, P.y, w, h);
+}
+// The vertices of a path or polygon to draw at this zoom: none less than a pixel from the segment
+// between those kept either side (Douglas-Peucker), measured as drawn (gaps squeezed), worked out
+// for each doubling of the zoom and kept until it, or the squeezing, changes. Not for the set being
+// edited, whose vertices move in place: drawn as that, a feature forgets what was kept.
+const LOD_PX = 0.75;
+function simplified(f) {
+  const kx = Math.round(Math.log2(S.view.spp)), ky = Math.round(Math.log2(S.view.ypp)), key = `${kx},${ky},${oid(S.segs)}`;
+  if (f.lod && f.lod.key === key && f.lod.of === f.pts) return f.lod.pts;
+  const pts = f.pts, n = pts.length, sx = 2 ** kx, sy = 2 ** ky;
+  if (n < 4) { f.lod = { key, of: pts, pts }; return pts; }
+  const X = pts.map((p) => tau(p[0]) / sx), Y = pts.map((p) => p[1] / sy);
+  // from the first vertex to the one farthest from it and on to the last: a ring whose ends meet
+  // is two lines, not one of no length
+  let mid = 1;
+  for (let i = 1; i < n - 1; i++) if (Math.hypot(X[i] - X[0], Y[i] - Y[0]) > Math.hypot(X[mid] - X[0], Y[mid] - Y[0])) mid = i;
+  const keep = new Uint8Array(n); keep[0] = keep[mid] = keep[n - 1] = 1;
+  const stack = [0, mid, mid, n - 1];
+  while (stack.length) {
+    const b = stack.pop(), a = stack.pop();
+    let far = -1, most = LOD_PX;
+    for (let i = a + 1; i < b; i++) {
+      const d = distToSegment(X[i], Y[i], X[a], Y[a], X[b], Y[b]);
+      if (d > most) { most = d; far = i; }
+    }
+    if (far >= 0) { keep[far] = 1; stack.push(a, far, far, b); }
+  }
+  f.lod = { key, of: pts, pts: pts.filter((_, i) => keep[i]) };
+  return f.lod.pts;
+}
+// What is being drawn or dragged out now, over the annotations.
+function drawEditing(P) {
   if (S.draft) {
     const snap = snapTarget(S.mouse);
     const pts = S.mouse ? [...S.draft.pts, snap ? snap.pt : [px2x(S.mouse.x), px2y(S.mouse.y)]] : S.draft.pts;
@@ -1929,6 +2064,38 @@ cv.addEventListener("wheel", (ev) => {
   zoomAt(p.x, p.y, ev.ctrlKey ? 1 : f, ev.shiftKey ? 1 : f);
 }, { passive: false });
 const PAGE_OVERLAP = 0.03;  // of a screen, shared by the view before and after Tab
+const PAGE_GAP = 0.05;      // a gap narrower than this much of a screen is paged through, not skipped
+// Tab: a screen on in time, or back with dir < 0, skipping gaps. The view goes on by a screen;
+// where that would run past the end of the data, it stops where the data ends instead (if that
+// still moves a quarter of a screen, or the screen would be mostly empty), and the next press goes to
+// where data starts again: the screen holds data rather than a corner of it. Along distance the
+// view is moved, if need be, to be over the data too.
+function pageView(dir) {
+  if (!S.ext) return;
+  const v = S.view, P = plotRect(), W = P.w * v.spp, ov = W * PAGE_OVERLAP, tol = 0.5 * v.spp;  // less than a pixel is seen
+  const H = P.h * v.ypp, lo = S.ext.y0, hi = S.ext.y1;
+  v.y0 = H <= hi - lo ? clamp(v.y0, lo, hi - H) : clamp(v.y0, hi - H, lo);
+  moved(); redraw();
+  const runs = [];  // the recorded stretches in display x, joined across narrow gaps
+  for (const [a, b] of S.spans) {
+    const s = tau(a), e = tau(b), last = runs[runs.length - 1];
+    if (last && s - last[1] < W * PAGE_GAP) last[1] = Math.max(last[1], e); else runs.push([s, e]);
+  }
+  const data = (u) => runs.reduce((n, [s, e]) => n + Math.max(0, Math.min(e, u + W) - Math.max(s, u)), 0) / W;
+  const u0 = v.x0, u1 = u0 + W, page = u0 + dir * (W - ov);
+  let u;
+  const pull = (to) => Math.abs(to - u0) >= W / 4 || data(page) < 0.5 ? to : page;
+  if (dir > 0) {
+    const r = runs.find(([, e]) => e > u1 + tol);  // the first with data still to see
+    if (!r) { toast("the end of the recording"); return; }
+    u = r[0] >= u1 - ov ? r[0] - ov : page + W > r[1] ? pull(r[1] - W) : page;
+  } else {
+    const r = runs.findLast(([s]) => s < u0 - tol);
+    if (!r) { toast("the start of the recording"); return; }
+    u = r[1] <= u0 + ov ? r[1] + ov - W : page < r[0] ? pull(r[0]) : page;
+  }
+  v.x0 = u;
+}
 window.addEventListener("keyup", (ev) => {
   if (ev.key === " ") { S.space = false; if (!S.drag) cv.style.cursor = toolCursor(); }
 });
@@ -1945,11 +2112,7 @@ window.addEventListener("keydown", (ev) => {
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
   const cur = S.many.length ? null : selected(), mine = cur && setKey(cur.set) === S.active;
   if (k === " ") { S.space = true; cv.style.cursor = "grab"; }  // hold to drag the view with the left button
-  else if (k === "Tab") {  // a screen on in x, or back with Shift, keeping a little in common
-    moved(); S.view.x0 += (ev.shiftKey ? -1 : 1) * plotRect().w * S.view.spp * (1 - PAGE_OVERLAP);
-    if (clampPos()) toast(ev.shiftKey ? "the start of the recording" : "the end of the recording");
-    redraw();
-  }
+  else if (k === "Tab") pageView(ev.shiftKey ? -1 : 1);
   else if (k === "Escape") {
     if (!$("side").hidden) showSide(false);
     else if (S.measure) S.measure = null;
@@ -2149,6 +2312,7 @@ async function init() {
   let theme = null; try { theme = localStorage.getItem("dastor.theme"); } catch (e) { /* the system's */ }
   setTheme(theme);
   initControls(); buildLut(); resize();
+  setMode("pan");  // the tool to begin with, from the start: not once the annotations have loaded
   S.session = await dastorSession.start({ api: API, headers: AUTH, button: $("btnAccount"), toast,
     busy: () => S.sets.some((s) => s.dirty || s.saving) });
   try {
@@ -2167,7 +2331,6 @@ async function init() {
   if (hash.g === key && v.length === 4 && v.every(Number.isFinite) && v[1] > 0 && v[3] > 0) {
     Object.assign(S.view, { x0: v[0], spp: v[1], y0: v[2], ypp: v[3] }); clampView();
   }
-  setMode("pan");
   // for tests: nothing is loading, waiting to load, or unsaved
   window.dastorIdle = () => !settling && inflight === 0 && queue.length === 0 && !rafPending && S.sets.every((s) => !s.dirty && !s.saving);
   window.dastorReady = true;
