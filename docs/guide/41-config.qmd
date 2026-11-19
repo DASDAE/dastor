@@ -93,7 +93,7 @@ This suits a lab's private network, where knowing who drew what is enough. Set i
 | `max_tile_bytes` | 64 MiB | The most array bytes one viewer tile may read. |
 | `max_view_bytes` | 512 MiB | The most the viewer reads for one screen; above it a coarser product stands in. |
 | `max_upload_bytes` | 64 MiB | The largest annotation set uploaded as a file. |
-| `tile_workers` | 0 | Processes which load and reduce viewer tiles. A tile's work holds Python's lock, so the server's threads run tiles one at a time; workers run them side by side. 0 does the work in the server's process. |
+| `tile_workers` | 0 | Processes which load and reduce viewer tiles. A tile's work holds Python's lock, so the server's threads run tiles one at a time; workers run them side by side, and stop a tile the page no longer wants at its next patch. 0 does the work in the server's process. |
 
 ## annotations
 

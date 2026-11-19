@@ -532,7 +532,7 @@ def test_a_tile_drawn_after_a_refresh_sees_it(tmp_path, monkeypatch):
     server.refresh()
     current = multiprocessing.Value("q", server.generation, lock=False)
     server.listeners.append(lambda g: setattr(current, "value", g))
-    for name in ("_catalog", "_generation", "_current"):  # this process as a worker
+    for name in ("_catalog", "_generation", "_current", "_abandoned"):  # a worker
         monkeypatch.setattr(tilework, name, getattr(tilework, name))
     tilework.start(settings.model_dump(mode="json"), dc.get_config(), current)
 
@@ -543,7 +543,7 @@ def test_a_tile_drawn_after_a_refresh_sees_it(tmp_path, monkeypatch):
         for d in ("time", "distance")
     }
     job = (product, bounds, "time", "distance", (8, 16), "max", 10**9)
-    assert tilework.in_worker(ANONYMOUS, *job)[0] is not None
+    assert tilework.in_worker(ANONYMOUS, 1, *job)[0] is not None
     # the file gains a secret patch, and the server indexes it again
     secret = patch.update_attrs(tag="secret")
     dc.write(
@@ -551,7 +551,64 @@ def test_a_tile_drawn_after_a_refresh_sees_it(tmp_path, monkeypatch):
     )
     server.refresh()
     # the whole file is now hidden: not every row of it is granted
-    assert tilework.in_worker(ANONYMOUS, *job)[0] is None
+    assert tilework.in_worker(ANONYMOUS, 2, *job)[0] is None
+
+
+def test_a_worker_stops_a_tile_when_abandoned(tmp_path, monkeypatch):
+    """A tile the server marks abandoned stops before it is drawn, or at a patch."""
+    import multiprocessing
+
+    from dastor import tilework
+    from dastor.auth import ANONYMOUS
+    from dastor.catalog import Catalog
+    from dastor.config import Settings
+
+    data = tmp_path / "data"
+    data.mkdir()
+    patch = dc.get_example_patch()
+    step = patch.get_coord("time").step
+    for number in range(4):  # four patches one after another in time
+        moved = (
+            patch.update_coords(time_min=patch.get_coord("time").max() + step)
+            if number
+            else patch
+        )
+        dc.write(moved.update_attrs(tag="public"), data / f"{number}.h5", "DASDAE")
+        patch = moved
+    config = browse_settings(str(data), str(tmp_path / "notes"))
+    config["spool"]["rules"] = [
+        {"column": "tag", "pattern": "^public$", "allow": ["*"]}
+    ]
+    settings = Settings.model_validate(config)
+    server = Catalog(settings)
+    server.refresh()
+    for name in ("_catalog", "_generation", "_current", "_abandoned"):  # a worker
+        monkeypatch.setattr(tilework, name, getattr(tilework, name))
+    current = multiprocessing.Value("q", server.generation, lock=False)
+    slots = tilework.abandoned_slots(multiprocessing.get_context(), 8)
+    tilework.start(settings.model_dump(mode="json"), dc.get_config(), current, slots)
+
+    view = server.view(ANONYMOUS)
+    contents = view.select().get_contents()
+    product = list_products(contents)[0]
+    times = sorted(contents["time_min"])
+    distance = (contents["distance_min"].min(), contents["distance_max"].max())
+    whole = {"time": (times[0], times[-1]), "distance": distance}
+
+    job = (product, whole, "time", "distance", (8, 16), "max", 10**9)
+    assert tilework.in_worker(ANONYMOUS, 3, *job)[0] is not None
+    slots[11 % len(slots)] = 11  # given up on while it waited
+    with pytest.raises(tilework.Abandoned):
+        tilework.in_worker(ANONYMOUS, 11, *job)
+    read = []
+
+    def stop():  # given up on once a patch has been read
+        read.append(1)
+        return len(read) > 1
+
+    with pytest.raises(tilework.Abandoned):
+        tilework.draw(view, *job, stop=stop)
+    assert len(read) == 2
 
 
 def _start_worker(settings: dict, config, current) -> None:

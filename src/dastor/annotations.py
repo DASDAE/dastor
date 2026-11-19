@@ -112,6 +112,11 @@ def _by_feature(annotations: dc.AnnotationSet) -> dict[str, str]:
     return out
 
 
+def _stamp(stat) -> tuple[int, int, int, int]:
+    """Return the identity, size and change times of a file."""
+    return (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
 def _unpack(payload: bytes, folder: Path) -> Path:
     """
     Unpack a zipped annotation set into a folder, and return its directory.
@@ -192,6 +197,24 @@ class AnnotationStore:
         if not (path / "attrs.json").is_file():
             raise MissingSetError(f"no annotation set {owner}/{name}")
         return dc.annotations(path)
+
+    def state(self, owner: str, name: str) -> tuple:
+        """
+        Return what tells one stored version of a set from another.
+
+        A save puts a new directory in place, and anything else which
+        rewrites a set changes its files, so their identities, sizes and
+        times differ for each version. MissingSetError if there is none.
+        """
+        path = self._path(owner, name)
+        try:
+            files = sorted(path.iterdir())
+            out = [(x.name, *_stamp(x.stat())) for x in files]
+        except FileNotFoundError:
+            out = []
+        if not any(x[0] == "attrs.json" for x in out):
+            raise MissingSetError(f"no annotation set {owner}/{name}")
+        return (_stamp(path.stat()), *out)
 
     def document(self, owner: str, name: str) -> dict:
         """Return a stored set as a JSON document of its two tables."""
