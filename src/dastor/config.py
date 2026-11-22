@@ -197,6 +197,35 @@ class AnnotationConfig(_Model):
         return value
 
 
+class MapConfig(_Model):
+    """
+    The viewer's map of the fibre.
+
+    The fibre itself is drawn from the DASCore inventory beside the data;
+    nothing here describes it.
+
+    Parameters
+    ----------
+    layers
+        A directory of GeoJSON files drawn behind the fibre (geology, the
+        railway): background only. Each feature may state `fill`, `stroke`
+        and `name` in its properties.
+    basemap_url
+        A web map's tile address with `{z}`, `{x}`, `{y}` (and optionally
+        `{s}`). Off unless set: with it the page loads tiles from that
+        site, the one case in which it reaches the internet.
+    basemap_url_dark
+        The same, for the dark theme.
+    basemap_attribution
+        The credit the tiles' terms ask for, shown on the map.
+    """
+
+    layers: Path | None = None
+    basemap_url: str | None = None
+    basemap_url_dark: str | None = None
+    basemap_attribution: str = ""
+
+
 class Settings(_Model):
     """The whole server configuration."""
 
@@ -204,6 +233,7 @@ class Settings(_Model):
     users: list[User] = []
     limits: Limits = Limits()
     annotations: AnnotationConfig | None = None
+    map: MapConfig = MapConfig()
     # The pages are served over HTTPS, perhaps by a proxy which passes them
     # on over HTTP: the sign-in cookie is then always `Secure` and `__Host-`.
     https: bool = False

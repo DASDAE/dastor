@@ -22,6 +22,7 @@
   </span>
   <button id="btnWhole" class="tool" title="Fit the whole recording (w)" aria-label="fit the whole recording"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5V3h4.5M12.5 3H17v4.5M17 12.5V17h-4.5M7.5 17H3v-4.5"/></svg></button>
   <button id="btnMeasure" class="tool" data-mode="measure" title="Measure: click two points for the distance along each axis and the slope, a velocity along time (m)" aria-label="measure" aria-pressed="false"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 13.5 13.5 2.5l4 4-11 11z"/><path d="M5.5 10.5l1.6 1.6M8 8l2 2M10.5 5.5l1.6 1.6"/></svg></button>
+  <button id="btnMap" class="tool" title="Map: where the fibre of this recording lies, from the inventory" aria-label="map" aria-pressed="false"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 5 7 3l6 2 4.5-2v12L13 17l-6-2-4.500 2z"/><path d="M7 3v12M13 5v12"/></svg></button>
   <span class="spacer"></span>
   <span id="saveDot" class="dot ok" hidden></span>
   <button id="btnAccount" hidden></button>
@@ -30,6 +31,18 @@
   <button id="btnMenu" class="tool" title="Menu: display and levels, annotations, download (p)" aria-label="more" aria-expanded="false" aria-controls="side"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.6 2.5h2.8l.4 2.1 1.5.9 2-.8 1.4 2.4-1.6 1.4v1.7l1.6 1.4-1.4 2.4-2-.8-1.5.9-.4 2.1H8.6l-.4-2.1-1.5-.9-2 .8-1.4-2.4 1.6-1.4V9.3L3.3 7.9l1.4-2.4 2 .8 1.5-.9z"/><circle cx="10" cy="10" r="2.4"/></svg></button>
 </div>
 <div id="main">
+  <div id="mapPane" hidden>
+    <div id="mapBar">
+      <b id="mapName"></b>
+      <label>colour <select id="mapColour" title="what colours the fibre: a label or a measured column of the inventory, or the mean along time of the data on screen"></select></label>
+      <span id="mapLayers"></span>
+      <button class="small" id="mapFit" title="fit this fibre (double-click the map)">fit</button>
+      <button class="small" id="mapAll" title="fit every fibre">all</button>
+    </div>
+    <div id="mapNote" hidden></div>
+    <div id="mapBody"><canvas id="mapCv" tabindex="0" role="img" aria-label="map of the fibre"></canvas><div id="mapLegend" hidden></div><div id="mapTip"></div><div id="mapCredit"></div></div>
+    <div id="mapEdge" title="drag to resize; double-click to reset"></div>
+  </div>
   <div id="view"><canvas id="cv" tabindex="0"></canvas><div id="toast" role="status" aria-live="polite"></div><div id="tip"></div>
     <input id="labelBox" type="text" list="labelList" placeholder="label" aria-label="label" hidden><datalist id="labelList"></datalist></div>
   <div id="side" role="dialog" aria-label="more" hidden>
@@ -94,6 +107,11 @@
     <tr><td><b>w</b></td><td>fit the whole recording</td></tr>
     <tr><td><b>b</b></td><td>back to the view before a jump (also Backspace with nothing selected)</td></tr>
     <tr><td><b>Strip under the axis</b></td><td>the whole recording: click or drag to move the window</td></tr>
+    <tr class="group"><th colspan="2">Map (the map button, when the data has an inventory)</th></tr>
+    <tr><td><b>Hover</b></td><td>over the data marks the place on the map; over the fibre marks its distance in the data</td></tr>
+    <tr><td><b>Click</b></td><td>on a fibre: show that place in the data, opening a recording which covers it if this one does not</td></tr>
+    <tr><td><b>Wheel, drag</b></td><td>zoom and pan the map; double-click fits the recording; after a click on the map the arrows, + &minus; and w move it (Esc gives the keys back)</td></tr>
+    <tr><td><b>Edge</b></td><td>drag the map's right edge to resize it; double-click to reset</td></tr>
     <tr class="group"><th colspan="2">Select and edit</th></tr>
     <tr><td><b>Click</b></td><td>select an annotation; Shift + click adds or removes one</td></tr>
     <tr><td><b>Double-click</b></td><td>from the pan tool, the select tool (also <b>v</b>)</td></tr>
@@ -124,5 +142,6 @@
   <span id="levelBar" title="The level drawn: 1, on the right, is the finest. auto follows the zoom; a level holds the view on it."></span></div>
 <script src="session.js"></script>
 <script src="app.js"></script>
+<script src="map.js"></script>
 </body>
 </html>

@@ -95,6 +95,19 @@ This suits a lab's private network, where knowing who drew what is enough. Set i
 | `max_upload_bytes` | 64 MiB | The largest annotation set uploaded as a file. |
 | `tile_workers` | 0 | Processes which load and reduce viewer tiles. A tile's work holds Python's lock, so the server's threads run tiles one at a time; workers run them side by side, and stop a tile the page no longer wants at its next patch. 0 does the work in the server's process. |
 
+## map
+
+Optional. The viewer's map draws the fibre from the DASCore inventory beside the data directory (`.inventory`); nothing here describes the fibre.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `layers` | none | A directory of GeoJSON files (longitude and latitude) drawn behind the fibre, such as geology or roads. Each file is a layer named for the file. A feature may state `fill`, `stroke` and `name` in its properties, and the file a top-level `attribution`, shown as its credit. Files over 30 MB and links out of the directory are not served. |
+| `basemap_url` | none | A web map's tile address with `{z}`, `{x}` and `{y}`. With it the page offers a web map, off until the user ticks it; this is the one case in which the page loads anything from the internet, and the tile site then sees which places are looked at. |
+| `basemap_url_dark` | none | The same, for the dark theme. |
+| `basemap_attribution` | none | The credit the tiles' terms ask for, shown on the map. |
+
+The inventory is read when the spool is indexed, so a change to it shows after the next refresh.
+
 ## annotations
 
 Optional; turns on the annotation API.

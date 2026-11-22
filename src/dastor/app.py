@@ -44,7 +44,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
-from dastor import __version__, tilework
+from dastor import __version__, mapview, tilework
 from dastor.annotations import (
     AnnotationError,
     AnnotationStore,
@@ -612,6 +612,103 @@ def create_app(
                 },
             },
         )
+
+    # The inventory beside the data and its layout for the map, read once for
+    # each indexing of the spool; what each caller may see of it is kept too.
+    map_lock = threading.Lock()
+    map_state: dict = {
+        "gen": None,
+        "paths": [],
+        "reason": "",
+        "found": False,
+        "frame": None,
+    }
+    mapped: dict[tuple, dict] = {}
+
+    def _map_paths(gen: int) -> dict:
+        """Return the inventory's layout for this indexing, reading it if new."""
+        with map_lock:
+            if map_state["gen"] != gen:
+                state = {
+                    "gen": gen,
+                    "paths": [],
+                    "reason": "",
+                    "found": False,
+                    "frame": None,
+                }
+                try:
+                    inventory = mapview.load_inventory(settings.spool.path)
+                    if inventory is None:
+                        state["reason"] = "No inventory beside the data (.inventory)."
+                    else:
+                        state["found"] = True
+                        state["paths"] = mapview.describe(inventory)
+                        crs = inventory.coordinate_reference_system
+                        state["frame"] = mapview.frame(crs)
+                except Exception as exc:  # a broken inventory must not stop the viewer
+                    log.warning("the inventory could not be read: %s", exc)
+                    state["reason"] = (
+                        "The inventory beside the data could not be read; "
+                        "the server's log says why."
+                    )
+                map_state.clear()
+                map_state.update(state)
+                mapped.clear()
+            return dict(map_state)
+
+    @app.get("/v1/viewer/map")
+    def fibre_map(request: Request, who: Who) -> Response:
+        """
+        Return the fibre's layout from the spool's inventory, for the map.
+
+        Only the optical paths the caller can see a whole
+        acquisition of are listed, each with its position, measured columns,
+        labels, coupling and notes along optical distance, and the recordings
+        which join it. `layers` names the background drawings and `basemap`
+        the web tiles, if the configuration turns either on.
+        """
+        gen = catalog.generation
+        state = _map_paths(gen)
+        key = (who, gen)
+        if (found := mapped.get(key)) is None:
+            paths = []
+            if state["paths"]:
+                view = catalog.view(who)
+                contents = view.select().get_contents()
+                keys = (
+                    set(contents["acquisition_key"].astype(str))
+                    if len(contents)
+                    else set()
+                )
+                paths = mapview.visible(state["paths"], keys, view.acquisitions)
+            cfg = settings.map
+            found = {
+                "inventory": state["found"],
+                "reason": state["reason"],
+                "frame": state["frame"],
+                "paths": paths,
+                "layers": list(mapview.layers(cfg.layers)),
+                "basemap": {
+                    "url": cfg.basemap_url,
+                    "dark": cfg.basemap_url_dark,
+                    "attribution": cfg.basemap_attribution,
+                }
+                if cfg.basemap_url
+                else None,
+            }
+            with map_lock:
+                if len(mapped) >= 256:
+                    mapped.clear()
+                mapped[key] = found
+        return _json_maybe_gzip(request, found)
+
+    @app.get("/v1/viewer/map/layer/{name}")
+    def map_layer(name: str, who: Who) -> FileResponse:
+        """Return one background layer of the map, as GeoJSON."""
+        path = mapview.layers(settings.map.layers).get(name)
+        if path is None:
+            raise HTTPException(404, "no such layer")
+        return FileResponse(path, media_type="application/geo+json")
 
     @app.get("/v1/viewer/tile")
     def tile(

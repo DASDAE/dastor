@@ -18,9 +18,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-    # The first DASCore build with the ARROW format; no release has it
-    # yet, so this installs only from DASCore's dev branch (see README).
-    "dascore>=0.1.24.dev589",
+    # The first DASCore build with the ARROW format and the inventory
+    # fields the viewer map reads; no release has them yet, so this
+    # installs only from DASCore's dev branch (see README).
+    "dascore>=0.1.26.dev643",
     "fastapi>=0.115",
     "pyarrow>=19",
     "pydantic>=2.7",
