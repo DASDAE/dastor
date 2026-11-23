@@ -613,44 +613,28 @@ def create_app(
             },
         )
 
-    # The inventory beside the data and its layout for the map, read once for
-    # each indexing of the spool; what each caller may see of it is kept too.
+    # The inventory in the data directory and its layout for the map, read
+    # once for each indexing of the spool and each change of the inventory's
+    # files; what each caller may see of it is kept too.
     map_lock = threading.Lock()
-    map_state: dict = {
-        "gen": None,
-        "paths": [],
-        "reason": "",
-        "found": False,
-        "frame": None,
-    }
+    map_state: dict = {"stamp": None}
     mapped: dict[tuple, dict] = {}
 
-    def _map_paths(gen: int) -> dict:
-        """Return the inventory's layout for this indexing, reading it if new."""
+    def _map_paths(stamp: tuple) -> dict:
+        """Return the inventory's layout for this stamp, reading it if new."""
         with map_lock:
-            if map_state["gen"] != gen:
-                state = {
-                    "gen": gen,
-                    "paths": [],
-                    "reason": "",
-                    "found": False,
-                    "frame": None,
-                }
+            if map_state["stamp"] != stamp:
+                state = {"stamp": stamp, "paths": [], "status": "none", "frame": None}
                 try:
                     inventory = mapview.load_inventory(settings.spool.path)
-                    if inventory is None:
-                        state["reason"] = "No inventory beside the data (.inventory)."
-                    else:
-                        state["found"] = True
+                    if inventory is not None:
                         state["paths"] = mapview.describe(inventory)
                         crs = inventory.coordinate_reference_system
                         state["frame"] = mapview.frame(crs)
+                        state["status"] = "ok"
                 except Exception as exc:  # a broken inventory must not stop the viewer
                     log.warning("the inventory could not be read: %s", exc)
-                    state["reason"] = (
-                        "The inventory beside the data could not be read; "
-                        "the server's log says why."
-                    )
+                    state["paths"], state["status"] = [], "unreadable"
                 map_state.clear()
                 map_state.update(state)
                 mapped.clear()
@@ -661,46 +645,48 @@ def create_app(
         """
         Return the fibre's layout from the spool's inventory, for the map.
 
-        Only the optical paths the caller can see a whole
-        acquisition of are listed, each with its position, measured columns,
-        labels, coupling and notes along optical distance, and the recordings
-        which join it. `layers` names the background drawings and `basemap`
-        the web tiles, if the configuration turns either on.
+        `status` is `ok`, `none` (the data directory holds no inventory) or
+        `unreadable` (the server's log says why). Only the optical paths the
+        caller can see a whole acquisition of are listed, each with its
+        position, measured columns, labels, coupling and notes along optical
+        distance, and the recordings which join it; `frame` says how the
+        positions are drawn, and is given only with a path. `layers` names
+        the background drawings and `basemap` the web tiles, if the
+        configuration turns either on.
         """
-        gen = catalog.generation
-        state = _map_paths(gen)
-        key = (who, gen)
-        if (found := mapped.get(key)) is None:
+        stamp = (catalog.generation, mapview.stamp(settings.spool.path))
+        state = _map_paths(stamp)
+        key = (who, stamp)
+        if (shown := mapped.get(key)) is None:
             paths = []
             if state["paths"]:
                 view = catalog.view(who)
                 contents = view.select().get_contents()
-                keys = (
-                    set(contents["acquisition_key"].astype(str))
-                    if len(contents)
-                    else set()
-                )
+                # Files which state no key leave the column out altogether.
+                keys = set(contents.get("acquisition_key", ())) - {""}
                 paths = mapview.visible(state["paths"], keys, view.acquisitions)
-            cfg = settings.map
-            found = {
-                "inventory": state["found"],
-                "reason": state["reason"],
-                "frame": state["frame"],
+            shown = {
+                "status": state["status"],
+                "frame": state["frame"] if paths else None,
                 "paths": paths,
-                "layers": list(mapview.layers(cfg.layers)),
-                "basemap": {
-                    "url": cfg.basemap_url,
-                    "dark": cfg.basemap_url_dark,
-                    "attribution": cfg.basemap_attribution,
-                }
-                if cfg.basemap_url
-                else None,
             }
             with map_lock:
-                if len(mapped) >= 256:
-                    mapped.clear()
-                mapped[key] = found
-        return _json_maybe_gzip(request, found)
+                if map_state["stamp"] == stamp:  # not one a refresh overtook
+                    if len(mapped) >= 256:
+                        mapped.clear()
+                    mapped[key] = shown
+        cfg = settings.map
+        basemap = {
+            "url": cfg.basemap_url,
+            "dark": cfg.basemap_url_dark,
+            "attribution": cfg.basemap_attribution,
+        }
+        reply = {
+            **shown,
+            "layers": list(mapview.layers(cfg.layers)),
+            "basemap": basemap if cfg.basemap_url else None,
+        }
+        return _json_maybe_gzip(request, reply)
 
     @app.get("/v1/viewer/map/layer/{name}")
     def map_layer(name: str, who: Who) -> FileResponse:

@@ -201,18 +201,18 @@ class MapConfig(_Model):
     """
     The viewer's map of the fibre.
 
-    The fibre itself is drawn from the DASCore inventory beside the data;
-    nothing here describes it.
+    The fibre itself is drawn from the DASCore inventory in the data
+    directory; nothing here describes it.
 
     Parameters
     ----------
     layers
-        A directory of GeoJSON files drawn behind the fibre (geology, the
-        railway): background only. Each feature may state `fill`, `stroke`
-        and `name` in its properties.
+        A directory of GeoJSON files drawn behind the fibre (geology, roads,
+        a site plan): background only. Each feature may state `fill`,
+        `stroke` and `name` in its properties.
     basemap_url
         A web map's tile address with `{z}`, `{x}`, `{y}` (and optionally
-        `{s}`). Off unless set: with it the page loads tiles from that
+        `{s}`). Off unless set: with it the page can load tiles from that
         site, the one case in which it reaches the internet.
     basemap_url_dark
         The same, for the dark theme.
@@ -224,6 +224,35 @@ class MapConfig(_Model):
     basemap_url: str | None = None
     basemap_url_dark: str | None = None
     basemap_attribution: str = ""
+
+    @field_validator("layers")
+    @classmethod
+    def _a_directory(cls, value: Path | None) -> Path | None:
+        """Refuse a layers path which is not a directory."""
+        if value is not None and not value.is_dir():
+            raise ValueError(f"layers {str(value)!r} is not a directory")
+        return value
+
+    @field_validator("basemap_url", "basemap_url_dark")
+    @classmethod
+    def _a_tile_address(cls, value: str | None, info) -> str | None:
+        """Refuse an address the page could not make tile addresses from."""
+        if value is None:
+            return value
+        if not value.startswith(("https://", "http://")):
+            msg = f"{info.field_name} {value!r} must start with https:// or http://"
+            raise ValueError(msg)
+        if missing := [x for x in ("{z}", "{x}", "{y}") if x not in value]:
+            msg = f"{info.field_name} {value!r} lacks {' '.join(missing)}"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _dark_with_light(self) -> MapConfig:
+        """Refuse a dark web map without the one it stands in for."""
+        if self.basemap_url_dark and not self.basemap_url:
+            raise ValueError("basemap_url_dark needs basemap_url")
+        return self
 
 
 class Settings(_Model):
