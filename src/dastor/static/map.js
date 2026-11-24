@@ -6,7 +6,10 @@
 "use strict";
 (() => {
   const MP = {
-    data: null, open: false, colour: "", view: null, lastGroup: null,
+    data: null, open: false, colour: "", view: null, lastGroup: null, lastPath: null,
+    fitted: null,     // "one" or "all" while the view is a fit, so a resize can fit again; null once the user moves it
+    pin: null,        // {path, d, until}: the place a click on the map asked for, marked for a moment
+    stay: false,      // the next change of recording came from a click on the map: its view is kept
     hover: null,      // {path, d}: the optical distance under the cursor on the map
     wf: null,         // the product distance under the cursor in the data
     layers: {},       // name -> {on, shapes, credit}
@@ -22,22 +25,28 @@
   const keep = (k, v) => { try { localStorage.setItem("dastor.map." + k, v); } catch (e) { /* private mode */ } };
   const kept = (k) => { try { return localStorage.getItem("dastor.map." + k); } catch (e) { return null; } };
   const light = () => document.documentElement.dataset.theme === "light";
-  const about = (d) => `≈ ${fmtNum(Math.round(d / 10) * 10)} m`;  // a place on the fibre is not known to the metre
+  const NARROW = 560;  // a window narrower than this has no room for the map and the data side by side
+  const metres = (d) => (Math.abs(d) >= 10000 ? `${fmtNum(+(d / 1000).toFixed(2))} km` : `${fmtNum(d)} m`);
+  // A place on the fibre is not known to the metre: it is given to 10 m on a long fibre, and more closely on a short one.
+  const grain = (p) => (!(p.length < 2000) ? 10 : p.length >= 200 ? 1 : 0.1);
+  const about = (d, p) => { const g = grain(p); return `≈ ${metres(+(Math.round(d / g) * g).toFixed(1))}`; };
 
   // ---------------------------------------------------------------- projection (web mercator, the world is 0..1)
   const mx = (lon) => (lon + 180) / 360;
-  const my = (lat) => { const s = Math.sin((lat * Math.PI) / 180); return 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI); };
+  const my = (lat) => { const s = Math.sin((clamp(lat, -85.0511, 85.0511) * Math.PI) / 180); return 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI); };
   const size = () => [mcv.clientWidth, mcv.clientHeight];
   const toPx = (x, y) => { const [W, H] = size(), v = MP.view; return [W / 2 + (x - v.cx) * v.k, H / 2 + (y - v.cy) * v.k]; };
   const cosLat = (y) => Math.cos(2 * Math.atan(Math.exp((0.5 - y) * 2 * Math.PI)) - Math.PI / 2);
   // How the inventory's coordinates become the map's: longitude and latitude through web mercator, anything
-  // else (a projected grid, a local x, y) as the plane it is, the second axis up. `per` is ground units per map unit.
-  const GEO = { geo: true, x: mx, y: my, per: (y) => EARTH * cosLat(y), unit: "m" };
+  // else (a projected grid, a local x, y) as the plane it is, the second axis up. `per` is ground units per map unit,
+  // and `m` the metres in one ground unit (null if the unit is not one known here), for comparing ground with fibre.
+  const METRES = { m: 1, meter: 1, metre: 1, meters: 1, metres: 1, km: 1000, kilometer: 1000, kilometre: 1000, cm: 0.01, mm: 0.001, ft: 0.3048, foot: 0.3048, feet: 0.3048 };
+  const GEO = { geo: true, x: mx, y: my, per: (y) => EARTH * cosLat(y), unit: "m", m: 1 };
   let PRJ = GEO;
   function frameOf(f) {
     if (!f || f.kind !== "plane") return GEO;
-    const u = String(f.units || "").toLowerCase(), unit = ["m", "meter", "metre", "meters", "metres"].includes(u) ? "m" : f.units || "";
-    return { geo: false, x: (v) => v, y: (v) => -v, per: () => 1, unit, labels: f.labels || ["x", "y"] };
+    const m = METRES[String(f.units || "").toLowerCase()] || null;
+    return { geo: false, x: (v) => v, y: (v) => -v, per: () => 1, unit: m === 1 ? "m" : f.units || "", m, labels: f.labels || ["x", "y"] };
   }
   const metresPerPx = () => PRJ.per(MP.view.cy) / MP.view.k;  // ground units for one pixel: metres, unless the frame says otherwise
   // Straight lines between a distance map's control points; nothing outside them, as DASCore has it.
@@ -53,8 +62,16 @@
   function prepare(data) {
     PRJ = frameOf(data.frame);
     for (const p of data.paths) {
-      p.x = (p.x || []).map((v) => (v === null ? NaN : PRJ.x(v)));
-      p.y = (p.y || []).map((v) => (v === null ? NaN : PRJ.y(v)));
+      // A point is placed only if both its coordinates are stated. Longitudes run on across the
+      // antimeridian, so a fibre which crosses it is one line and not one round the world.
+      const xs = p.x || [], ys = p.y || [], x = [], y = []; let last = null, turn = 0;
+      for (let i = 0; i < p.d.length; i++) {
+        const u = xs[i], w = ys[i];
+        if (typeof u !== "number" || typeof w !== "number") { x.push(NaN); y.push(NaN); continue; }
+        if (PRJ.geo && last !== null) turn += u - last > 180 ? -360 : u - last < -180 ? 360 : 0;
+        last = u; x.push(PRJ.x(PRJ.geo ? u + turn : u)); y.push(PRJ.y(w));
+      }
+      p.x = x; p.y = y;
       p.placed = p.x.some((v) => v === v);
       p.brk = new Set(p.breaks || []);
       const ok = p.d.filter((_, i) => p.x[i] === p.x[i]);
@@ -63,16 +80,30 @@
     }
     return data;
   }
+  // The path of the recording on show. A recording which ran on over a re-laid fibre is on two paths, each
+  // for its own time: the one for the time at the middle of the screen is taken.
   function active() {
     if (!MP.data) return null;
-    for (const p of MP.data.paths) { const r = p.recordings.find((q) => q.key === S.group); if (r) return { p, r }; }
-    return null;
+    const on = [];
+    for (const p of MP.data.paths) { const r = p.recordings.find((q) => q.key === S.group); if (r) on.push({ p, r }); }
+    if (on.length < 2 || !S.xTime || !S.levels.length) return on[0] || null;
+    const P = plotRect(), t = px2x(P.x + P.w / 2), within = (q) => (!q[0] || parseTime(q[0]) <= t) && (!q[1] || t < parseTime(q[1]));
+    return on.find((a) => within(a.r.time || [])) || on[0];
   }
   const toOptical = (a, d) => (a.r.unmapped ? null : interp(d, a.r.from, a.r.to));
   const toProduct = (a, d) => (a.r.unmapped ? null : interp(d, a.r.to, a.r.from));
   // The stretch of the fibre a recording covers, in optical distance (null: not known from the inventory).
-  const span = (r) => (r.unmapped || !r.to.length ? null : [Math.min(...r.to), Math.max(...r.to)]);
-  const covers = (r, d) => { const s = span(r); return !r.unmapped && (!s || (d >= s[0] && d <= s[1])); };
+  // Without a distance map the recording's own distance is the optical distance: its products say how far it reaches.
+  function ownSpan(key) {
+    let lo = Infinity, hi = -Infinity;
+    for (const q of (S.groups && S.groups.get(key)) || []) {
+      const c = q.coords && q.coords[q.y]; if (!c || !isFinite(c.min) || !isFinite(c.max)) continue;
+      lo = Math.min(lo, c.min); hi = Math.max(hi, c.max + (c.step || 0));
+    }
+    return lo <= hi ? [lo, hi] : null;
+  }
+  const span = (r) => (r.unmapped ? null : r.to.length ? [Math.min(...r.to), Math.max(...r.to)] : ownSpan(r.key));
+  const covers = (r, d) => { const s = span(r); return !!s && d >= s[0] && d <= s[1]; };
   function coverage(a) {
     const s = span(a.r); if (s) return s;
     if (a.r.unmapped || !S.ext) return null;
@@ -103,16 +134,20 @@
     const b = p.placed ? bracket(p, d) : null; if (!b || p.x[b[0]] !== p.x[b[0]] || p.x[b[1]] !== p.x[b[1]]) return null;
     return [p.x[b[0]] + b[2] * (p.x[b[1]] - p.x[b[0]]), p.y[b[0]] + b[2] * (p.y[b[1]] - p.y[b[0]])];
   }
-  const groundLen = (p, i) => Math.hypot(p.x[i + 1] - p.x[i], p.y[i + 1] - p.y[i]) * PRJ.per(p.y[i]);
+  const groundLen = (p, i) => Math.hypot(p.x[i + 1] - p.x[i], p.y[i + 1] - p.y[i]) * PRJ.per(p.y[i]) * PRJ.m;  // in metres
   const joined = (p, i) => i >= 0 && i + 1 < p.d.length && !p.brk.has(i + 1) && p.x[i] === p.x[i] && p.x[i + 1] === p.x[i + 1];
-  // Fibre gathered in one place: the run of control points around i over which the fibre is much longer than its ground.
+  // More fibre than line: the run of control points around i over which the inventory states much more fibre than
+  // the line drawn between them is long (a coil, slack, or a route drawn with few points). It is what the
+  // inventory's numbers say, not a kind of thing: [from, to, the line's length], or null.
   function gathered(p, i) {
-    const dense = (j) => j >= 0 && j + 1 < p.d.length && p.x[j] === p.x[j] && p.x[j + 1] === p.x[j + 1] && p.d[j + 1] - p.d[j] > 1.5 * groundLen(p, j) + 1;
-    if (PRJ.unit !== "m" || !dense(i)) return null;  // fibre is in metres; so must the ground be, to compare
-    let a = i, b = i;
+    const slack = Math.min(1, p.length / 1000 || 1);  // what counts as more, on a fibre of this length
+    const dense = (j) => j >= 0 && j + 1 < p.d.length && !p.brk.has(j + 1) && p.x[j] === p.x[j] && p.x[j + 1] === p.x[j + 1] && p.d[j + 1] - p.d[j] > 1.5 * groundLen(p, j) + slack;
+    if (!PRJ.m || !dense(i)) return null;  // the fibre is in metres; so must the ground be, to compare
+    let a = i, b = i, ground = 0;
     while (dense(a - 1)) a--;
     while (dense(b + 1)) b++;
-    return p.d[b + 1] - p.d[a] >= 20 ? [p.d[a], p.d[b + 1]] : null;
+    for (let j = a; j <= b; j++) ground += groundLen(p, j);
+    return p.d[b + 1] - p.d[a] >= 20 * slack ? [p.d[a], p.d[b + 1], ground] : null;
   }
 
   // ---------------------------------------------------------------- the colour of the fibre
@@ -146,15 +181,17 @@
     const mode = MP.colour, p = a.p, plain = () => THEME.blue;
     if (mode.startsWith("track:")) {
       const g = mode.slice(6), t = p.tracks[g] || [], vals = [...new Set(t.map((q) => String(q[2])))];
-      if (vals.every((q) => ORDER.includes(q))) vals.sort((x, y) => ORDER.indexOf(x) - ORDER.indexOf(y)); else vals.sort();
+      if (vals.every((q) => ORDER.includes(q))) vals.sort((x, y) => ORDER.indexOf(x) - ORDER.indexOf(y));
+      else if (vals.every((q) => q.trim() !== "" && isFinite(q))) vals.sort((x, y) => x - y);
+      else vals.sort();
       const col = Object.fromEntries(vals.map((q, i) => [q, CATS[i % CATS.length]]));
       const edges = [...new Set(t.flatMap((q) => [q[0], q[1]]))].sort((x, y) => x - y);
       return { at: (d) => { const q = trackValue(p, g, d); return q === null ? null : col[String(q)]; }, edges,
         legend: { title: g.replace(/_/g, " "), items: vals.map((q) => [q, col[q]]), none: "not stated" } };
     }
     if (mode.startsWith("col:")) {
-      const name = mode.slice(4), c = p.columns[name]; if (!c) return { at: plain };
-      const vs = c.v.filter((q) => q !== null), lo = Math.min(...vs), hi = Math.max(...vs);
+      const name = mode.slice(4), c = p.columns[name], vs = c ? c.v.filter((q) => q !== null) : []; if (!vs.length) return { at: plain };
+      let lo = Infinity, hi = -Infinity; for (const q of vs) { lo = Math.min(lo, q); hi = Math.max(hi, q); }
       return { at: (d) => { const q = columnValue(p, name, d); return q === null ? null : ramp((q - lo) / (hi - lo || 1)); },
         legend: { title: `${name.replace(/_/g, " ")}${c.units ? " (" + c.units + ")" : ""}`, lo, hi, stops: RAMP, none: "not stated" } };
     }
@@ -181,9 +218,9 @@
     for (const p of paths) for (let i = 0; i < p.x.length; i++) if (p.x[i] === p.x[i] && (!cov || (p.d[i] >= cov[0] && p.d[i] <= cov[1]))) take(p.x[i], p.y[i]);
     if (cov) for (const d of cov) { const at = positionAt(a.p, clamp(d, a.p.reach[0], a.p.reach[1])); if (at) take(at[0], at[1]); }
     if (!isFinite(x0)) { if (!all) fit(true); return; }
-    const tiny = PRJ.geo ? 2e-6 : 1, [W, H] = size(), w = Math.max(x1 - x0, tiny), h = Math.max(y1 - y0, tiny), room = Math.min(90, H / 4);  // room: the legend's corner
+    const tiny = PRJ.geo ? 2e-6 : Math.max(x1 - x0, y1 - y0) * 1e-3 || 1, [W, H] = size(), w = Math.max(x1 - x0, tiny), h = Math.max(y1 - y0, tiny), room = Math.min(90, H / 4);  // room: the legend's corner
     const k = 0.84 * Math.min(W / w, (H - room) / h);
-    MP.view = { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 + room / 2 / k, k }; MP.k0 = k;
+    MP.view = { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 + room / 2 / k, k }; MP.k0 = k; MP.fitted = all ? "all" : "one";
   }
   function resizeMap() {
     const dpr = window.devicePixelRatio || 1;
@@ -258,11 +295,13 @@
     const [W, H] = size(); if (W < 2 || H < 2) return;
     { const dpr = window.devicePixelRatio || 1; if (mcv.width !== Math.round(W * dpr) || mcv.height !== Math.round(H * dpr)) resizeMap(); }  // the bar above can grow a line
     const a = active();
-    if (S.group !== MP.lastGroup || !MP.view) { MP.lastGroup = S.group; fit(false); buildControls(); }
+    const path = a ? a.p : null;
+    if (S.group !== MP.lastGroup || !MP.view) { MP.lastGroup = S.group; MP.lastPath = path; if (!MP.stay || !MP.view) fit(false); MP.stay = false; buildControls(); }
+    else if (path !== MP.lastPath) { MP.lastPath = path; buildControls(); }  // the time on screen moved onto another epoch of the fibre
     mctx.fillStyle = C.bg; mctx.fillRect(0, 0, W, H);
     if (!MP.view) {
       mctx.fillStyle = C.dim; mctx.font = "14px system-ui"; mctx.textAlign = "left";
-      mctx.fillText(MP.data.reason || "The inventory places no fibre you may see.", 16, 28);
+      mctx.fillText(MP.data.status === "unreadable" ? "The inventory could not be read; the server's log says why." : "The inventory places no fibre you may see.", 16, 28);
       renderLegend(null); return;
     }
     const tiles = drawBasemap(W, H);
@@ -281,7 +320,7 @@
       strokePath(a.p, cov[0], cov[1], 5, (d) => paint.at(d) || (MP.colour ? C.tick : THEME.blue), paint.edges);
       const mark = (d, r, fill) => { const at = d === null ? null : positionAt(a.p, d); if (!at) return; const [px, py] = toPx(at[0], at[1]); mctx.beginPath(); mctx.arc(px, py, r, 0, 6.2832); mctx.fillStyle = fill; mctx.fill(); mctx.lineWidth = 2; mctx.strokeStyle = "#000"; mctx.stroke(); };
       if (w0 !== null && w1 !== null) { mark(w0, 3.5, C.win); mark(w1, 3.5, C.win); }
-      if (metresPerPx() <= 25) for (const t of a.p.tracks.coupling || []) {  // fibre gathered in one place; zoomed out, the rings would hide the line
+      if (metresPerPx() * (PRJ.m || 1) <= 25) for (const t of a.p.tracks.coupling || []) {  // fibre gathered in one place; zoomed out, the rings would hide the line
         if (t[2] !== "coiled") continue;
         const at = positionAt(a.p, (t[0] + t[1]) / 2); if (!at) continue;
         const [px, py] = toPx(at[0], at[1]);
@@ -290,17 +329,18 @@
       }
       if (MP.wf !== null && !MP.hover) mark(toOptical(a, MP.wf), 6, C.win);
       if (MP.hover && MP.hover.path === a.p) mark(MP.hover.d, 5, "#fff");
+      else if (pinned(a)) mark(MP.pin.d, 6, "#fff");
     } else if (a) {
       mctx.fillStyle = C.dim; mctx.font = "14px system-ui"; mctx.textAlign = "left"; mctx.fillText("The inventory states no map position for this fibre.", 16, 28);
     }
-    drawScale(W, H);
+    drawScale(W, H, !!legend && W < 360);  // in a narrow pane the legend takes the bottom, so the scale goes up
     renderLegend(legend);
     const b = MP.data.basemap, credit = [tiles && b.attribution, ...Object.values(MP.layers).filter((L) => PRJ.geo && L.on && L.credit).map((L) => L.credit)].filter(Boolean);
     $("mapCredit").textContent = credit.join(" · ");
   }
-  function drawScale(W, H) {
+  function drawScale(W, H, high) {
     const mPerPx = metresPerPx();
-    const len = niceNumber(mPerPx * 90), px = len / mPerPx, x = W - px - 14, y = H - 26;
+    const len = niceNumber(mPerPx * 90), px = len / mPerPx, x = W - px - 14, y = high ? 46 : H - 26;
     mctx.strokeStyle = C.text; mctx.lineWidth = 2; mctx.beginPath(); mctx.moveTo(x, y - 4); mctx.lineTo(x, y); mctx.lineTo(x + px, y); mctx.lineTo(x + px, y - 4); mctx.stroke();
     mctx.fillStyle = C.text; mctx.font = "12px system-ui"; mctx.textAlign = "center"; mctx.fillText(PRJ.unit !== "m" ? `${len} ${PRJ.unit}`.trim() : len >= 1000 ? `${len / 1000} km` : `${len} m`, x + px / 2, y - 7);
   }
@@ -315,6 +355,7 @@
     if (l.none) html += `<span><i style="background:${C.tick}"></i>${esc(l.none)}</span>`;
     el.innerHTML = html;
   }
+  const pinned = (a) => !!MP.pin && MP.pin.path === a.p && performance.now() < MP.pin.until;
   // The same colour beside the data: a strip inside the plot's left edge, and the place the map points at.
   function overlay() {
     const a = active(); if (!MP.open || !a || !S.levels.length) return;
@@ -327,8 +368,9 @@
       }
       ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.strokeRect(P.x + 0.5, P.y + 0.5, 9, P.h - 1);
     }
-    if (MP.hover && MP.hover.path === a.p) {
-      const d = toProduct(a, MP.hover.d), y = d === null ? -1 : y2px(d);
+    const at = MP.hover && MP.hover.path === a.p ? MP.hover.d : pinned(a) ? MP.pin.d : null;
+    if (at !== null) {
+      const d = toProduct(a, at), y = d === null ? -1 : y2px(d);
       if (y >= P.y && y <= P.y + P.h) {
         ctx.save(); ctx.setLineDash([6, 4]); ctx.lineWidth = 3; ctx.strokeStyle = "#000"; ctx.beginPath(); ctx.moveTo(P.x, y); ctx.lineTo(P.x + P.w, y); ctx.stroke();
         ctx.lineWidth = 1.5; ctx.strokeStyle = "#fff"; ctx.stroke(); ctx.restore();
@@ -352,9 +394,10 @@
     MP.colour = [...all, ...tracks, ...cols, ["view"]].some(([v]) => v === was) ? was : ""; sel.value = MP.colour;
     const name = $("mapName"), note = $("mapNote");
     if (!a) { name.textContent = MP.data.paths.length ? "this recording is not in the inventory" : ""; note.textContent = ""; note.hidden = true; return; }
-    const L = Math.round(a.p.length), to = a.p.reach ? Math.round(a.p.reach[1]) : 0;
-    name.textContent = `${a.p.name} · ${a.p.reach && to < L - 1 ? `placed to ${fmtNum(to)} of ${fmtNum(L)} m` : `${fmtNum(L)} m`}`;
-    note.textContent = [a.p.about, a.r.about].filter(Boolean).join(" "); note.hidden = !note.textContent; note.title = "from the inventory; click to read it all";
+    const L = +(+a.p.length || 0).toFixed(1), to = a.p.reach ? +a.p.reach[1].toFixed(1) : 0;
+    name.textContent = `${a.p.name} · ${a.p.reach && to < L - grain(a.p) / 10 ? `placed to ${metres(to)} of ${metres(L)}` : metres(L)}`;
+    note.textContent = [a.p.about, a.r.about].filter(Boolean).join(" "); note.hidden = !note.textContent; note.title = "from the inventory; press to read it all";
+    note.classList.remove("all"); note.setAttribute("aria-expanded", "false");
   }
   function buildLayerBoxes() {
     const box = $("mapLayers"), d = MP.data; let html = "";
@@ -362,7 +405,7 @@
       box.innerHTML = `<span title="The inventory's coordinates are not longitude and latitude, so no web map or background layer can be laid under them.">${esc(PRJ.labels.join(", "))}${PRJ.unit ? " in " + esc(PRJ.unit) : ""}${d.frame.name ? " · " + esc(d.frame.name) : ""}</span>`;
       return;
     }
-    if (d.basemap) html += `<label title="Loads map tiles from the internet (${esc(d.basemap.attribution || "a web map")}): that site sees which places you look at. Off until you tick it."><input type="checkbox" id="mapBase" ${MP.basemap ? "checked" : ""}> web map</label>`;
+    if (d.basemap) html += `<label title="Loads map tiles from the internet (${esc(d.basemap.attribution || "a web map")}): that site sees your address and which places you look at. Off until you tick it; this browser then remembers the tick."><input type="checkbox" id="mapBase" ${MP.basemap ? "checked" : ""}> web map</label>`;
     for (const name of d.layers) html += `<label><input type="checkbox" data-layer="${esc(name)}" ${kept("layer." + name) === "1" ? "checked" : ""}> ${esc(name.replace(/_/g, " "))}</label>`;
     box.innerHTML = html;
   }
@@ -416,12 +459,13 @@
     const had = S.levels.length ? plotRect().w * S.view.spp : 0;
     change(); resize();
     if (had) { const w = plotRect().w; if (w > 10) S.view.spp = had / w; }
-    if (MP.open) resizeMap();
+    if (MP.open) { resizeMap(); if (MP.view && MP.fitted) fit(MP.fitted === "all"); }
     redraw();
   }
-  function show(open) {
+  // `passing`: the window's width opened or shut the pane, not the user, whose choice is kept as it was.
+  function show(open, passing) {
     relayout(() => { MP.open = open; pane.hidden = !open; if (open) setWidth(+kept("share") || 0.38); });
-    $("btnMap").setAttribute("aria-pressed", open); keep("open", open ? "1" : "0");
+    $("btnMap").setAttribute("aria-pressed", open); if (!passing) { keep("open", open ? "1" : "0"); MP.shut = false; }
     if (open) { loadTicked(); if (!MP.view) fit(false); }
   }
 
@@ -440,43 +484,51 @@
         const f = L2 ? clamp(((p.x - ax) * vx + (p.y - ay) * vy) / L2, 0, 1) : 0.5, r = Math.hypot(p.x - ax - f * vx, p.y - ay - f * vy);
         if (r > TOL) continue;
         const hit = { path, i, d: path.d[i] + f * (path.d[i + 1] - path.d[i]), r: r + bias };
-        hit.score = hit.r - (!L2 && gathered(path, i) ? 0.5 : 0);  // on a tie, the gathered fibre: it is most of what lies there
+        hit.score = hit.r - (!L2 && gathered(path, i) ? 0.5 : 0);  // on a tie, the fibre held in one spot: it is most of what lies there
         if (!best || hit.score < best.score) best = hit;
         if (!bias) mine.push(hit);
       }
     }
     if (!best) return null;
     best.gather = gathered(best.path, best.i);
-    const far = Math.max(150, 3 * TOL * metresPerPx());  // further along the fibre than the cursor's own reach: another pass, not a neighbour
+    // further along the fibre than the cursor's own reach, and than a small part of the fibre: another pass, not a neighbour
+    const far = Math.max(Math.min(150, (best.path.length || 3000) / 20), 3 * TOL * metresPerPx() * (PRJ.m || 0));
     const others = mine.filter((h) => best.path === h.path && Math.abs(h.d - best.d) > far && !(best.gather && h.d >= best.gather[0] && h.d <= best.gather[1])).sort((x, y) => x.d - y.d);
     best.also = [];
     for (const h of others) { const last = best.also[best.also.length - 1]; if (last && h.d - last.d1 < far) { last.d1 = h.d; if (h.r < last.r) { last.r = h.r; last.d = h.d; } } else best.also.push({ d: h.d, d1: h.d, r: h.r }); }
     return best;
   }
   function describe(hit) {
-    const p = hit.path, d = hit.d, lines = [`${about(d)} along the fibre`];
-    if (hit.gather) lines.push(`fibre gathered here: ${about(hit.gather[0])} to ${about(hit.gather[1]).slice(2)}`);
-    if (hit.also.length) lines.push(`the fibre also passes here at ${hit.also.slice(0, 4).map((h) => about(h.d)).join(", ")}${hit.also.length > 4 ? " ..." : ""}`);
+    const p = hit.path, d = hit.d, lines = [`${about(d, p)} along the fibre`];
+    if (hit.gather) lines.push(`${about(hit.gather[0], p)} to ${about(hit.gather[1], p).slice(2)} of fibre lies along ${metres(+hit.gather[2].toPrecision(2))} of this line`);
+    if (hit.also.length) lines.push(`the fibre also passes here at ${hit.also.slice(0, 4).map((h) => about(h.d, p)).join(", ")}${hit.also.length > 4 ? " ..." : ""}`);
+    const seg = (p.breaks || []).filter((b) => b <= hit.i).length - 1, said = (p.notes || [])[seg];
+    if (said) lines.push(said);
     for (const g of Object.keys(p.tracks)) { const v = trackValue(p, g, d); if (v !== null) lines.push(`${g.replace(/_/g, " ")}: ${v}`); }
-    for (const [n, c] of Object.entries(p.columns)) { const v = columnValue(p, n, d); if (v !== null) lines.push(`${n.replace(/_/g, " ")}: ${about(v).replace(" m", "")}${c.units ? " " + c.units : ""}`); }
+    for (const [n, c] of Object.entries(p.columns)) { const v = columnValue(p, n, d); if (v !== null) lines.push(`${n.replace(/_/g, " ")}: ${fmtNum(+v.toPrecision(4))}${c.units ? " " + c.units : ""}`); }
     return lines;
   }
   // The recording of a fibre which covers a place on it: the one on show if it does, else the one reaching furthest.
   function recordingAt(path, d) {
     const fits = path.recordings.filter((r) => covers(r, d)); if (!fits.length) return null;
-    const len = (r) => { const s = span(r); return s ? s[1] - s[0] : Infinity; };
+    const len = (r) => { const s = span(r); return s[1] - s[0]; };
     return fits.find((r) => r.key === S.group) || fits.sort((x, y) => len(y) - len(x))[0];
   }
+  // Shows a place of the fibre in the data, at the zoom the data had, and marks it for a moment on both.
   function jump(hit) {
     const rec = recordingAt(hit.path, hit.d);
-    if (!rec) { toast(`No recording of ${hit.path.name} covers ${about(hit.d)}.`); return; }
-    const go = () => {
+    if (!rec) { toast(`No recording of ${hit.path.name} covers ${about(hit.d, hit.path)}.`); return; }
+    const go = (ypp) => {
       const b = active(), y = b ? toProduct(b, hit.d) : null; if (y === null) return;
-      pushView(); moved(); S.view.y0 = y - (plotRect().h * S.view.ypp) / 2; clampPos(); redraw();
+      pushView(); moved();
+      if (ypp) S.view.ypp = Math.min(ypp, S.view.ypp);  // a recording just opened shows all of itself: keep the zoom instead
+      S.view.y0 = y - (plotRect().h * S.view.ypp) / 2; clampPos();
+      MP.pin = { path: b.p, d: hit.d, until: performance.now() + 4000 }; setTimeout(redraw, 4100); redraw();
     };
     if (rec.key === S.group) { go(); return; }
-    MP.hover = null; tip.style.display = "none";
-    setGroup(rec.key).then(() => { toast(`Opened ${rec.key}, which covers ${about(hit.d)}.`); go(); }).catch((e) => toast(`could not open ${rec.key}: ${e.message}`));
+    const ypp = S.view.ypp;
+    MP.hover = null; tip.style.display = "none"; MP.stay = true;  // the map stays where the click was made
+    setGroup(rec.key).then(() => { toast(`Opened ${rec.key}, which covers ${about(hit.d, hit.path)}.`); go(ypp); }).catch((e) => { MP.stay = false; toast(`could not open ${rec.key}: ${e.message}`); });
   }
   mcv.addEventListener("mousedown", (ev) => { if (MP.view) MP.drag = { p: mpos(ev), cx: MP.view.cx, cy: MP.view.cy, moved: false }; });
   window.addEventListener("mouseup", (ev) => {
@@ -487,7 +539,7 @@
     if (!MP.open || !MP.data) return;
     if (MP.drag) {
       const p = mpos(ev), d = MP.drag; if (Math.hypot(p.x - d.p.x, p.y - d.p.y) > 4) d.moved = true;
-      if (d.moved) { MP.view.cx = d.cx - (p.x - d.p.x) / MP.view.k; MP.view.cy = d.cy - (p.y - d.p.y) / MP.view.k; soon(); }
+      if (d.moved) { MP.fitted = null; MP.view.cx = d.cx - (p.x - d.p.x) / MP.view.k; MP.view.cy = d.cy - (p.y - d.p.y) / MP.view.k; soon(); }
       return;
     }
     if (ev.target === mcv && MP.view) {
@@ -515,14 +567,17 @@
   });
   function zoom(f, p) {
     const [W, H] = size(), v = MP.view, wx = v.cx + (p.x - W / 2) / v.k, wy = v.cy + (p.y - H / 2) / v.k;
+    MP.fitted = null;
     v.k = clamp(v.k * f, PRJ.geo ? 200 : (MP.k0 || v.k) / 1000, PRJ.geo ? 2 ** 28 : (MP.k0 || v.k) * 1e6); v.cx = wx - (p.x - W / 2) / v.k; v.cy = wy - (p.y - H / 2) / v.k; soon();
   }
   mcv.addEventListener("wheel", (ev) => { if (!MP.view) return; ev.preventDefault(); zoom(Math.exp(-ev.deltaY * 0.0015), mpos(ev)); }, { passive: false });
   mcv.addEventListener("dblclick", () => { fit(false); soon(); });
   // With the map in focus (a click on it), the keys which move the data move the map instead.
   mcv.addEventListener("keydown", (ev) => {
+    if (ev.key === "Tab") { ev.stopPropagation(); return; }  // Tab leaves the map, as it leaves any control
     if (!MP.view || ev.ctrlKey || ev.metaKey || ev.altKey) return;
     const [W, H] = size(), step = (ev.shiftKey ? 0.5 : 0.1) / MP.view.k, k = ev.key;
+    if (k.startsWith("Arrow")) MP.fitted = null;
     if (k === "ArrowLeft") MP.view.cx -= W * step; else if (k === "ArrowRight") MP.view.cx += W * step;
     else if (k === "ArrowUp") MP.view.cy -= H * step; else if (k === "ArrowDown") MP.view.cy += H * step;
     else if (k === "+" || k === "=") zoom(1.4, { x: W / 2, y: H / 2 }); else if (k === "-") zoom(1 / 1.4, { x: W / 2, y: H / 2 });
@@ -532,7 +587,9 @@
   $("btnMap").addEventListener("click", () => show(!MP.open));
   $("mapFit").addEventListener("click", () => { fit(false); soon(); });
   $("mapAll").addEventListener("click", () => { fit(true); soon(); });
-  $("mapNote").addEventListener("click", (ev) => ev.currentTarget.classList.toggle("all"));
+  const unfold = (el) => el.setAttribute("aria-expanded", el.classList.toggle("all"));
+  $("mapNote").addEventListener("click", (ev) => unfold(ev.currentTarget));
+  $("mapNote").addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); ev.stopPropagation(); unfold(ev.currentTarget); } });
   $("mapColour").addEventListener("change", (ev) => { MP.colour = ev.target.value; keep("colour", MP.colour); ev.target.blur(); cv.focus({ preventScroll: true }); redraw(); });
   $("mapLayers").addEventListener("change", (ev) => {
     if (ev.target.id === "mapBase") { MP.basemap = ev.target.checked; keep("base", MP.basemap ? "1" : "0"); soon(); }
@@ -542,22 +599,28 @@
   $("mapBar").addEventListener("click", (ev) => { if (ev.target.closest("button, input[type=checkbox], label") && !ev.target.closest("select")) cv.focus({ preventScroll: true }); });
   // the edge between the map and the data drags; a double-click puts it back
   $("mapEdge").addEventListener("mousedown", (ev) => {
-    ev.preventDefault(); let share = 0.38;
+    ev.preventDefault(); let share = null;  // a press which drags nowhere changes nothing
     const move = (e) => relayout(() => { share = setWidth(e.clientX / window.innerWidth); });
-    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); keep("share", share); };
+    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); if (share !== null) keep("share", share); };
     window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
   });
   $("mapEdge").addEventListener("dblclick", () => { keep("share", 0.38); relayout(() => setWidth(0.38)); });
-  window.addEventListener("resize", () => { if (MP.open) { setWidth(+kept("share") || 0.38); resize(); resizeMap(); soon(); } });
+  // A window too narrow for both gives the map's room to the data, and the map comes back when there is room again.
+  window.addEventListener("resize", () => {
+    const room = window.innerWidth >= NARROW;
+    if (MP.open && !room) { show(false, true); MP.shut = true; return; }
+    if (!MP.open && room && MP.shut) { MP.shut = false; show(true, true); return; }
+    if (MP.open) relayout(() => setWidth(+kept("share") || 0.38));
+  });
 
   (async () => {
-    try { MP.data = prepare(await api("/viewer/map")); } catch (e) { MP.data = { paths: [], layers: [], basemap: null, inventory: false, reason: "" }; }
+    try { MP.data = prepare(await api("/viewer/map")); } catch (e) { MP.data = { paths: [], layers: [], basemap: null, status: "none" }; }
     const any = MP.data.paths.some((p) => p.placed);
-    $("btnMap").hidden = !(any || MP.data.paths.length || (MP.data.reason && !/^No inventory/.test(MP.data.reason)));  // nothing to show, nothing to press
+    $("btnMap").hidden = !(MP.data.paths.length || MP.data.status === "unreadable");  // nothing to show, nothing to press
     MP.basemap = !!MP.data.basemap && kept("base") === "1";  // tiles from the internet only once the user has asked for them
     MP.colour = kept("colour") || "";
     buildLayerBoxes(); buildControls();
     const want = kept("open");
-    if (any && (want === "1" || (want === null && window.innerWidth >= 900))) show(true);
+    if (any && window.innerWidth >= NARROW && (want === "1" || (want === null && window.innerWidth >= 900))) show(true);
   })();
 })();

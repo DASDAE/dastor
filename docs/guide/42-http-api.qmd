@@ -48,8 +48,8 @@ Data requests answer 204 when nothing matches and 413 when the response would ex
 |---|---|
 | `GET /v1/viewer/products` | The products the caller may read, each with an `id`, its steps, extents and recorded spans, and the viewer's limits. |
 | `GET /v1/viewer/tile?product=<id>` | One image of a product: `<x>_min`/`<x>_max` and `<y>_min`/`<y>_max` bound it, `width` and `height` size it, `stat` is `max`, `mean` or `absmax`. Little-endian float32 rows, the lowest y first, NaN where there is no data (204 if none, 413 over `max_tile_bytes`). |
-| `GET /v1/viewer/map` | The fibre's layout from the inventory beside the data: the coordinate `frame`, and each optical path the caller may see a whole acquisition of, with its position, measured columns, labels and coupling along optical distance, its notes, and the recordings (acquisition keys) on it. Also the names of the background `layers` and the `basemap`, if configured. |
-| `GET /v1/viewer/map/layer/{name}` | One background layer, as GeoJSON. |
+| `GET /v1/viewer/map` | The fibre's layout from the inventory in the data directory. `status` is `ok`, `none` (no inventory) or `unreadable` (the server's log says why); the answer is 200 in each case. `paths` lists each optical path the caller may see a whole acquisition of, and is empty when there is none: its position (`x`, `y` at the optical distances `d`, with `breaks` where a new geometry segment starts and that segment's `notes`), measured `columns`, labels and coupling (`tracks`), its description (`about`), and the `recordings` on it, each with its acquisition `key`, the `time` it spent on this path and its distance map (`from` recorded distance `to` optical distance). `frame` says how positions are drawn (`geographic` or `plane`) and is null without a path. Also the names of the background `layers` and the `basemap`, if configured. |
+| `GET /v1/viewer/map/layer/{name}` | One background layer, as GeoJSON; 404 if the layers directory has none of that name. |
 
 ## Annotations
 

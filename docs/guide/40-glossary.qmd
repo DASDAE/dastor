@@ -19,9 +19,13 @@ guide-section: Reference
 
 **Tile.** One image the viewer asks for: a product's samples in a window, reduced to the window's pixels with a statistic (`max`, `mean` or `absmax`).
 
-**Inventory.** DASCore's description of the fibre a spool was recorded on: where each optical path lies, its labels and coupling, and the acquisitions made on it. It sits beside the data directory as `.inventory`. A recording joins it by its `acquisition_key`.
+**Inventory.** DASCore's description of the fibre a spool was recorded on: where each optical path lies, its labels and coupling, and the acquisitions made on it. It sits in the data directory, as a `.inventory` directory or one `.inventory.yaml`, `.inventory.yml` or `.inventory.json` file. A recording joins it by its `acquisition_key`, which the inventory writes as `network.fiber_array.location.acquisition`.
+
+**Optical path.** In an inventory, one fibre from the interrogator to its end, with positions, labels and coupling along its optical distance. The viewer's map draws each as a line.
 
 **Layer.** A GeoJSON file drawn behind the fibre on the viewer's map: background only, never a description of the fibre.
+
+**Web map.** Map tiles the viewer's map can load from a site on the internet, if the config gives an address (`map.basemap_url`) and the user ticks its box.
 
 **Rule.** A line of the config granting the files whose rows match a pattern to `*` (everyone), `user:*` (every user), a user or a group. Access is per file: a file is visible when every row of it is granted.
 

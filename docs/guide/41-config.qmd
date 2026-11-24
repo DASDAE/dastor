@@ -29,6 +29,11 @@ limits:
 annotations:
   path: /data/das_annotations
   anonymous_owner: null
+map:
+  layers: null
+  basemap_url: null
+  basemap_url_dark: null
+  basemap_attribution: ""
 ```
 
 ## spool
@@ -97,16 +102,22 @@ This suits a lab's private network, where knowing who drew what is enough. Set i
 
 ## map
 
-Optional. The viewer's map draws the fibre from the DASCore inventory beside the data directory (`.inventory`); nothing here describes the fibre.
+Optional. The viewer's map draws the fibre from the DASCore inventory in the data directory (`spool.path`), wherever the index is kept: a `.inventory` directory, or one `.inventory.yaml`, `.inventory.yml` or `.inventory.json` file. Nothing here describes the fibre. A file is on the map when its `acquisition_key` is one the inventory holds; files with no key, or with a key the inventory lacks, are served as before and not drawn.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `layers` | none | A directory of GeoJSON files (longitude and latitude) drawn behind the fibre, such as geology or roads. Each file is a layer named for the file. A feature may state `fill`, `stroke` and `name` in its properties, and the file a top-level `attribution`, shown as its credit. Files over 30 MB and links out of the directory are not served. |
-| `basemap_url` | none | A web map's tile address with `{z}`, `{x}` and `{y}`. With it the page offers a web map, off until the user ticks it; this is the one case in which the page loads anything from the internet, and the tile site then sees which places are looked at. |
-| `basemap_url_dark` | none | The same, for the dark theme. |
-| `basemap_attribution` | none | The credit the tiles' terms ask for, shown on the map. |
+| `layers` | none | A directory of background layers drawn behind the fibre, such as geology or roads. Each `<name>.geojson` file in it is a layer; see below. |
+| `basemap_url` | none | A web map's tile address, starting `https://` or `http://`, with `{z}`, `{x}` and `{y}` (and `{s}`, if the site has `a`, `b` and `c` hosts). With it the page offers a web map; see below. |
+| `basemap_url_dark` | none | The same, for the dark theme; it needs `basemap_url`. |
+| `basemap_attribution` | empty | The credit the tiles' terms ask for, shown on the map. |
 
-The inventory is read when the spool is indexed, so a change to it shows after the next refresh.
+A layers directory which does not exist, or a tile address the page could not use, is refused at start.
+
+The inventory is read again whenever one of its files changes, and the layers directory is listed on every request, so an edit shows the next time the page is loaded.
+
+**Layers.** A layer is a GeoJSON file named `<name>.geojson`, lying in the directory itself, with coordinates in longitude and latitude (WGS 84). Polygons and lines are drawn; points are not. A feature may state `fill` and `stroke` colours and a `name` in its properties; a polygon's name is shown when the pointer is over it. The file may state a top-level `attribution`, shown as its credit. Hidden files, files over 30 MB and links to anything but a GeoJSON file in the directory are not layers. Layers are not data: everyone who can open the viewer can read them, whatever the rules say. They are drawn only for an inventory in longitude and latitude.
+
+**The web map.** This is the one case in which the page loads anything from the internet. The config only offers it: each user turns it on for themselves by ticking its box, and the browser remembers the tick until it is cleared. While it is on, the tile site sees that browser's address and which places and zooms are looked at; it is not told the address of the dastor server.
 
 ## annotations
 
